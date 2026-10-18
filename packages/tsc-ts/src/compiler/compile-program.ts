@@ -198,9 +198,14 @@ export class ProgramEmitter {
     this.program = checked.program;
   }
 
-  private getHost(): ProgramEmitHost {
+  /**
+   * The emit host, whose resolver resolves declarations where the options emit them or keep build info,
+   * or once `declarations` asks for it: a watch without build info computes the shape signatures of its
+   * rebuilds from forced declaration emit (`forcedDeclaration`).
+   */
+  private getHost(declarations: boolean): ProgramEmitHost {
     let host = this.host;
-    if (host === undefined) {
+    if (host === undefined || (declarations && !(host.resolver instanceof CheckerDeclarationEmitResolver))) {
       const program = this.program;
       const options = program.options;
       const files = program.getSourceFiles();
@@ -214,7 +219,7 @@ export class ProgramEmitter {
       const emitResolver = new CheckerEmitResolver(options, references, this.checked.checker);
       // Declaration emit is also needed for the shape signatures of incremental builds.
       let resolver: EmitResolver = emitResolver;
-      if (resolvesDeclarations(options)) {
+      if (declarations || resolvesDeclarations(options)) {
         const syntactic = new SyntacticDeclarationEmitResolver(
           options,
           files,
@@ -241,7 +246,7 @@ export class ProgramEmitter {
       result.emitSkipped = options.noEmit === true && emitOnly !== EmitOnly.ForcedDts;
       return result;
     }
-    const host = this.getHost();
+    const host = this.getHost(emitOnly === EmitOnly.ForcedDts);
     host.writer = writer;
     const result = emitFiles(host, files, emitOnly);
     host.writer = undefined;
