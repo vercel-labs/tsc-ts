@@ -24,6 +24,68 @@ const nestedKeyOf =
   '  ? `${K}` | (T[K] extends object ? `${K}.${NestedKeyOf<T[K]>}` : never)\n' +
   '  : never;\n';
 
+// Vue's directive types: whether a.ts gets TS2345 depends on whether its checker checked app.ts
+// before it. app.ts relates the directive types to generic type parameters first, and their
+// variances, which a checker caches, come out differently. app.ts and a.ts are four files apart, so
+// they share a checker with four checkers and not with three.
+const checkerHistory = {
+  'directives.ts':
+    'export interface DirectiveBinding<Value = any, Modifiers extends string = string> {\n' +
+    '  modifiers: Partial<Record<Modifiers, boolean>>;\n' +
+    '  dir: ObjectDirective<Value, Modifiers>;\n' +
+    '}\n' +
+    'export type DirectiveHook<Value = any, Modifiers extends string = string> = (\n' +
+    '  binding: DirectiveBinding<Value, Modifiers>,\n' +
+    ') => void;\n' +
+    'export type SSRDirectiveHook<Value = any, Modifiers extends string = string> = (\n' +
+    '  binding: DirectiveBinding<Value, Modifiers>,\n' +
+    ') => Record<string, unknown> | undefined;\n' +
+    'export interface ObjectDirective<Value = any, Modifiers extends string = string> {\n' +
+    '  __mod?: Modifiers;\n' +
+    '  getSSRProps?: SSRDirectiveHook<Value, Modifiers>;\n' +
+    '}\n' +
+    'export type FunctionDirective<V = any, Modifiers extends string = string> = DirectiveHook<V, Modifiers>;\n' +
+    'export type Directive<Value = any, Modifiers extends string = string> =\n' +
+    '  | ObjectDirective<Value, Modifiers>\n' +
+    '  | FunctionDirective<Value, Modifiers>;\n',
+  'app.ts':
+    'import type { Directive } from "./directives";\n' +
+    'export interface App {\n' +
+    '  directive<Value = any, Modifiers extends string = string>(\n' +
+    '    name: string,\n' +
+    '  ): Directive<Value, Modifiers> | undefined;\n' +
+    '  directive<Value = any, Modifiers extends string = string>(\n' +
+    '    name: string,\n' +
+    '    directive: Directive<Value, Modifiers>,\n' +
+    '  ): this;\n' +
+    '}\n' +
+    'export const app: App = {\n' +
+    '  directive(name: string, directive?: Directive) {\n' +
+    '    if (!directive) return undefined as any;\n' +
+    '    return app;\n' +
+    '  },\n' +
+    '};\n',
+  'b.ts': 'export const b = 1;\n',
+  'c.ts': 'export const c = 1;\n',
+  'd.ts': 'export const d = 1;\n',
+  'a.ts':
+    'import type { ObjectDirective } from "./directives";\n' +
+    'export const text: ObjectDirective<any, "trim" | "number" | "lazy"> = {};\n' +
+    'export const select: ObjectDirective<any, "number"> = {};\n' +
+    'function resolve(tag: string) {\n' +
+    '  return tag === "SELECT" ? select : text;\n' +
+    '}\n' +
+    'export const dynamic: ObjectDirective = {};\n' +
+    'dynamic.getSSRProps = (binding) => {\n' +
+    '  const model = resolve("X");\n' +
+    '  if (model.getSSRProps) return model.getSSRProps(binding);\n' +
+    '};\n',
+  'tsconfig.json': JSON.stringify({
+    compilerOptions: base,
+    files: ['directives.ts', 'app.ts', 'b.ts', 'c.ts', 'd.ts', 'a.ts'],
+  }),
+};
+
 /** Projects as `[name, files, args]`; files without a tsconfig.json get one with `base` options. */
 const projects = [
   [
@@ -704,6 +766,8 @@ const projects = [
       }),
     },
   ],
+  ['variances a checker computed for its earlier files, on four checkers', checkerHistory, ['--checkers', '4']],
+  ['variances a checker computed for its earlier files, on three checkers', checkerHistory, ['--checkers', '3']],
   [
     'unannotated this parameters',
     {
@@ -1374,3 +1438,20 @@ test('projects reduced from real-world code match tsgo', { skip, timeout: 300_00
   );
   assert.deepEqual(failures, []);
 });
+
+test(
+  'the same number of checkers gives the same output on every run, as in tsgo',
+  { skip, timeout: 300_000 },
+  async () => {
+    const args = ['--checkers', '4'];
+    const [expected, ...runs] = await Promise.all([
+      run([tsgo], checkerHistory, args),
+      ...Array.from({ length: 5 }, () => run(tscTs, checkerHistory, args)),
+    ]);
+    assert.match(expected.stdout, /a\.ts\(\d+,\d+\): error TS2345/);
+    for (const actual of runs) {
+      assert.equal(actual.stdout, expected.stdout);
+      assert.equal(actual.status, expected.status);
+    }
+  },
+);

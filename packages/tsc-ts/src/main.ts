@@ -57,7 +57,7 @@ else {
  */
 function startThreads(): void {
   parallelCheck.writer = outputWriterOfThread(defaultLibraryPath);
-  parallelCheck.spawn = (program, index, counter, order, nodeIds, symbolIds, reserved, emits, emitKinds, checking) =>
+  parallelCheck.spawn = (program, index, counter, order, nodeIds, symbolIds, emits, emitKinds, checking) =>
     new Worker(new URL(import.meta.url), {
       workerData: {
         kind: 'check',
@@ -68,7 +68,6 @@ function startThreads(): void {
         order,
         nodeIds,
         symbolIds,
-        reserved,
         emits,
         emitKinds,
         checking,
@@ -124,7 +123,6 @@ function runCheckerThread(): void {
     order: number[];
     nodeIds: number;
     symbolIds: number;
-    reserved: number[];
     emits: boolean;
     emitKinds: number[] | undefined;
     checking: boolean;
@@ -153,7 +151,6 @@ function runCheckerThread(): void {
           startedAt,
           false,
           recycleFiles,
-          job.reserved,
           job.emits,
           job.emitKinds,
           job.checking,
