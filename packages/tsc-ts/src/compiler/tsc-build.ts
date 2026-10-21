@@ -35,6 +35,7 @@ import { getAreDeclarationMapsEnabled, getEmitDeclarations, isIncremental } from
 import { getOutputDeclarationFileName, getOutputJSFileName, getSourceMapFilePath } from './output-paths.js';
 import {
   combinePaths,
+  ensureTrailingDirectorySeparator,
   fileExtensionIs,
   getDirectoryPath,
   getNormalizedAbsolutePath,
@@ -179,6 +180,21 @@ class BuildTask {
   configTime = 0;
 
   constructor(readonly config: string) {}
+}
+
+/**
+ * The root project's files, loaded ahead on parse threads while its last reference is checked by
+ * checker threads (`parseAhead`). `ready` once every prepared file is available; `waiting` is the
+ * root project's program build, when it starts before that.
+ */
+class AheadParse {
+  ready = false;
+  waiting: (() => void) | undefined = undefined;
+
+  constructor(
+    readonly task: BuildTask,
+    readonly config: ParsedCommandLine,
+  ) {}
 }
 
 /** The build info of a task, read once. */
@@ -431,6 +447,7 @@ export class Orchestrator {
   private readonly fs: CachedFileSystem;
   private readonly configParser: ConfigParser;
   private readonly mTimes = new Map<string, number | undefined>();
+  private ahead: AheadParse | undefined = undefined;
   private readonly status: StatusReporter;
   private readonly reporter: DiagnosticReporter;
   private readonly errorSummary: ErrorSummaryReporter;
@@ -697,7 +714,10 @@ export class Orchestrator {
     // Each project loads its own files, with or without parse threads: the files prepared for the
     // previous project (loaded with its options) go now, not before its incremental program took their
     // versions (programToSnapshot).
-    clearPreparedFiles();
+    // Files the root project loaded ahead (`parseAhead`) are its prepared files.
+    const ahead = this.ahead !== undefined && this.ahead.task === task ? this.ahead : undefined;
+    this.ahead = undefined;
+    if (ahead === undefined) clearPreparedFiles();
     const times = new CompileTimes();
     times.configTime = task.configTime;
     const readStart = performance.now();
@@ -717,7 +737,7 @@ export class Orchestrator {
     const parseStart = performance.now();
     // A program checked by threads is shared with them and can't change after; the project's config
     // here, whose output paths are computed later, gets a copy of its own.
-    const config = mayUseThreads ? copyCommandLine(resolved) : resolved;
+    const config = ahead !== undefined ? ahead.config : mayUseThreads ? copyCommandLine(resolved) : resolved;
     const host = new BuildCompilerHost(sys, this.fs, this.locale);
     const configOptions = config.options;
     const checkers = threads ? checkerThreads(configOptions.checkers, configOptions.singleThreaded) : 1;
@@ -728,17 +748,7 @@ export class Orchestrator {
       // program's FileLoader takes the files they prepared and the resolutions found loading them.
       // Declaration files that earlier projects of the build parsed come from the build's cache,
       // and parse threads don't load them again.
-      const libraryDirectory = getNormalizedAbsolutePath(sys.defaultLibraryPath, sys.currentDirectory);
-      const session = new ParseSession(
-        parseThreads(checkers),
-        configOptions,
-        sys.currentDirectory,
-        task.config,
-        config.fileNames.length > 0,
-        (kind, name) =>
-          buildSourceFileNames.has(kind === LoadKind.Library ? combinePaths(libraryDirectory, name) : name),
-      );
-      session.start(config.fileNames, () => {
+      const build = (): void => {
         // The program takes the resolutions the threads found, as `tsc -p` does, and is loaded
         // again resolving every file itself only where their `package.json` lookups may miss some
         // of its own (`hasAllPackageJsonLookups`), which the build info lists.
@@ -750,10 +760,80 @@ export class Orchestrator {
         }
         reportPreparedFiles(program.getSourceFiles().map((f) => f.fileName));
         if (!this.checkAndEmit(task, program, parseStart, times, oldSnapshot, mayUseThreads, then)) then();
-      });
+      };
+      if (ahead === undefined) this.parseSession(task, config, checkers, undefined).start(config.fileNames, build);
+      else if (ahead.ready) build();
+      else ahead.waiting = build;
       return true;
     }
     return this.checkAndEmit(task, new Program(config, host), parseStart, times, oldSnapshot, mayUseThreads, then);
+  }
+
+  /**
+   * Starts parse threads that load `config`'s files ahead of the program of `task`, without the files
+   * that earlier projects of the build parsed (`buildSourceFileNames`) and those `skip` names.
+   */
+  private parseSession(
+    task: BuildTask,
+    config: ParsedCommandLine,
+    checkers: number,
+    skip: ((name: string) => boolean) | undefined,
+  ): ParseSession {
+    const sys = this.sys;
+    const libraryDirectory = getNormalizedAbsolutePath(sys.defaultLibraryPath, sys.currentDirectory);
+    return new ParseSession(
+      parseThreads(checkers),
+      config.options,
+      sys.currentDirectory,
+      task.config,
+      config.fileNames.length > 0,
+      (kind, name) =>
+        kind === LoadKind.Library
+          ? buildSourceFileNames.has(combinePaths(libraryDirectory, name))
+          : buildSourceFileNames.has(name) || (skip !== undefined && skip(name)),
+    );
+  }
+
+  /**
+   * While checker threads check `task`, the last project before the build's root project, loads the
+   * root project's files ahead on parse threads, as its program build would right after: their CPUs
+   * are otherwise idle once the threads have only a few large files left. Only for a root project
+   * without build info, which is built whatever its references emit, and without the files in the
+   * directories of the projects it builds on: what those projects write (their declaration outputs,
+   * which the root project's program takes for their sources) is read once they are built. The
+   * program checks every prepared file it takes as it does for any project (`hasAllPackageJsonLookups`).
+   */
+  private parseAhead(task: BuildTask): void {
+    if (this.watching || this.dry || this.command.buildOptions.clean === true || this.ahead !== undefined) return;
+    const order = this.order;
+    if (order.length < 2 || this.toPath(order[order.length - 2]!) !== this.toPath(task.config)) return;
+    const root = this.getTask(this.toPath(order[order.length - 1]!));
+    const resolved = root.resolved;
+    if (
+      resolved === undefined ||
+      resolved.fileNames.length === 0 ||
+      resolved.options.singleThreaded === true ||
+      parallelParse.spawn === undefined
+    )
+      return;
+    if (!this.force && this.loadOrStoreBuildInfo(root, resolved.buildInfoFileName()).buildInfo !== undefined) return;
+    const upstream: string[] = [];
+    for (let i = 0; i < order.length - 1; i++)
+      upstream.push(ensureTrailingDirectorySeparator(this.toPath(getDirectoryPath(order[i]!))));
+    const config = copyCommandLine(resolved);
+    const ahead = new AheadParse(root, config);
+    this.ahead = ahead;
+    clearPreparedFiles();
+    const checkers = checkerThreads(config.options.checkers, config.options.singleThreaded);
+    this.parseSession(root, config, checkers, (name) => {
+      const path = this.toPath(name);
+      return upstream.some((directory) => path.startsWith(directory));
+    }).start(config.fileNames, () => {
+      ahead.ready = true;
+      const waiting = ahead.waiting;
+      ahead.waiting = undefined;
+      if (waiting !== undefined) waiting();
+    });
   }
 
   /**
@@ -790,6 +870,7 @@ export class Orchestrator {
         this.emitAndReport(task, checked, times, oldSnapshot, checkTime);
         then();
       });
+      this.parseAhead(task);
       return true;
     }
     this.emitAndReport(task, checked, times, oldSnapshot, undefined);
