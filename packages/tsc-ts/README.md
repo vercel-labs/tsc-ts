@@ -67,7 +67,7 @@ const checker = program.getTypeChecker();
 for (const file of program.getSourceFiles()) {
   if (program.isSourceFileDefaultLibrary(file)) continue;
   walkPreorder(file, (node) => {
-    if (node.kind === SyntaxKind.Identifier) console.log(checker.typeToString(checker.getTypeAtLocation(node)!));
+    if (node.kind === SyntaxKind.Identifier) console.log(checker.typeToString(checker.getTypeAtLocation(node)));
   });
 }
 program.dispose();
