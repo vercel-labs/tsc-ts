@@ -4,6 +4,16 @@
 
 <!-- release:start -->
 
+## 0.0.8
+
+### Highlights
+
+- **Faster checking:** tsc-ts is now built with scriptc 0.4.2 and a profile collected with it, and the checker reads the declarations of single-declaration symbols by index in its hot callers. Compared with 0.0.7 on our project set, checking is 9.2 to 11.1% faster with `--checkers 1` and 6.8 to 15.3% faster with 16 checkers. Output is the same.
+- **Less memory:** with scriptc 0.4.2, and with parsed lists collected in scratch arrays and kept at their exact length, peak RSS is 18 to 22% lower with `--checkers 1` and 15 to 22% lower with 16 checkers.
+- **Windows:** `tsc-ts --api --pipe \\.\pipe\<name>` serves the API over a named pipe it creates, as `tsc --api --pipe` does, so scriptc under Node.js can check with tsc-ts on Windows. Only the user the server runs as can open the pipe.
+
+<!-- release:end -->
+
 ## 0.0.7
 
 ### Highlights
@@ -11,8 +21,6 @@
 - **Faster checking:** each import resolves its module specifier once per checker, long target property lists are related through the source's property names, inference contexts are freed by reference counting, and rarely set fields of calls and property assignments live in subclasses. Compared with 0.0.6 on our project set, checking is 0.6 to 6.2% faster with `--checkers 1` and 1.3 to 5.9% faster with 16 checkers, emit is up to 7.7% faster, and `-b` builds are 5.1 to 6.6% faster. Output is the same.
 - **Less memory:** empty lists of source files and parsed lists share one array, and long property lists build their name index only when it pays off. Peak RSS is up to 3.3% lower, and no project uses more.
 - **API:** `getContextualTypes` and `getResolvedSignatures` answer a batch of locations in one request.
-
-<!-- release:end -->
 
 ## 0.0.6
 

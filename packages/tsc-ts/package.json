@@ -1,6 +1,6 @@
 {
   "name": "tsc-ts",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "private": true,
   "description": "The TypeScript 7 compiler, ported to TypeScript and compiled to a native executable.",
   "license": "Apache-2.0",
