@@ -7,9 +7,10 @@
  * files of the program (`SyntacticEmitResolver`, `ReferenceResolver`). So emit threads create no
  * checker. They receive the published program, emit with a `JavaScriptEmitter` the files the main
  * thread hands out through a shared counter, write the outputs and send back their emit results.
- * The main thread checks meanwhile, and then emits the declarations of every file and the files
- * whose emit asks the checker (`emitsOnThreads`). Which thread emits a file doesn't change its
- * output.
+ * The main thread checks meanwhile. Then it records how its checker serializes the types of the
+ * decorator metadata of the files that have it (`recordMetadataKinds`), which a second wave of emit
+ * threads emits with those answers as plain data (`startMetadataEmit`), and emits the declarations
+ * of every file while they do. Which thread emits a file doesn't change its output.
  */
 import type { Worker } from 'node:worker_threads';
 import { availableParallelism } from 'node:os';
@@ -27,14 +28,16 @@ import { SubtreeFacts, SyntaxFacts } from './transformers/syntax-facts.js';
 
 /**
  * Starts emit thread `index` (main.ts owns the worker entry point) on the shared, published
- * `program`: it emits the files of `files` at the positions it takes from `counter`; ids continue
- * above `nodeIds` and `symbolIds`.
+ * `program`: it emits the files of `files` at the positions it takes from `counter`, with the decorator
+ * metadata `kinds` the main thread recorded (`startMetadataEmit`); ids continue above `nodeIds` and
+ * `symbolIds`.
  */
 export type EmitSpawn = (
   program: Program,
   index: number,
   counter: SharedArrayBuffer,
   files: number[],
+  kinds: number[],
   nodeIds: number,
   symbolIds: number,
 ) => Worker;
@@ -75,42 +78,80 @@ export function emitThreads(program: Program, singleThreaded: boolean | undefine
 }
 
 /**
- * Whether the JavaScript of `file` can be emitted on an emit thread: decorator metadata
- * (`emitDecoratorMetadata`) asks the checker how the types of decorated declarations serialize,
- * so a file with decorators is emitted with the checker on the main thread.
+ * Whether the JavaScript of `file` needs decorator metadata kinds from the checker (`emitDecoratorMetadata`
+ * asks it how the types of decorated declarations serialize): a file with decorators is emitted by the second
+ * wave of emit threads, with the kinds the main thread's checker recorded after checking (`startMetadataEmit`).
  */
-function emitsOnThreads(file: SourceFile, program: Program): boolean {
-  const options = program.options;
-  if (!sourceFileMayBeEmitted(file, options)) return false;
-  return options.emitDecoratorMetadata !== true || !new SyntaxFacts().has(file, SubtreeFacts.ContainsDecorators);
+function needsMetadataKinds(file: SourceFile, program: Program): boolean {
+  return program.options.emitDecoratorMetadata === true && new SyntaxFacts().has(file, SubtreeFacts.ContainsDecorators);
 }
 
 /**
- * Emits the JavaScript of the files of `checked` that `emitsOnThreads` allows on `threads` threads
- * and calls `done` once they are emitted; the program must be shared (`shareWithCheckers`). The emit
- * results go to `checked.emittedInParallel`, which `PlainProgram.emit` completes on this thread.
- * Returns at once: the results arrive on this thread's event loop.
+ * Emits the JavaScript of the files of `checked` on `threads` threads and calls `done` once they are
+ * emitted; the program must be shared (`shareWithCheckers`). The emit results go to
+ * `checked.emittedInParallel`, which `PlainProgram.emit` completes on this thread. Returns at once, with the
+ * indexes of the files left for `startMetadataEmit`: the results arrive on this thread's event loop.
  */
-export function startParallelEmit(checked: CheckedProgram, threads: number, done: () => void): void {
+export function startParallelEmit(checked: CheckedProgram, threads: number, done: () => void): number[] {
   const program = checked.program;
+  const options = program.options;
   const files = program.getSourceFiles();
   const order: number[] = [];
-  for (let i = 0; i < files.length; i++) if (emitsOnThreads(files[i]!, program)) order.push(i);
-  // The longest files first, so that the threads finish together.
-  order.sort((a, b) => files[b]!.end - files[a]!.end || a - b);
-  publish(order);
+  const metadata: number[] = [];
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
+    if (!sourceFileMayBeEmitted(file, options)) continue;
+    if (needsMetadataKinds(file, program)) metadata.push(i);
+    else order.push(i);
+  }
   const perFileEmits: (EmitResult | undefined)[] = [];
   for (let i = 0; i < files.length; i++) perFileEmits.push(undefined);
   checked.emittedInParallel = perFileEmits;
   checked.javaScriptEmittedOnThreads = true;
+  spawnEmitThreads(checked, threads, order, [], done);
+  return metadata;
+}
+
+/**
+ * Emits the JavaScript of `files` (indexes, from `startParallelEmit`), whose decorator metadata asks the
+ * checker, on `threads` threads with the kinds that this thread's checker gave (`recordMetadataKinds`), and
+ * calls `done` once they are emitted. Called once this thread has checked the program, so that asking for the
+ * kinds doesn't change what checking finds.
+ */
+export function startMetadataEmit(
+  checked: CheckedProgram,
+  threads: number,
+  files: number[],
+  kinds: number[],
+  done: () => void,
+): void {
+  spawnEmitThreads(checked, Math.min(threads, files.length), files, kinds, done);
+}
+
+function spawnEmitThreads(
+  checked: CheckedProgram,
+  threads: number,
+  files: number[],
+  kinds: number[],
+  done: () => void,
+): void {
+  const program = checked.program;
+  const sourceFiles = program.getSourceFiles();
+  const perFileEmits = checked.emittedInParallel!;
+  const order = files.slice();
+  // The longest files first, so that the threads finish together.
+  order.sort((a, b) => sourceFiles[b]!.end - sourceFiles[a]!.end || a - b);
+  publish(order);
+  publish(kinds);
   mark(`planned ${order.length} files to emit`);
   const trace = process.env.TSC_TS_CHECKERS_TRACE !== undefined;
   const start = performance.now();
   const counter = new SharedArrayBuffer(4);
   const diagnosticFiles = new Map<string, DiagnosticFile>();
   let remaining = threads;
+  if (remaining === 0) done();
   for (let i = 0; i < threads; i++) {
-    const worker = parallelEmit.spawn!(program, i, counter, order, lastNodeIdValue(), lastSymbolIdValue());
+    const worker = parallelEmit.spawn!(program, i, counter, order, kinds, lastNodeIdValue(), lastSymbolIdValue());
     let ended = false;
     const end = (): void => {
       if (ended) return;
@@ -126,7 +167,7 @@ export function startParallelEmit(checked: CheckedProgram, threads: number, done
       for (let k = 0; k < result.files.length; k++) perFileEmits[result.files[k]!] = result.emits[k]!;
       if (trace)
         process.stderr.write(
-          `emit threads: thread ${i} emitted ${result.files.length} files in ${result.checkTime.toFixed(1)}ms, done at ${(performance.now() - start).toFixed(1)}ms\n`,
+          `emit threads: thread ${i} emitted ${result.files.length} files${kinds.length > 0 ? ` with metadata kinds (${result.stats[0] ?? 0} missed a kind)` : ''} in ${result.checkTime.toFixed(1)}ms, done at ${(performance.now() - start).toFixed(1)}ms\n`,
         );
       end();
     });
@@ -141,32 +182,42 @@ export function startParallelEmit(checked: CheckedProgram, threads: number, done
 
 /**
  * On emit thread `index`: emits the JavaScript of the files of `order` at the positions it takes
- * from `counter` until none are left, writing it with `writer`.
+ * from `counter` until none are left, writing it with `writer`; `kinds` are the decorator metadata kinds
+ * the main thread recorded for them (`recordMetadataKinds`), if any. `stats` has the number of files that
+ * missed a kind.
  */
 export function emitFromQueue(
   program: Program,
   index: number,
   counter: Int32Array,
   order: readonly number[],
+  kinds: readonly number[],
   writer: OutputWriter,
 ): CheckerResult {
   const start = performance.now();
   const files = program.getSourceFiles();
-  const emitter = new JavaScriptEmitter(program);
+  const emitter = new JavaScriptEmitter(program, kinds);
   mark('emitter ready');
   const done: number[] = [];
   const diagnostics: Diagnostic[][] = [];
   const emits: EmitResult[] = [];
+  let missed = 0;
   for (;;) {
     const position = Atomics.add(counter, 0, 1);
     if (position >= order.length) break;
     const i = order[position]!;
+    const result = emitter.emit(files[i]!, writer);
+    // A file whose emit missed a kind isn't sent back: the main thread emits it again, with its checker.
+    if (result === undefined) {
+      missed++;
+      continue;
+    }
     done.push(i);
     diagnostics.push([]);
-    emits.push(emitter.emit(files[i]!, writer));
+    emits.push(result);
   }
   mark(`emitted ${done.length} files`);
-  return new CheckerResult(index, done, diagnostics, [], [], performance.now() - start, [], false, [], emits);
+  return new CheckerResult(index, done, diagnostics, [], [], performance.now() - start, [missed], false, [], emits);
 }
 
 /** What an emit thread posts back: `result`, packed for `postMessage` where results are packed. */

@@ -13,6 +13,10 @@ import { CheckerDeclarationEmitResolver, CheckerEmitResolver } from './checker-e
 import { getEmitModuleFormatOfFile } from './program-utilities.js';
 import { DeclarationGlobals, SyntacticDeclarationEmitResolver } from './transformers/declarations-syntactic.js';
 import { mark } from './timeline.js';
+import { DecoratorMetadata } from './transformers/decorator-metadata.js';
+import { SyntaxFacts } from './transformers/syntax-facts.js';
+import type { TypeReferenceSerializationKind } from './transformers/type-serialization.js';
+import { EmitContext } from './printer/emit-context.js';
 import { type EmitResolver, SyntacticEmitResolver } from './transformers/emit-resolver.js';
 import { ModuleFormatHost } from './transformers/module.js';
 import { type MergedGlobals, ModuleLookup, ReferenceResolver } from './transformers/reference-resolver.js';
@@ -196,12 +200,14 @@ export class EmitIndexes {
 /**
  * The JavaScript emit of a program's files without a checker, for emit threads (parallel-emit.ts).
  * JavaScript emit asks the checker only how decorator metadata serializes a type
- * (`CheckerEmitResolver`); files that need that are emitted by a `ProgramEmitter`.
+ * (`CheckerEmitResolver`): with `kinds`, the answers the main thread's checker gave
+ * (`recordMetadataKinds`), else files with decorator metadata are emitted by a `ProgramEmitter`.
  */
 export class JavaScriptEmitter {
   private readonly host: ProgramEmitHost;
+  private readonly recorded: RecordedKindsEmitResolver | undefined;
 
-  constructor(program: Program) {
+  constructor(program: Program, kinds: readonly number[] = []) {
     const options = program.options;
     const indexes = program.emitIndexes;
     const references = new ReferenceResolver(
@@ -210,15 +216,78 @@ export class JavaScriptEmitter {
       new ProgramModules(program),
       indexes !== undefined ? indexes.globals : undefined,
     );
-    this.host = new ProgramEmitHost(program, new SyntacticEmitResolver(options, references));
+    this.recorded = kinds.length > 0 ? new RecordedKindsEmitResolver(options, references, kinds) : undefined;
+    this.host = new ProgramEmitHost(program, this.recorded ?? new SyntacticEmitResolver(options, references));
   }
 
-  emit(file: SourceFile, writer: OutputWriter): EmitResult {
+  /**
+   * Emits `file`, or returns undefined if its decorator metadata asked for a kind that wasn't recorded: what
+   * was written is then not the file's emit, and it must be emitted with the checker.
+   */
+  emit(file: SourceFile, writer: OutputWriter): EmitResult | undefined {
     const host = this.host;
+    const recorded = this.recorded;
+    if (recorded !== undefined) recorded.missed = false;
     host.writer = writer;
     const result = emitFiles(host, [file], EmitOnly.Js);
     host.writer = undefined;
-    return result;
+    return recorded !== undefined && recorded.missed ? undefined : result;
+  }
+}
+
+/**
+ * The serialization kinds of decorator metadata that the checker of `checked` gives the type references of
+ * `files`, in the order JavaScript emit asks for them: the type name's node id, the location's node id (-1 for
+ * none) and the kind, for each. Only the decorator metadata transform runs, as the first transform of emit.
+ */
+export function recordMetadataKinds(checked: CheckedProgram, files: readonly SourceFile[]): number[] {
+  const program = checked.program;
+  const options = program.options;
+  const indexes = program.emitIndexes;
+  const references = new ReferenceResolver(
+    options,
+    program.getSourceFiles(),
+    new ProgramModules(program),
+    indexes !== undefined ? indexes.globals : undefined,
+  );
+  const resolver = new RecordingEmitResolver(options, references, checked.checker);
+  for (const file of files)
+    new DecoratorMetadata(new EmitContext(), options, resolver, new SyntaxFacts()).transformSourceFile(file);
+  return resolver.kinds;
+}
+
+/** A `CheckerEmitResolver` that records the serialization kinds it gives (`recordMetadataKinds`). */
+class RecordingEmitResolver extends CheckerEmitResolver {
+  readonly kinds: number[] = [];
+
+  getTypeReferenceSerializationKind(typeName: Node, location: Node | undefined): TypeReferenceSerializationKind {
+    const kind = super.getTypeReferenceSerializationKind(typeName, location);
+    this.kinds.push(typeName.id, location === undefined ? -1 : location.id, kind);
+    return kind;
+  }
+}
+
+/** Answers serialization kinds from those recorded on the main thread; `missed` once one wasn't. */
+class RecordedKindsEmitResolver extends SyntacticEmitResolver {
+  /** The kind and location of each type name, by the type name's node id. */
+  private readonly byName = new Map<number, number>();
+  missed = false;
+
+  constructor(
+    options: CompilerOptions,
+    referenceResolver: ReferenceResolver,
+    private readonly kinds: readonly number[],
+  ) {
+    super(options, referenceResolver);
+    for (let i = 0; i < kinds.length; i += 3) if (!this.byName.has(kinds[i]!)) this.byName.set(kinds[i]!, i);
+  }
+
+  getTypeReferenceSerializationKind(typeName: Node, location: Node | undefined): TypeReferenceSerializationKind {
+    const at = this.byName.get(typeName.id);
+    if (at !== undefined && this.kinds[at + 1] === (location === undefined ? -1 : location.id))
+      return this.kinds[at + 2]! as TypeReferenceSerializationKind;
+    this.missed = true;
+    return super.getTypeReferenceSerializationKind(typeName, location);
   }
 }
 
@@ -374,6 +443,18 @@ export class PlainProgram extends CompilerProgram {
     return result;
   }
 
+  /**
+   * Emits the declarations of every file while emit threads emit their JavaScript (`compileWithEmitThreads`):
+   * `emit` then takes their results instead of emitting them.
+   */
+  emitDeclarationsAhead(writer: OutputWriter): void {
+    const files = this.program.getSourceFiles();
+    const ahead: EmitResult[] = [];
+    for (const file of files) ahead.push(this.emitter.emit([file], EmitOnly.Dts, writer));
+    this.checked.declarationsEmittedAhead = ahead;
+    mark('declarations emitted');
+  }
+
   emit(writer: OutputWriter): EmitResult {
     const options = this.options;
     if (options.noEmit !== true) {
@@ -391,11 +472,15 @@ export class PlainProgram extends CompilerProgram {
         : combineEmitResults(
             files.map((file, i) => {
               const emitted = parallel[i];
-              if (emitted === undefined) return this.emitter.emit([file], EmitOnly.All, writer);
+              const ahead = this.checked.declarationsEmittedAhead;
+              if (emitted === undefined)
+                return ahead !== undefined
+                  ? combineEmitResults([this.emitter.emit([file], EmitOnly.Js, writer), ahead[i]!])
+                  : this.emitter.emit([file], EmitOnly.All, writer);
               const written = writeHeldOutputs(emitted, writer);
               // Emit threads emit JavaScript only; declarations need this thread's checker.
               if (!this.checked.javaScriptEmittedOnThreads || !getEmitDeclarations(options)) return written;
-              return combineEmitResults([written, this.emitter.emit([file], EmitOnly.Dts, writer)]);
+              return combineEmitResults([written, ahead?.[i] ?? this.emitter.emit([file], EmitOnly.Dts, writer)]);
             }),
           );
     if (options.noEmit === true) {
