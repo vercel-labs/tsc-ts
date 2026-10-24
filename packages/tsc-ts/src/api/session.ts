@@ -190,6 +190,21 @@ export class Session {
     }
   }
 
+  // Ends a client's session (`--listen`): drops its snapshots, projects, open files and timing, and forgets the file
+  // contents and real paths it read, so the next client sees what a new server would. Parsed files stay, and a later
+  // project reuses one whose text is unchanged.
+  reset(): void {
+    this.snapshots.clear();
+    this.latestSnapshot = 0;
+    this.nextSnapshotId = 1;
+    this.loaded.clear();
+    this.openProjects.clear();
+    this.openFiles.clear();
+    this.inferred = undefined;
+    this.files.reset();
+    this.resetServerTiming();
+  }
+
   // Handles a request whose payload is its JSON params, or for `echo`, any bytes.
   handle(method: string, payload: Uint8Array): Response {
     if (method === 'getServerTiming') return { ok: true, reply: JSON.stringify(this.serverTiming()) };

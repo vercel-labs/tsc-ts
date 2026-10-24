@@ -753,6 +753,13 @@ export class SessionFiles {
     this.deleted.clear();
   }
 
+  /** Forgets every file's contents, the deleted and linked paths, and the real paths, keeping the parsed files. */
+  reset(): void {
+    this.invalidateAll();
+    this.linkedPaths.clear();
+    this.realPaths.clear();
+  }
+
   /** The parsed file of `text`, reused from an earlier parse with the same inputs. */
   sourceFile(
     fileName: string,
