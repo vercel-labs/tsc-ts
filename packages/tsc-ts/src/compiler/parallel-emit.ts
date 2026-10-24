@@ -7,10 +7,12 @@
  * files of the program (`SyntacticEmitResolver`, `ReferenceResolver`). So emit threads create no
  * checker. They receive the published program, emit with a `JavaScriptEmitter` the files the main
  * thread hands out through a shared counter, write the outputs and send back their emit results.
- * The main thread checks meanwhile. Then it records how its checker serializes the types of the
- * decorator metadata of the files that have it (`recordMetadataKinds`), which a second wave of emit
- * threads emits with those answers as plain data (`startMetadataEmit`), and emits the declarations
- * of every file while they do. Which thread emits a file doesn't change its output.
+ * The main thread checks meanwhile, and so does the declaration thread, a checker thread that only
+ * emits declarations (`startDeclarationThread`): `--checkers` counts the checkers that check. Then the
+ * main thread records how its checker serializes the types of the decorator metadata of the files that
+ * have it (`recordMetadataKinds`), which a second wave of emit threads emits with those answers as plain
+ * data (`startMetadataEmit`). Which thread emits a file doesn't change its output, and the main
+ * thread's checker finds every diagnostic but those of declaration emit.
  */
 import type { Worker } from 'node:worker_threads';
 import { availableParallelism } from 'node:os';
@@ -18,8 +20,15 @@ import { publish } from '@scriptc/threads';
 import { lastNodeIdValue, type SourceFile } from './ast.js';
 import { JavaScriptEmitter, type OutputWriter } from './compile-program.js';
 import type { Diagnostic, DiagnosticFile } from './diagnostics.js';
-import { EmitResult, sourceFileMayBeEmitted } from './emitter.js';
-import { CheckerResult, packResult, packsResults, type PackedResult, unpackResult } from './parallel-check.js';
+import { EmitOnly, EmitResult, sourceFileMayBeEmitted } from './emitter.js';
+import {
+  CheckerResult,
+  packResult,
+  packsResults,
+  type PackedResult,
+  startParallelCheck,
+  unpackResult,
+} from './parallel-check.js';
 import type { CheckedProgram } from './program-checker.js';
 import type { Program } from './program.js';
 import { lastSymbolIdValue } from './symbol.js';
@@ -178,6 +187,46 @@ function spawnEmitThreads(
     });
   }
   mark('emit threads spawned');
+}
+
+/** The most checkers that a declaration thread makes faster (`declarationThreadPays`). */
+const maxDeclarationThreadCheckers = 8;
+
+/**
+ * Whether a declaration thread (`startDeclarationThread`) shortens a compile with `checkers` checkers: it
+ * takes the declaration emit off the checkers, but a checker that only emits declarations takes about as long
+ * as the whole check of VS Code or typeorm at 16 checkers. Measured with declarations on both: 6-16% faster
+ * from 1 to 8 checkers, about even at 12, and 32-38% slower at 16. It also needs a CPU of its own.
+ */
+export function declarationThreadPays(checkers: number): boolean {
+  return checkers <= maxDeclarationThreadCheckers && checkers < availableParallelism();
+}
+
+/**
+ * Starts the declaration thread: one checker thread that only emits, while the program is checked on this
+ * thread (`--checkers 1`) or on checker threads that emit only JavaScript, and calls `done` once it is done. It emits the declarations of every file of `checked`, and also the
+ * JavaScript of `metadata` (file indexes, from `startParallelEmit`), whose decorator metadata asks a checker. Its
+ * checker checks only what emit asks; it reports nothing but the emit results, which it writes and which the
+ * returned array receives by file index (undefined for a file it didn't emit, which `PlainProgram.emit` then
+ * emits here). Declaration files and decorator metadata are the same with any checker that emits them.
+ */
+export function startDeclarationThread(
+  checked: CheckedProgram,
+  metadata: readonly number[],
+  done: () => void,
+): (EmitResult | undefined)[] {
+  const program = checked.program;
+  const options = program.options;
+  const kinds: number[] = [];
+  const results: (EmitResult | undefined)[] = [];
+  for (const file of program.getSourceFiles()) {
+    kinds.push(sourceFileMayBeEmitted(file, options) ? EmitOnly.Dts : -1);
+    results.push(undefined);
+  }
+  for (const i of metadata) kinds[i] = EmitOnly.All;
+  startParallelCheck(checked, 1, () => done(), true, kinds, false, results);
+  mark('declaration thread spawned');
+  return results;
 }
 
 /**

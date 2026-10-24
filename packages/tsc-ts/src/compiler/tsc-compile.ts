@@ -14,7 +14,7 @@ import {
   recordMetadataKinds,
 } from './compile-program.js';
 import type { Diagnostic, Locale } from './diagnostics.js';
-import { EmitResult } from './emitter.js';
+import { EmitOnly, EmitResult } from './emitter.js';
 import { getEmitDeclarations } from './options.js';
 import {
   FileBuildInfoReader,
@@ -24,7 +24,13 @@ import {
   TimeStampHost,
 } from './incremental.js';
 import { checkerThreads, shareWithCheckers, startParallelCheck, traceSingleChecker } from './parallel-check.js';
-import { emitThreads, startMetadataEmit, startParallelEmit } from './parallel-emit.js';
+import {
+  declarationThreadPays,
+  emitThreads,
+  startDeclarationThread,
+  startMetadataEmit,
+  startParallelEmit,
+} from './parallel-emit.js';
 import { sharesPublishedGraphs } from '@scriptc/threads';
 import { getNormalizedAbsolutePath } from './path.js';
 import { sortAndDeduplicateDiagnostics } from './program.js';
@@ -163,9 +169,21 @@ export function compileWithEmitThreads(
   shareWithCheckers(checked);
   const compilerProgram = new PlainProgram(checked, times);
   let diagnostics: Diagnostic[] | undefined = undefined;
+  // The first wave of emit threads, and the declaration thread or the second wave.
   let emitting = 2;
+  let declarations: (EmitResult | undefined)[] | undefined = undefined;
   const report = (): void => {
     if (diagnostics === undefined || emitting > 0) return;
+    if (declarations !== undefined) {
+      // The declaration thread emitted all of each decorator metadata file: its result is the file's emit.
+      for (const i of metadata) {
+        const result = declarations[i];
+        if (result === undefined) continue;
+        checked.emittedInParallel![i] = result;
+        declarations[i] = new EmitResult();
+      }
+      checked.declarationsEmittedAhead = declarations;
+    }
     const result = reportEmitAndErrors(
       sys,
       compilerProgram,
@@ -183,19 +201,23 @@ export function compileWithEmitThreads(
     report();
   };
   const metadata = startParallelEmit(checked, threads, emitted);
+  // With declarations, the declaration thread also emits the files with decorator metadata.
+  if (getEmitDeclarations(options) && declarationThreadPays(1))
+    declarations = startDeclarationThread(checked, metadata, emitted);
   const found = getDiagnosticsOfProgram(compilerProgram, false);
   mark('diagnostics collected');
-  // Files with decorator metadata are emitted with the kinds this thread's checker gives, now that it checked.
-  if (metadata.length > 0) {
-    const files = program.getSourceFiles();
-    const kinds = recordMetadataKinds(
-      checked,
-      metadata.map((i) => files[i]!),
-    );
-    mark('metadata kinds recorded');
-    startMetadataEmit(checked, threads, metadata, kinds, emitted);
-  } else emitting--;
-  if (getEmitDeclarations(options)) compilerProgram.emitDeclarationsAhead(new SystemWriter(sys));
+  // Else they are emitted with the kinds this thread's checker gives, now that it checked.
+  if (declarations === undefined) {
+    if (metadata.length > 0) {
+      const files = program.getSourceFiles();
+      const kinds = recordMetadataKinds(
+        checked,
+        metadata.map((i) => files[i]!),
+      );
+      mark('metadata kinds recorded');
+      startMetadataEmit(checked, threads, metadata, kinds, emitted);
+    } else emitting--;
+  }
   diagnostics = found;
   report();
   return true;
@@ -255,6 +277,43 @@ export function compileInParallel(
   };
   const options = program.options;
   if (!checking && (options.noEmit === true || options.noEmitOnError === true)) return finish(0);
+  if (
+    sharesPublishedGraphs &&
+    checking &&
+    !work.incremental &&
+    getEmitDeclarations(options) &&
+    options.noEmit !== true &&
+    options.noEmitOnError !== true &&
+    options.composite !== true &&
+    (options.outFile ?? '') === '' &&
+    declarationThreadPays(threads)
+  ) {
+    // The checker threads emit JavaScript and the declaration thread declarations (parallel-emit.ts).
+    const kinds: number[] = [];
+    for (let i = 0; i < program.getSourceFiles().length; i++) kinds.push(EmitOnly.Js);
+    let pending = 2;
+    let checkTime = 0;
+    let declarations: (EmitResult | undefined)[] = [];
+    const joined = (): void => {
+      if (--pending > 0) return;
+      checked.javaScriptEmittedOnThreads = true;
+      checked.declarationsEmittedAhead = declarations;
+      finish(checkTime);
+    };
+    declarations = startDeclarationThread(checked, [], joined);
+    startParallelCheck(
+      checked,
+      threads,
+      (time) => {
+        checkTime = time;
+        joined();
+      },
+      true,
+      kinds,
+      checking,
+    );
+    return;
+  }
   startParallelCheck(checked, threads, finish, true, undefined, checking);
 }
 

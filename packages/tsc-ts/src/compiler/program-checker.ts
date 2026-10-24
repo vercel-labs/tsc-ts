@@ -278,8 +278,8 @@ export class CheckedProgram {
   emittedInParallel: (EmitResult | undefined)[] | undefined = undefined;
   /** Emit threads emitted only the JavaScript of `emittedInParallel`: declarations are emitted here. */
   javaScriptEmittedOnThreads = false;
-  /** The declaration emit of each file, done while emit threads emitted their JavaScript (`emitDeclarationsAhead`). */
-  declarationsEmittedAhead: EmitResult[] | undefined = undefined;
+  /** The declaration emit of each file on the declaration thread (parallel-emit.ts); undefined for one it didn't emit. */
+  declarationsEmittedAhead: (EmitResult | undefined)[] | undefined = undefined;
   /**
    * The global diagnostics of this thread's checker before it emitted files while checker threads
    * checked (`emitUncheckedFiles`), reported instead of its current ones.
