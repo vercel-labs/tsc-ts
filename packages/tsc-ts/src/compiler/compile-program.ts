@@ -497,9 +497,15 @@ export function handleNoEmitOnError(program: CompilerProgram): EmitResult | unde
 
 /**
  * Config and syntax errors; without syntax errors, program, global and semantic errors too, and
- * declaration errors under `noEmit` (or `withDeclarationDiagnostics`).
+ * declaration errors under `noEmit` (or `withDeclarationDiagnostics`). With `declarationsLater`, the
+ * declaration errors are left to `program.emit`, which reports them under `noEmit` (without
+ * `noEmitOnError`) whether or not other errors were found.
  */
-export function getDiagnosticsOfProgram(program: CompilerProgram, withDeclarationDiagnostics: boolean): Diagnostic[] {
+export function getDiagnosticsOfProgram(
+  program: CompilerProgram,
+  withDeclarationDiagnostics: boolean,
+  declarationsLater: boolean = false,
+): Diagnostic[] {
   const result: Diagnostic[] = [...program.getConfigFileParsingDiagnostics()];
   const configCount = result.length;
   for (const d of program.getSyntacticDiagnostics()) result.push(d);
@@ -521,6 +527,7 @@ export function getDiagnosticsOfProgram(program: CompilerProgram, withDeclaratio
     mark('semantic diagnostics');
   }
   if (
+    !declarationsLater &&
     (withDeclarationDiagnostics || options.noEmit === true) &&
     getEmitDeclarations(options) &&
     result.length === configCount

@@ -162,6 +162,38 @@ test('with a program error, emit on checker threads matches emit on one checker'
   }
 });
 
+// Under `noEmit`, a program with declarations reports the errors of declaration emit. At `--checkers 1` in native
+// builds, the declaration thread finds them while the main thread checks (`compileWithDeclarationThread`), and
+// with checker threads each checker finds those of the files it checks.
+test('under noEmit, declaration errors found on threads match those of one checker', { skip: tscTsMissing }, () => {
+  const config = JSON.parse(files['tsconfig.json']);
+  Object.assign(config.compilerOptions, { noEmit: true });
+  const cwd = tempDir('tsc-ts-parallel-noemit-declarations-');
+  for (const [path, content] of Object.entries({ ...files, 'tsconfig.json': JSON.stringify(config) })) {
+    mkdirSync(dirname(join(cwd, path)), { recursive: true });
+    writeFileSync(join(cwd, path), content);
+  }
+  const expected = run(cwd, ['--singleThreaded']);
+  assert.ok(expected.stdout.includes('TS4094'), 'a declaration error is reported');
+  assert.ok(expected.stdout.includes('TS2322'), 'a type error is reported');
+  assert.deepEqual(Object.keys(expected.outputs), []);
+  for (const checkers of ['1', '3']) {
+    const actual = run(cwd, ['--checkers', checkers]);
+    assert.equal(actual.stdout, expected.stdout, `stdout with --checkers ${checkers}`);
+    assert.equal(actual.status, expected.status, `status with --checkers ${checkers}`);
+    assert.deepEqual(actual.outputs, expected.outputs, `outputs with --checkers ${checkers}`);
+  }
+  const traced = spawnSync(tscTs[0], [...tscTs.slice(1), '-p', '.', '--pretty', 'false', '--checkers', '1'], {
+    cwd,
+    env: { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: bundledLibs, TSC_TS_CHECKERS_TRACE: '1' },
+    encoding: 'utf8',
+  });
+  assert.doesNotMatch(traced.stderr, /thread \d+ failed/);
+  // Under Node.js, which copies what it posts, there is no declaration thread.
+  if (/checkers: start/.test(traced.stderr))
+    assert.match(traced.stderr, /checkers: emit-only thread 0 found the declaration errors of \d+ files/);
+});
+
 // A union's constituents tie in compareTypes when they differ only in their mappers, as two
 // instantiations of one mapped type do, and are then ordered by type id, which follows the order in
 // which the emitting checker created them. With one checker, `defs.ts` is checked first and creates
