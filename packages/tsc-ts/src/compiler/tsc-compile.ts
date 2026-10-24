@@ -11,9 +11,11 @@ import {
   getDiagnosticsOfProgram,
   OutputWriter,
   PlainProgram,
+  recordMetadataKinds,
 } from './compile-program.js';
 import type { Diagnostic, Locale } from './diagnostics.js';
 import { EmitResult } from './emitter.js';
+import { getEmitDeclarations } from './options.js';
 import {
   FileBuildInfoReader,
   IncrementalProgram,
@@ -22,7 +24,7 @@ import {
   TimeStampHost,
 } from './incremental.js';
 import { checkerThreads, shareWithCheckers, startParallelCheck, traceSingleChecker } from './parallel-check.js';
-import { emitThreads, startParallelEmit } from './parallel-emit.js';
+import { emitThreads, startMetadataEmit, startParallelEmit } from './parallel-emit.js';
 import { sharesPublishedGraphs } from '@scriptc/threads';
 import { getNormalizedAbsolutePath } from './path.js';
 import { sortAndDeduplicateDiagnostics } from './program.js';
@@ -161,9 +163,9 @@ export function compileWithEmitThreads(
   shareWithCheckers(checked);
   const compilerProgram = new PlainProgram(checked, times);
   let diagnostics: Diagnostic[] | undefined = undefined;
-  let emitted = false;
+  let emitting = 2;
   const report = (): void => {
-    if (diagnostics === undefined || !emitted) return;
+    if (diagnostics === undefined || emitting > 0) return;
     const result = reportEmitAndErrors(
       sys,
       compilerProgram,
@@ -176,12 +178,25 @@ export function compileWithEmitThreads(
     traceSingleChecker(checked);
     done(emitStatusAndReportStatistics(sys, compilerProgram, result));
   };
-  startParallelEmit(checked, threads, () => {
-    emitted = true;
+  const emitted = (): void => {
+    emitting--;
     report();
-  });
-  diagnostics = getDiagnosticsOfProgram(compilerProgram, false);
+  };
+  const metadata = startParallelEmit(checked, threads, emitted);
+  const found = getDiagnosticsOfProgram(compilerProgram, false);
   mark('diagnostics collected');
+  // Files with decorator metadata are emitted with the kinds this thread's checker gives, now that it checked.
+  if (metadata.length > 0) {
+    const files = program.getSourceFiles();
+    const kinds = recordMetadataKinds(
+      checked,
+      metadata.map((i) => files[i]!),
+    );
+    mark('metadata kinds recorded');
+    startMetadataEmit(checked, threads, metadata, kinds, emitted);
+  } else emitting--;
+  if (getEmitDeclarations(options)) compilerProgram.emitDeclarationsAhead(new SystemWriter(sys));
+  diagnostics = found;
   report();
   return true;
 }

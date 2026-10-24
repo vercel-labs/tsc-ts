@@ -65,6 +65,7 @@ export interface EmitThreadData {
   readonly index: number;
   readonly counter: SharedArrayBuffer;
   readonly files: number[];
+  readonly kinds: number[];
   readonly nodeIds: number;
   readonly symbolIds: number;
 }
@@ -117,8 +118,8 @@ export function startThreads(spawn: ThreadSpawn, drivers: ThreadDrivers, args: r
       units,
     });
   if (sharesPublishedGraphs) {
-    parallelEmit.spawn = (program, index, counter, files, nodeIds, symbolIds) =>
-      spawn({ kind: 'emit', program, index, counter, files, nodeIds, symbolIds });
+    parallelEmit.spawn = (program, index, counter, files, kinds, nodeIds, symbolIds) =>
+      spawn({ kind: 'emit', program, index, counter, files, kinds, nodeIds, symbolIds });
     parallelParse.spawn = (configFileName, counter, index) =>
       spawn({ kind: 'parse', configFileName, args, counter, index });
     // The main thread compares the files a reference thread that failed did not.
@@ -167,7 +168,14 @@ function runEmitThread(job: EmitThreadData, drivers: ThreadDrivers): void {
   useLazyJSDocTable();
   useThreadTextCaches();
   const program = publish(job.program);
-  const result = emitFromQueue(program, job.index, new Int32Array(job.counter), job.files, drivers.outputWriter());
+  const result = emitFromQueue(
+    program,
+    job.index,
+    new Int32Array(job.counter),
+    job.files,
+    job.kinds,
+    drivers.outputWriter(),
+  );
   parentPort!.postMessage(postedEmitResult(result, program));
   mark('result posted');
 }

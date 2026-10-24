@@ -321,10 +321,11 @@ test('parse and checker threads start and finish without failing', { skip: tscTs
 });
 
 // At `--checkers 1` in native builds, threads without a checker emit the JavaScript of the program
-// (parallel-emit.ts) while the main thread checks it and then emits the declarations, and the JavaScript of
-// files with decorator metadata, which asks the checker. Const enum values come from other files: their
-// enums, those they re-export or compute members from, a package's declarations and a global declaration.
-// The padding makes the program emit enough for threads (`littleEmitText`).
+// (parallel-emit.ts) while the main thread checks it. Then the main thread emits the declarations while a second
+// wave of threads emits the JavaScript of files with decorator metadata, with the serialization kinds its checker
+// recorded. Const enum values come from other files: their enums, those they re-export or compute members from, a
+// package's declarations and a global declaration. The padding makes the program emit enough for threads
+// (`littleEmitText`).
 const constEnumFiles = {
   'src/enums.ts':
     'export const enum Flags { None = 0, A = 1 << 0, B = 1 << 1, AB = A | B, Neg = -1, Big = 2 ** 40 }\n' +
@@ -425,8 +426,16 @@ test('emit threads start and finish without failing', { skip: tscTsMissing }, ()
   // Under Node.js, which copies what it posts, there are no emit threads.
   if (!/emit threads:/.test(result.stderr)) return;
   let emitted = 0;
-  for (const match of result.stderr.matchAll(/emit threads: thread \d+ emitted (\d+) files/g))
-    emitted += Number(match[1]);
-  // Every file but the declaration file and the decorated file (decorator metadata).
+  let withKinds = 0;
+  const lines = /emit threads: thread \d+ emitted (\d+) files( with metadata kinds \((\d+) missed)?/g;
+  for (const match of result.stderr.matchAll(lines)) {
+    if (match[2] === undefined) emitted += Number(match[1]);
+    else {
+      withKinds += Number(match[1]);
+      assert.equal(match[3], '0', 'no file missed a recorded kind');
+    }
+  }
+  // Every file but the declaration file, and then the decorated file, with its decorator metadata.
   assert.equal(emitted, 8);
+  assert.equal(withKinds, 1);
 });
