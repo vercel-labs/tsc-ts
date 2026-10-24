@@ -199,6 +199,11 @@ export class DiagnosticReporter {
     else this.sys.write(formatDiagnostic(diagnostic, this.format));
   }
 
+  /** The format `reportAll` writes diagnostics in, where it writes them plainly; undefined otherwise. */
+  plainFormat(): DiagnosticFormatOptions | undefined {
+    return this.quiet || this.pretty ? undefined : this.format;
+  }
+
   /** Writes the diagnostics at once: a write for each costs more than formatting it. */
   reportAll(diagnostics: readonly Diagnostic[]): void {
     if (this.quiet || diagnostics.length === 0) return;

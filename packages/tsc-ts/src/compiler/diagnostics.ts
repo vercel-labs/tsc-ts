@@ -347,6 +347,11 @@ export class Diagnostic {
   readonly reportsDeprecated: boolean;
   skippedOnNoEmit = false;
   repopulateInfo: RepopulateInfo | undefined = undefined;
+  /**
+   * What `formatDiagnostic` gives for this diagnostic in `formattedReports.format`, where the checker
+   * thread that found it formatted it (`packResult`); `''` otherwise.
+   */
+  formatted = '';
 
   constructor(
     file: DiagnosticFile | undefined,
@@ -388,6 +393,7 @@ export class Diagnostic {
     result.relatedInformation = this.relatedInformation;
     result.skippedOnNoEmit = this.skippedOnNoEmit;
     result.repopulateInfo = this.repopulateInfo;
+    result.formatted = this.formatted;
     return result;
   }
 }
@@ -510,9 +516,13 @@ function compareRelatedInfo(a: readonly Diagnostic[], b: readonly Diagnostic[]):
 /** The order tsc reports diagnostics in: by file, position, code, arguments, then elaboration. */
 export function compareDiagnostics(a: Diagnostic, b: Diagnostic): number {
   if (a === b) return 0;
-  let c = compareCodePoints(fileNameOf(a), fileNameOf(b));
-  if (c !== 0) return c;
-  c = a.pos - b.pos;
+  const c = compareCodePoints(fileNameOf(a), fileNameOf(b));
+  return c !== 0 ? c : compareDiagnosticsInFile(a, b);
+}
+
+/** `compareDiagnostics` of two diagnostics whose files have the same name. */
+function compareDiagnosticsInFile(a: Diagnostic, b: Diagnostic): number {
+  let c = a.pos - b.pos;
   if (c !== 0) return c;
   c = a.end - b.end;
   if (c !== 0) return c;
@@ -525,6 +535,61 @@ export function compareDiagnostics(a: Diagnostic, b: Diagnostic): number {
   c = compareChainContent(a.messageChain, b.messageChain);
   if (c !== 0) return c;
   return compareRelatedInfo(a.relatedInformation, b.relatedInformation);
+}
+
+/**
+ * `diagnostics` in the order of `compareDiagnostics`, equal ones in their order in `diagnostics`. File
+ * names are compared once per pair of files rather than once per pair of diagnostics: the distinct
+ * files are sorted by name, and each diagnostic sorts by its file's place in that order, then by the
+ * rest of `compareDiagnostics`. A program's diagnostics come a file at a time, so the files are found
+ * from the runs of one file.
+ */
+export function sortDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
+  const n = diagnostics.length;
+  if (n < 2) return diagnostics.slice();
+  const fileIndices = new Map<DiagnosticFile | undefined, number>();
+  const files: (DiagnosticFile | undefined)[] = [];
+  const fileOf: number[] = [];
+  let last: DiagnosticFile | undefined = undefined;
+  let lastIndex = -1;
+  for (let i = 0; i < n; i++) {
+    const file = diagnostics[i]!.file;
+    if (lastIndex < 0 || file !== last) {
+      let k = fileIndices.get(file);
+      if (k === undefined) {
+        k = files.length;
+        fileIndices.set(file, k);
+        files.push(file);
+      }
+      last = file;
+      lastIndex = k;
+    }
+    fileOf.push(lastIndex);
+  }
+  // Files with the same name share a rank, as they compare equal.
+  const nameOf = (k: number): string => {
+    const file = files[k];
+    return file === undefined ? '' : file.fileName;
+  };
+  const byName: number[] = [];
+  for (let k = 0; k < files.length; k++) byName.push(k);
+  byName.sort((x, y) => compareCodePoints(nameOf(x), nameOf(y)));
+  const rank: number[] = [];
+  for (let k = 0; k < files.length; k++) rank.push(0);
+  for (let k = 1; k < byName.length; k++)
+    rank[byName[k]!] = rank[byName[k - 1]!]! + (nameOf(byName[k]!) === nameOf(byName[k - 1]!) ? 0 : 1);
+  const order: number[] = [];
+  for (let i = 0; i < n; i++) order.push(i);
+  order.sort((x, y) => {
+    const c = rank[fileOf[x]!]! - rank[fileOf[y]!]!;
+    if (c !== 0) return c;
+    const a = diagnostics[x]!;
+    const b = diagnostics[y]!;
+    return a === b ? 0 : compareDiagnosticsInFile(a, b);
+  });
+  const sorted: Diagnostic[] = [];
+  for (const i of order) sorted.push(diagnostics[i]!);
+  return sorted;
 }
 
 function equalChain(a: readonly Diagnostic[], b: readonly Diagnostic[]): boolean {
@@ -625,13 +690,29 @@ function formatDiagnosticIn(diagnostic: Diagnostic, fileName: string, options: D
   return result + flattenDiagnosticMessage(diagnostic, options.newLine, options.locale) + options.newLine;
 }
 
+/**
+ * The plain format the main thread reports a compilation's diagnostics in (`DiagnosticReporter.plainFormat`),
+ * which its checker threads receive a copy of and format the diagnostics they send back in
+ * (`Diagnostic.formatted`). Unset where diagnostics are reported with color and context, or not at all.
+ */
+export class FormattedReports {
+  format: DiagnosticFormatOptions | undefined = undefined;
+}
+
+export const formattedReports = new FormattedReports();
+
 /** `formatDiagnostic` of each diagnostic. */
 export function formatDiagnostics(diagnostics: readonly Diagnostic[], options: DiagnosticFormatOptions): string {
   let result = '';
+  const formatted = options === formattedReports.format;
   // Sorted diagnostics come a file at a time: the relative name of the last file is kept.
   let lastFile: DiagnosticFile | undefined = undefined;
   let lastName = '';
   for (const diagnostic of diagnostics) {
+    if (formatted && diagnostic.formatted !== '') {
+      result += diagnostic.formatted;
+      continue;
+    }
     const file = diagnostic.file;
     if (file !== undefined && file !== lastFile) {
       lastFile = file;

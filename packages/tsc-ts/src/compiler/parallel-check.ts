@@ -33,7 +33,14 @@ import {
   type OutputWriter,
   ProgramEmitter,
 } from './compile-program.js';
-import { Diagnostic, DiagnosticFile, RepopulateInfo } from './diagnostics.js';
+import {
+  Diagnostic,
+  DiagnosticFile,
+  type DiagnosticFormatOptions,
+  formatDiagnostic,
+  formattedReports,
+  RepopulateInfo,
+} from './diagnostics.js';
 import { EmitOnly, EmitResult } from './emitter.js';
 import { getEmitDeclarations, isIncremental } from './options.js';
 import { DeclarationSignatureWriter } from './incremental.js';
@@ -144,10 +151,13 @@ export const recycleFiles: number = Math.max(0, Number(process.env.TSC_TS_RECYCL
  * text (index, -1 when the program has the file), pos, end, code, category, message,
  * skippedOnNoEmit, the argument count and indices, its repopulate kind (0 for none) followed by the
  * module reference (index), mode and package name (index) of other kinds, then its message chain and
- * related information as lists. An emit result is emitSkipped, the emitted files, errors and
- * unsupported files as lists of indices, then its diagnostics and its declaration signatures as a list
- * of indices. `files` and `nums` are typed arrays, which postMessage copies as one block of memory
- * each; it copies an array of numbers element by element.
+ * related information as lists. A diagnostic of a reported list (the files' diagnostic and declaration
+ * diagnostic lists, the global diagnostics and an emit result's diagnostics) is followed by its text in
+ * the main thread's report format (`Diagnostic.formatted`, an index, -1 for none). An emit result is
+ * emitSkipped, the emitted files, errors and unsupported files as lists of indices, then its
+ * diagnostics and its declaration signatures as a list of indices. `files` and `nums` are typed
+ * arrays, which postMessage copies as one block of memory each; it copies an array of numbers element
+ * by element.
  */
 export type PackedResult = {
   readonly index: number;
@@ -167,7 +177,11 @@ class ResultPacker {
   readonly strs: string[] = [];
   private readonly indices = new Map<string, number>();
 
-  constructor(private readonly program: Program) {}
+  constructor(
+    private readonly program: Program,
+    /** The main thread's report format, which this thread formats the reported diagnostics in. */
+    private readonly format: DiagnosticFormatOptions | undefined,
+  ) {}
 
   private str(text: string): number {
     let k = this.indices.get(text);
@@ -184,6 +198,21 @@ class ResultPacker {
     for (const d of diagnostics) this.diagnostic(d);
   }
 
+  /** A list the main thread reports: each diagnostic with its text in the report format. */
+  reported(diagnostics: readonly Diagnostic[]): void {
+    const nums = this.nums;
+    const format = this.format;
+    nums.push(diagnostics.length);
+    for (const d of diagnostics) {
+      this.diagnostic(d);
+      if (format === undefined) nums.push(-1);
+      else {
+        nums.push(this.strs.length);
+        this.strs.push(formatDiagnostic(d, format));
+      }
+    }
+  }
+
   private strList(texts: readonly string[]): void {
     this.nums.push(texts.length);
     for (const text of texts) this.nums.push(this.str(text));
@@ -194,7 +223,7 @@ class ResultPacker {
     this.strList(result.emittedFiles);
     this.strList(result.errors);
     this.strList(result.unsupported);
-    this.list(result.diagnostics);
+    this.reported(result.diagnostics);
     this.strList(result.declarationSignatures);
     this.strList(result.heldOutputs);
   }
@@ -226,11 +255,11 @@ class ResultPacker {
 
 /** Packs `result` (on the checker thread) for `postMessage`. */
 export function packResult(result: CheckerResult, program: Program): PackedResult {
-  const packer = new ResultPacker(program);
-  for (const list of result.diagnostics) packer.list(list);
+  const packer = new ResultPacker(program, formattedReports.format);
+  for (const list of result.diagnostics) packer.reported(list);
   packer.nums.push(result.declarations.length);
-  for (const list of result.declarations) packer.list(list);
-  packer.list(result.globals);
+  for (const list of result.declarations) packer.reported(list);
+  packer.reported(result.globals);
   packer.nums.push(result.emits.length);
   for (const emit of result.emits) packer.emit(emit);
   return {
@@ -269,6 +298,19 @@ class ResultUnpacker {
     const n = this.next();
     const result: Diagnostic[] = [];
     for (let k = 0; k < n; k++) result.push(this.diagnostic());
+    return result;
+  }
+
+  /** A list `ResultPacker.reported` packed. */
+  reported(): Diagnostic[] {
+    const n = this.next();
+    const result: Diagnostic[] = [];
+    for (let k = 0; k < n; k++) {
+      const d = this.diagnostic();
+      const text = this.next();
+      if (text >= 0) d.formatted = this.packed.strs[text]!;
+      result.push(d);
+    }
     return result;
   }
 
@@ -325,7 +367,7 @@ class ResultUnpacker {
     this.strList(result.emittedFiles);
     this.strList(result.errors);
     this.strList(result.unsupported);
-    for (const d of this.list()) result.diagnostics.push(d);
+    for (const d of this.reported()) result.diagnostics.push(d);
     this.strList(result.declarationSignatures);
     this.strList(result.heldOutputs);
     return result;
@@ -339,11 +381,11 @@ export function unpackResult(
 ): CheckerResult {
   const unpacker = new ResultUnpacker(packed, program, files);
   const diagnostics: Diagnostic[][] = [];
-  for (let k = 0; k < packed.files.length; k++) diagnostics.push(unpacker.list());
+  for (let k = 0; k < packed.files.length; k++) diagnostics.push(unpacker.reported());
   const declarations: Diagnostic[][] = [];
   const nd = unpacker.count();
-  for (let k = 0; k < nd; k++) declarations.push(unpacker.list());
-  const globals = unpacker.list();
+  for (let k = 0; k < nd; k++) declarations.push(unpacker.reported());
+  const globals = unpacker.reported();
   const emits: EmitResult[] = [];
   const ne = unpacker.count();
   for (let k = 0; k < ne; k++) emits.push(unpacker.emit());
@@ -650,8 +692,8 @@ class CheckCosts {
     readonly libraries: number[][],
     /** What resolving a library costs a checker the first time (`libraryFirstUseShare` of the text it reaches), by index. */
     readonly libraryCost: number[],
-    /** The program files (indices) each file of `order` imports, by index. */
-    readonly imports: (number[] | undefined)[],
+    /** The program files (indices) each file imports (`ProcessedFiles.addedFiles`), by index. */
+    readonly imports: readonly (readonly number[])[],
   ) {}
 }
 
@@ -696,34 +738,18 @@ function checkCosts(checked: CheckedProgram, order: number[]): CheckCosts {
   }
   const length = textLengths(program);
   for (const i of order) cost[i] = length[i]!;
-  const indexOf = new Map<SourceFile, number>();
-  for (let i = 0; i < files.length; i++) indexOf.set(files[i]!, i);
-  // A file resolved by its own file name is that file (its path is the path of that name).
-  const byFileName = new Map<string, SourceFile>();
-  for (const file of files) byFileName.set(file.fileName, file);
   const checkedFile: boolean[] = [];
   for (let i = 0; i < files.length; i++) checkedFile.push(false);
   for (const i of order) checkedFile[i] = true;
   // Libraries: unchecked modules that are not default libraries (globals every checker has).
   const isLibrary = (i: number): boolean =>
     !checkedFile[i]! && !program.isSourceFileDefaultLibrary(files[i]!.path) && isExternalModuleFile(files[i]!);
-  const edges: (number[] | undefined)[] = [];
-  const edgesOf = (i: number): number[] => {
-    let result = edges[i];
-    if (result === undefined) {
-      result = [];
-      for (const target of program.getResolvedFilesOf(files[i]!, byFileName)) {
-        const k = indexOf.get(target);
-        if (k !== undefined && k !== i) result.push(k);
-      }
-      edges[i] = result;
-    }
-    return result;
-  };
+  // The files each file imports: those it added to the program (`ProcessedFiles.addedFiles`).
+  const edges = program.addedFiles();
   const importers = new Map<number, number>();
   for (const i of order) {
     const libraries: number[] = [];
-    for (const k of edgesOf(i)) if (isLibrary(k) && libraries.indexOf(k) < 0) libraries.push(k);
+    for (const k of edges[i]!) if (isLibrary(k) && libraries.indexOf(k) < 0) libraries.push(k);
     librariesOf[i] = libraries;
     for (const k of libraries) importers.set(k, (importers.get(k) ?? 0) + 1);
   }
@@ -738,7 +764,7 @@ function checkCosts(checked: CheckedProgram, order: number[]): CheckCosts {
     while (stack.length > 0) {
       const k = stack.pop()!;
       total += length[k]!;
-      for (const t of edgesOf(k))
+      for (const t of edges[k]!)
         if (!seen.has(t) && isLibrary(t)) {
           seen.add(t);
           stack.push(t);

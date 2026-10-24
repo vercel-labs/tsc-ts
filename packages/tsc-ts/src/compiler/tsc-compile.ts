@@ -13,7 +13,7 @@ import {
   PlainProgram,
   recordMetadataKinds,
 } from './compile-program.js';
-import type { Diagnostic, Locale } from './diagnostics.js';
+import { type Diagnostic, formattedReports, type Locale } from './diagnostics.js';
 import { EmitOnly, EmitResult } from './emitter.js';
 import { getEmitDeclarations } from './options.js';
 import {
@@ -238,6 +238,8 @@ export function compileInParallel(
   times.configTime = work.configTime;
   times.parseTime = work.parseTime;
   const bindStart = performance.now();
+  // The checker threads format their diagnostics in the format the reporter writes them in.
+  formattedReports.format = work.reporter.plainFormat();
   mark(`${threads} checkers`);
   const checked = new CheckedProgram(program);
   times.bindTime = performance.now() - bindStart;

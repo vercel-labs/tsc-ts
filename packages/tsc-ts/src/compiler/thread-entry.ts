@@ -6,7 +6,7 @@ import { parentPort } from 'node:worker_threads';
 import { publish, sharesPublishedGraphs } from '@scriptc/threads';
 import { reserveNodeIds, shareNodeIds } from './ast.js';
 import type { OutputWriter } from './compile-program.js';
-import { useThreadTextCaches } from './diagnostics.js';
+import { type DiagnosticFormatOptions, formattedReports, useThreadTextCaches } from './diagnostics.js';
 import { compareReferencesOfThread, type ReferenceJob, referenceThreads } from './incremental.js';
 import {
   CheckerResult,
@@ -56,6 +56,8 @@ export interface CheckerThreadData {
   readonly emitKinds: number[] | undefined;
   readonly checking: boolean;
   readonly units: number[];
+  /** The main thread's report format (`formattedReports`), which the thread formats its diagnostics in. */
+  readonly reportFormat: DiagnosticFormatOptions | undefined;
 }
 
 export interface EmitThreadData {
@@ -116,6 +118,7 @@ export function startThreads(spawn: ThreadSpawn, drivers: ThreadDrivers, args: r
       emitKinds,
       checking,
       units,
+      reportFormat: formattedReports.format,
     });
   if (sharesPublishedGraphs) {
     parallelEmit.spawn = (program, index, counter, files, kinds, nodeIds, symbolIds) =>
@@ -186,6 +189,7 @@ function runCheckerThread(job: CheckerThreadData, drivers: ThreadDrivers): void 
   setTimelineThread('c' + String(job.index));
   mark('thread start');
   parallelCheck.writer = drivers.outputWriter();
+  formattedReports.format = job.reportFormat;
   let program: Program | undefined = undefined;
   if (job.program !== undefined) {
     // The shared program is never written: new ids continue above its own, and lazily parsed JSDoc

@@ -256,6 +256,8 @@ class ParseTask {
   jsxRuntimeImport: JsxRuntimeImport | undefined = undefined;
   /** The task of the same file name that was loaded instead of this one. */
   loadedTask: ParseTask | undefined = undefined;
+  /** Whether an import or a type reference directive adds the file (`ProcessedFiles.addedFiles`). */
+  readonly byImport: boolean;
 
   constructor(
     readonly normalizedFilePath: string,
@@ -266,7 +268,10 @@ class ParseTask {
     /** A JavaScript file found in `node_modules`, loaded only within `maxNodeModuleJsDepth`. */
     readonly elideOnDepth: boolean,
     readonly packageId: PackageId | undefined,
-  ) {}
+  ) {
+    const kind = includeReason !== undefined ? includeReason.kind : -1;
+    this.byImport = kind === FileIncludeKind.Import || kind === FileIncludeKind.TypeReferenceDirective;
+  }
 
   addSubTask(
     fileName: string,
@@ -296,12 +301,20 @@ class ParseTask {
   }
 }
 
+const noData: readonly ParseTaskData[] = [];
+
 /** The tasks of one path, by file name casing. */
 class ParseTaskData {
   readonly tasks = new Map<string, ParseTask>();
   lowestDepth = Number.MAX_SAFE_INTEGER;
   startedSubTasks = false;
   packageId: PackageId | undefined = undefined;
+  /** The index of this path's file in the program's files, once collected; -1 for none. */
+  index = -1;
+  /** For a deduplicated package's path, the tasks of the copy kept (`collect`). */
+  keptCopy: ParseTaskData | undefined = undefined;
+  /** The paths the file's imports and type reference directives add, once collected. */
+  added: readonly ParseTaskData[] = noData;
 
   constructor(task: ParseTask) {
     this.tasks.set(task.normalizedFilePath, task);
@@ -419,6 +432,11 @@ export class ProcessedFiles {
      * threads (`preparedPackageJsonLookups`); `undefined` where they may miss some.
      */
     readonly preparedPackageJsons: readonly PackageJsonLookup[] | undefined,
+    /**
+     * The files each file's imports and type reference directives added to the program, by index into
+     * `files`, without the file itself.
+     */
+    readonly addedFiles: readonly (readonly number[])[],
   ) {}
 }
 
@@ -446,6 +464,8 @@ export function withReplacedFile(processed: ProcessedFiles, file: SourceFile): P
     processed.redirectFilesByPath,
     processed.projectReferenceMapper,
     processed.preparedPackageJsons,
+    // The file has the same references (`canReplaceFile`), and keeps its index.
+    processed.addedFiles,
   );
 }
 
@@ -1393,16 +1413,24 @@ export class FileLoader {
     const packageIdToSourceFile = new Map<string, SourceFile>();
     const checkCasing = this.options.forceConsistentCasingInFileNames !== false;
     const seen = new Map<ParseTaskData, string>();
+    // The paths each file's imports and type reference directives add (the tasks of each path), for
+    // `ProcessedFiles.addedFiles`: recorded while collecting visits them, as their files are only known
+    // once every file is collected.
+    const fileData: ParseTaskData[] = [];
+    const libData = new Map<SourceFile, ParseTaskData>();
+    const packageIdToData = new Map<string, ParseTaskData>();
 
-    const collectFiles = (tasks: readonly ParseTask[]): void => {
+    const collectFiles = (tasks: readonly ParseTask[], added: ParseTaskData[] | undefined): void => {
       for (let task of tasks) {
         const includeReason = task.includeReason;
+        const byImport = task.byImport;
         // Automatic type directive tasks are an implementation detail, not a reason.
         if (task.redirectedParseTask === undefined && !task.isForAutomaticTypeDirective) {
           if (task.loadedTask !== undefined) task = task.loadedTask;
           if (includeReason !== undefined) addIncludeReason(includeProcessor, task, includeReason);
         }
         const data = this.taskDataByPath.get(task.path);
+        if (added !== undefined && data !== undefined && byImport) added.push(data);
         if (!task.loaded || data === undefined) continue;
 
         const checkedName = seen.get(data);
@@ -1457,13 +1485,18 @@ export class FileLoader {
               ),
             );
             filesByPath.set(task.path, packageIdFile);
+            data.keptCopy = packageIdToData.get(key);
             if (data.lowestDepth > 0) sourceFilesFoundSearchingNodeModules.add(task.path);
             continue;
           }
-          if (file !== undefined) packageIdToSourceFile.set(key, file);
+          if (file !== undefined) {
+            packageIdToSourceFile.set(key, file);
+            packageIdToData.set(key, data);
+          }
         }
 
-        if (task.subTasks !== undefined && task.subTasks.length > 0) collectFiles(task.subTasks);
+        let own: ParseTaskData[] | undefined = undefined;
+        if (task.subTasks !== undefined && task.subTasks.length > 0) collectFiles(task.subTasks, (own = []));
 
         const redirected = task.redirectedParseTask;
         if (redirected !== undefined) {
@@ -1485,10 +1518,13 @@ export class FileLoader {
         }
         if (task.libFile !== undefined) {
           libFiles.push(file);
+          libData.set(file, data);
           libFilesByPath.set(path, task.libFile);
         } else {
           files.push(file);
+          fileData.push(data);
         }
+        if (own !== undefined) data.added = own;
         filesByPath.set(path, file);
         resolvedModules.set(path, task.resolutionsInFile);
         typeResolutionsInFile.set(path, task.typeResolutionsInFile);
@@ -1500,13 +1536,28 @@ export class FileLoader {
         if (data.lowestDepth > 0) sourceFilesFoundSearchingNodeModules.add(path);
       }
     };
-    collectFiles(this.rootTasks);
+    collectFiles(this.rootTasks, undefined);
 
     const priorities = new Map<SourceFile, number>();
     for (const file of libFiles) priorities.set(file, this.libFilePriority(file));
     libFiles.sort((a, b) => (priorities.get(a) ?? 0) - (priorities.get(b) ?? 0));
     const allFiles = [...libFiles, ...files];
     for (const redirect of redirectFilesByPath.values()) redirect.index += libFiles.length;
+    // The files a file adds, without reading its resolutions again or looking up their paths.
+    const dataOfFiles: ParseTaskData[] = [];
+    for (const file of libFiles) dataOfFiles.push(libData.get(file)!);
+    for (const data of fileData) dataOfFiles.push(data);
+    for (let i = 0; i < dataOfFiles.length; i++) dataOfFiles[i]!.index = i;
+    const addedFiles: number[][] = [];
+    for (let i = 0; i < dataOfFiles.length; i++) {
+      const added: number[] = [];
+      for (const data of dataOfFiles[i]!.added) {
+        const kept = data.keptCopy;
+        const k = kept !== undefined ? kept.index : data.index;
+        if (k >= 0 && k !== i) added.push(k);
+      }
+      addedFiles.push(added);
+    }
 
     const keys = [...this.libResolutions.keys()].sort();
     for (const key of keys) {
@@ -1536,6 +1587,7 @@ export class FileLoader {
       redirectFilesByPath,
       this.mapper,
       this.tookPreparedResolutions ? preparedPackageJsonLookups() : noPackageJsonLookups,
+      addedFiles,
     );
   }
 }
