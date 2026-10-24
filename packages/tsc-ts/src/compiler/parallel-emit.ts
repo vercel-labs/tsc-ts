@@ -230,6 +230,24 @@ export function startDeclarationThread(
 }
 
 /**
+ * Starts the declaration thread of a `noEmit` program that reports the errors of declaration emit
+ * (`checkersReportDeclarations`): one checker thread that finds the declaration errors of every file of
+ * `checked` while the program is checked on this thread, and calls `done` once it is done. Its checker
+ * checks only what declaration emit asks; it reports nothing but the declaration errors, which `done`
+ * receives by file index (undefined for a file it didn't reach, whose errors
+ * `PlainProgram.getDeclarationDiagnostics` then finds here).
+ */
+export function startDeclarationErrorThread(
+  checked: CheckedProgram,
+  done: (declarations: (Diagnostic[] | undefined)[]) => void,
+): void {
+  const results: (Diagnostic[] | undefined)[] = [];
+  for (let i = 0; i < checked.program.getSourceFiles().length; i++) results.push(undefined);
+  startParallelCheck(checked, 1, () => done(results), true, undefined, false, undefined, results);
+  mark('declaration thread spawned');
+}
+
+/**
  * On emit thread `index`: emits the JavaScript of the files of `order` at the positions it takes
  * from `counter` until none are left, writing it with `writer`; `kinds` are the decorator metadata kinds
  * the main thread recorded for them (`recordMetadataKinds`), if any. `stats` has the number of files that

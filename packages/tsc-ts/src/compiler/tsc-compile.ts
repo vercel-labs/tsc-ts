@@ -23,10 +23,17 @@ import {
   type Snapshot,
   TimeStampHost,
 } from './incremental.js';
-import { checkerThreads, shareWithCheckers, startParallelCheck, traceSingleChecker } from './parallel-check.js';
+import {
+  checkerThreads,
+  parallelCheck,
+  shareWithCheckers,
+  startParallelCheck,
+  traceSingleChecker,
+} from './parallel-check.js';
 import {
   declarationThreadPays,
   emitThreads,
+  startDeclarationErrorThread,
   startDeclarationThread,
   startMetadataEmit,
   startParallelEmit,
@@ -219,6 +226,70 @@ export function compileWithEmitThreads(
     } else emitting--;
   }
   diagnostics = found;
+  report();
+  return true;
+}
+
+/**
+ * Like `compile` for a `noEmit` program with declarations, which reports the errors of declaration emit:
+ * this thread checks the program while the declaration thread (`startDeclarationErrorThread`) finds the
+ * declaration errors of every file, then reports both; calls `done` with the exit status. Returns false
+ * where the declaration thread doesn't apply, and `compile` runs instead: an incremental program, one
+ * that waits for its errors (`noEmitOnError`), a program that isn't shared with threads, or one where a
+ * declaration thread doesn't pay (`declarationThreadPays`).
+ */
+export function compileWithDeclarationThread(
+  sys: System,
+  work: CompileWork,
+  done: (status: ExitStatus) => void,
+): boolean {
+  const program = work.program;
+  const options = program.options;
+  if (
+    work.incremental ||
+    options.noEmit !== true ||
+    options.noEmitOnError === true ||
+    options.listFilesOnly === true ||
+    options.singleThreaded === true ||
+    !getEmitDeclarations(options) ||
+    parallelCheck.spawn === undefined ||
+    !sharesPublishedGraphs ||
+    !declarationThreadPays(1)
+  )
+    return false;
+  const times = new CompileTimes();
+  times.configTime = work.configTime;
+  times.parseTime = work.parseTime;
+  const bindStart = performance.now();
+  const checked = new CheckedProgram(program);
+  times.bindTime = performance.now() - bindStart;
+  shareWithCheckers(checked);
+  const compilerProgram = new PlainProgram(checked, times);
+  let diagnostics: Diagnostic[] | undefined = undefined;
+  let declaring = true;
+  const report = (): void => {
+    if (diagnostics === undefined || declaring) return;
+    const result = reportEmitAndErrors(
+      sys,
+      compilerProgram,
+      diagnostics,
+      work.reporter,
+      work.errorSummary,
+      new SystemWriter(sys),
+      outputLocale(options),
+    );
+    traceSingleChecker(checked);
+    done(emitStatusAndReportStatistics(sys, compilerProgram, result));
+  };
+  startDeclarationErrorThread(checked, (declarations) => {
+    // `PlainProgram.getDeclarationDiagnostics` reads them.
+    checked.declarationsInParallel = declarations;
+    declaring = false;
+    report();
+  });
+  // `PlainProgram.emit` reports the declaration errors once the thread has found them.
+  diagnostics = getDiagnosticsOfProgram(compilerProgram, false, true);
+  mark('diagnostics collected');
   report();
   return true;
 }

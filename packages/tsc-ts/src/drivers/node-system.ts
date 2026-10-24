@@ -33,6 +33,7 @@ import {
   compileEmitThreads,
   compileInParallel,
   compileThreads,
+  compileWithDeclarationThread,
   compileWithEmitThreads,
   SystemWriter,
 } from '../compiler/tsc-compile.js';
@@ -305,6 +306,15 @@ function runCommandLineResult(sys: System, result: CommandLineResult): number {
       if (
         emitThreads > 0 &&
         compileWithEmitThreads(sys, result, emitThreads, (status) => {
+          markMemory();
+          mark('exit');
+          process.exit(status);
+        })
+      )
+        return watching;
+      // Declaration errors are found on a thread of their own while this thread checks.
+      if (
+        compileWithDeclarationThread(sys, result, (status) => {
           markMemory();
           mark('exit');
           process.exit(status);
