@@ -27,6 +27,7 @@ import {
   equalDiagnosticsNoRelatedInfo,
   type DiagnosticMessage,
   type Locale,
+  sortDiagnostics,
   useThreadTextCaches,
 } from './diagnostics.js';
 import {
@@ -455,30 +456,9 @@ export class Program implements OutputPathsHost {
     return this.processed.resolvedModules.get(file.path)?.get(modeAwareKey(moduleName, mode));
   }
 
-  /** The program files that the imports and type reference directives of `file` resolved to. */
-  /**
-   * The files `file` imports and references through type directives. `byFileName`, the program's
-   * files by file name, finds a file without computing its path when it is resolved by that name.
-   */
-  getResolvedFilesOf(file: SourceFile, byFileName?: ReadonlyMap<string, SourceFile>): SourceFile[] {
-    const result: SourceFile[] = [];
-    const modules = this.processed.resolvedModules.get(file.path);
-    if (modules !== undefined)
-      for (const resolved of modules.values()) {
-        const name = resolved.resolvedFileName;
-        if (name === '') continue;
-        const target = byFileName?.get(name) ?? this.getSourceFileForResolvedModule(name);
-        if (target !== undefined) result.push(target);
-      }
-    const types = this.processed.typeResolutionsInFile.get(file.path);
-    if (types !== undefined)
-      for (const resolved of types.values()) {
-        const name = resolved.resolvedFileName;
-        if (name === '') continue;
-        const target = byFileName?.get(name) ?? this.getSourceFile(name);
-        if (target !== undefined) result.push(target);
-      }
-    return result;
+  /** The files each file added to the program (`ProcessedFiles.addedFiles`), as indices of `getSourceFiles`. */
+  addedFiles(): readonly (readonly number[])[] {
+    return this.processed.addedFiles;
   }
 
   /** The specifier of the implicit JSX runtime import of `file`, if any. */
@@ -1398,7 +1378,7 @@ class NodeCollector extends NodeVisitor {
 
 /** Sorts diagnostics and merges duplicates, combining their related information. */
 export function sortAndDeduplicateDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
-  const sorted = [...diagnostics].sort(compareDiagnostics);
+  const sorted = sortDiagnostics(diagnostics);
   if (sorted.length < 2) return sorted;
   const result: Diagnostic[] = [];
   let i = 0;

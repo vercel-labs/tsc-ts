@@ -41,6 +41,15 @@ const {
   textLengths,
   unpackResult,
 } = await load('compiler/parallel-check.js');
+const {
+  compareDiagnostics,
+  createDiagnostic,
+  DiagnosticFile,
+  formatDiagnostic,
+  formatDiagnostics,
+  formattedReports,
+  sortDiagnostics,
+} = await load('compiler/diagnostics.js');
 
 const Root = 0;
 const File = 1;
@@ -397,6 +406,60 @@ test('a checker result packed as plain data comes back with the same diagnostics
       .find((f) => f.fileName.endsWith('a.ts'))
       .diagnosticFile(),
   );
+});
+
+test('a packed checker result carries the reported text of each diagnostic in the report format', () => {
+  const c = erroneous();
+  const plan = planSchedule(c, 1);
+  const result = checkFromQueue(c, 0, new Int32Array(scheduleOf(plan, 1)), plan.order, 0);
+  const format = { locale: 0, currentDirectory: '/', useCaseSensitiveFileNames: true, newLine: '\n' };
+  // Without a report format, nothing is formatted.
+  const plain = unpackResult(structuredClone(packResult(result, c.program)), c.program, new Map());
+  assert.ok(plain.diagnostics.flat().every((d) => d.formatted === ''));
+  formattedReports.format = format;
+  try {
+    const back = unpackResult(structuredClone(packResult(result, c.program)), c.program, new Map());
+    const all = back.diagnostics.flat();
+    const original = result.diagnostics.flat();
+    assert.ok(all.length >= 3);
+    for (let k = 0; k < all.length; k++) {
+      assert.equal(all[k].formatted, formatDiagnostic(original[k], format));
+      // Elaborations and related information are part of their diagnostic's text.
+      for (const d of [...all[k].messageChain, ...all[k].relatedInformation]) assert.equal(d.formatted, '');
+    }
+    // The report writes the texts in place of formatting the diagnostics again.
+    assert.equal(formatDiagnostics(all, format), formatDiagnostics(original, format));
+    for (const d of all) d.formatted = 'x';
+    assert.equal(formatDiagnostics(all, format), 'x'.repeat(all.length));
+    // In another format, they are formatted.
+    assert.equal(formatDiagnostics(all, { ...format }), formatDiagnostics(original, format));
+  } finally {
+    formattedReports.format = undefined;
+  }
+});
+
+test('sorted diagnostics are in the order of compareDiagnostics, equal ones as they came', () => {
+  const a = new DiagnosticFile('/p/a.ts', 'let a = 1;\nlet b = 2;\n');
+  const b = new DiagnosticFile('/p/b.ts', 'let c = 3;\n');
+  // Another file object with a's name, as a thread's copy of a file has.
+  const otherA = new DiagnosticFile('/p/a.ts', a.text);
+  // Diagnostics.Cannot_find_name_0, a const enum member.
+  const message = 482;
+  const diagnostics = [
+    createDiagnostic(b, 4, 5, message, 'c'),
+    createDiagnostic(a, 15, 16, message, 'b'),
+    createDiagnostic(undefined, -1, -1, message, 'global'),
+    createDiagnostic(otherA, 4, 5, message, 'a'),
+    createDiagnostic(a, 4, 5, message, 'a'),
+    createDiagnostic(b, 0, 3, message, 'let'),
+    createDiagnostic(otherA, 15, 16, message, 'b'),
+    createDiagnostic(a, 4, 5, message, 'A'),
+  ];
+  const sorted = sortDiagnostics(diagnostics);
+  const expected = [...diagnostics].sort(compareDiagnostics);
+  assert.equal(sorted.length, expected.length);
+  for (let k = 0; k < sorted.length; k++) assert.equal(sorted[k], expected[k]);
+  assert.deepEqual(sortDiagnostics([]), []);
 });
 
 test('a checker at its file limit stops, and a new one on its schedule index checks the rest once', () => {
