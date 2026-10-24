@@ -443,18 +443,6 @@ export class PlainProgram extends CompilerProgram {
     return result;
   }
 
-  /**
-   * Emits the declarations of every file while emit threads emit their JavaScript (`compileWithEmitThreads`):
-   * `emit` then takes their results instead of emitting them.
-   */
-  emitDeclarationsAhead(writer: OutputWriter): void {
-    const files = this.program.getSourceFiles();
-    const ahead: EmitResult[] = [];
-    for (const file of files) ahead.push(this.emitter.emit([file], EmitOnly.Dts, writer));
-    this.checked.declarationsEmittedAhead = ahead;
-    mark('declarations emitted');
-  }
-
   emit(writer: OutputWriter): EmitResult {
     const options = this.options;
     if (options.noEmit !== true) {
@@ -472,15 +460,17 @@ export class PlainProgram extends CompilerProgram {
         : combineEmitResults(
             files.map((file, i) => {
               const emitted = parallel[i];
+              // The declaration thread emitted the declarations of the files it could (parallel-emit.ts).
               const ahead = this.checked.declarationsEmittedAhead;
+              const declarations = (): EmitResult => ahead?.[i] ?? this.emitter.emit([file], EmitOnly.Dts, writer);
               if (emitted === undefined)
                 return ahead !== undefined
-                  ? combineEmitResults([this.emitter.emit([file], EmitOnly.Js, writer), ahead[i]!])
+                  ? combineEmitResults([this.emitter.emit([file], EmitOnly.Js, writer), declarations()])
                   : this.emitter.emit([file], EmitOnly.All, writer);
               const written = writeHeldOutputs(emitted, writer);
-              // Emit threads emit JavaScript only; declarations need this thread's checker.
+              // Emit threads emit JavaScript only.
               if (!this.checked.javaScriptEmittedOnThreads || !getEmitDeclarations(options)) return written;
-              return combineEmitResults([written, ahead?.[i] ?? this.emitter.emit([file], EmitOnly.Dts, writer)]);
+              return combineEmitResults([written, declarations()]);
             }),
           );
     if (options.noEmit === true) {

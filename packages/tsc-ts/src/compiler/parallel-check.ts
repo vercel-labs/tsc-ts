@@ -1842,7 +1842,9 @@ export function shareWithCheckers(checked: CheckedProgram): void {
 /**
  * Checks `checked` on `checkers` threads and calls `done` once they are done. With `emits`, each thread
  * emits the files it checks (`emitKinds` limits what). With `checking` false, the threads only emit:
- * for a program whose report has no semantic diagnostics, so that no file is checked in full.
+ * for a program whose report has no semantic diagnostics, so that no file is checked in full. With
+ * `emitsTo`, the emit results go only there, by file index, and nothing else the threads find reaches
+ * the program: a declaration thread (parallel-emit.ts), while this thread's checker checks.
  */
 export function startParallelCheck(
   checked: CheckedProgram,
@@ -1851,6 +1853,7 @@ export function startParallelCheck(
   emits: boolean = true,
   emitKinds: number[] | undefined = undefined,
   checking: boolean = true,
+  emitsTo: (EmitResult | undefined)[] | undefined = undefined,
 ): void {
   let count = checkers;
   const start = performance.now();
@@ -1913,6 +1916,11 @@ export function startParallelCheck(
   let remaining = count - firstThread;
   let ownDone = false;
   const finish = (): void => {
+    if (emitsTo !== undefined) {
+      mark('emitted on checker threads');
+      done(performance.now() - start);
+      return;
+    }
     if (checking) {
       joinRanges(checked, units, perUnit, perFile);
       // A thread that failed may have taken files it never checked: check them here.
@@ -1943,6 +1951,14 @@ export function startParallelCheck(
     done(performance.now() - start);
   };
   const record = (result: CheckerResult): void => {
+    if (emitsTo !== undefined) {
+      for (let k = 0; k < result.emits.length; k++) emitsTo[result.files[k]!] = result.emits[k]!;
+      if (trace)
+        process.stderr.write(
+          `checkers: emit-only thread ${result.index} emitted ${result.emits.length} files in ${result.checkTime.toFixed(1)}ms, done at ${(performance.now() - start).toFixed(1)}ms rss ${result.stats[7] ?? '?'}MB\n`,
+        );
+      return;
+    }
     for (let k = 0; k < result.files.length; k++) perFile[result.files[k]!] = result.diagnostics[k]!;
     for (let k = 0; k < result.declarations.length; k++)
       perFileDeclarations[result.files[k]!] = result.declarations[k]!;

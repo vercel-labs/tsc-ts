@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tempDir } from './temp.mjs';
@@ -321,11 +322,12 @@ test('parse and checker threads start and finish without failing', { skip: tscTs
 });
 
 // At `--checkers 1` in native builds, threads without a checker emit the JavaScript of the program
-// (parallel-emit.ts) while the main thread checks it. Then the main thread emits the declarations while a second
-// wave of threads emits the JavaScript of files with decorator metadata, with the serialization kinds its checker
-// recorded. Const enum values come from other files: their enums, those they re-export or compute members from, a
-// package's declarations and a global declaration. The padding makes the program emit enough for threads
-// (`littleEmitText`).
+// (parallel-emit.ts) while the main thread checks it, and a declaration thread, a checker thread that only emits,
+// emits the declarations and the files with decorator metadata. Without declarations, a second wave of threads
+// emits those files with the serialization kinds the main thread's checker recorded. With checker threads, the
+// declaration thread emits the declarations while they check. Const enum values come from other files: their
+// enums, those they re-export or compute members from, a package's declarations and a global declaration. The
+// padding makes the program emit enough for threads (`littleEmitText`).
 const constEnumFiles = {
   'src/enums.ts':
     'export const enum Flags { None = 0, A = 1 << 0, B = 1 << 1, AB = A | B, Neg = -1, Big = 2 ** 40 }\n' +
@@ -401,10 +403,13 @@ test('JavaScript emit on emit threads matches emit on one thread', { skip: tscTs
     assert.match(expected.outputs['use.js'], /42 \/\* Ambient\.Z \*\//);
     assert.match(expected.outputs['use.js'], /14 \/\* Derived\.E \*\//);
     assert.match(expected.outputs['padding.js'], /13 \/\* Space\.Inner\.Deep \*\/|14 \/\* Derived\.E \*\//);
-    const actual = run(cwd, ['--checkers', '1']);
-    assert.equal(actual.stdout, expected.stdout, `stdout with ${JSON.stringify(extra)}`);
-    assert.equal(actual.status, expected.status, `status with ${JSON.stringify(extra)}`);
-    assert.deepEqual(actual.outputs, expected.outputs, `outputs with ${JSON.stringify(extra)}`);
+    for (const checkers of ['1', '2', '4']) {
+      const actual = run(cwd, ['--checkers', checkers]);
+      const label = `${JSON.stringify(extra)} with --checkers ${checkers}`;
+      assert.equal(actual.stdout, expected.stdout, `stdout ${label}`);
+      assert.equal(actual.status, expected.status, `status ${label}`);
+      assert.deepEqual(actual.outputs, expected.outputs, `outputs ${label}`);
+    }
   }
 });
 
@@ -416,26 +421,44 @@ test('emit threads start and finish without failing', { skip: tscTsMissing }, ()
     mkdirSync(dirname(join(cwd, path)), { recursive: true });
     writeFileSync(join(cwd, path), content);
   }
-  const result = spawnSync(tscTs[0], [...tscTs.slice(1), '-p', '.', '--pretty', 'false', '--checkers', '1'], {
-    cwd,
-    env: { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: bundledLibs, TSC_TS_CHECKERS_TRACE: '1' },
-    encoding: 'utf8',
-  });
-  assert.equal(result.status, 0, result.stdout);
-  assert.doesNotMatch(result.stderr, /emit threads: thread \d+ failed/);
-  // Under Node.js, which copies what it posts, there are no emit threads.
-  if (!/emit threads:/.test(result.stderr)) return;
-  let emitted = 0;
-  let withKinds = 0;
-  const lines = /emit threads: thread \d+ emitted (\d+) files( with metadata kinds \((\d+) missed)?/g;
-  for (const match of result.stderr.matchAll(lines)) {
-    if (match[2] === undefined) emitted += Number(match[1]);
-    else {
-      withKinds += Number(match[1]);
-      assert.equal(match[3], '0', 'no file missed a recorded kind');
+  const traced = (args) => {
+    const result = spawnSync(tscTs[0], [...tscTs.slice(1), '-p', '.', '--pretty', 'false', ...args], {
+      cwd,
+      env: { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: bundledLibs, TSC_TS_CHECKERS_TRACE: '1' },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stdout);
+    assert.doesNotMatch(result.stderr, /thread \d+ failed/);
+    let emitted = 0;
+    let withKinds = 0;
+    const lines = /emit threads: thread \d+ emitted (\d+) files( with metadata kinds \((\d+) missed)?/g;
+    for (const match of result.stderr.matchAll(lines)) {
+      if (match[2] === undefined) emitted += Number(match[1]);
+      else {
+        withKinds += Number(match[1]);
+        assert.equal(match[3], '0', 'no file missed a recorded kind');
+      }
     }
-  }
-  // Every file but the declaration file, and then the decorated file, with its decorator metadata.
-  assert.equal(emitted, 8);
-  assert.equal(withKinds, 1);
+    const declarationThread = /checkers: emit-only thread 0 emitted (\d+) files/.exec(result.stderr);
+    return { stderr: result.stderr, emitted, withKinds, declarationThread };
+  };
+  // With declarations, the declaration thread emits them and the decorated file; without, the second wave
+  // emits the decorated file.
+  const withDeclarations = traced(['--checkers', '1']);
+  // Under Node.js, which copies what it posts, there are no emit threads.
+  if (!/emit threads:/.test(withDeclarations.stderr)) return;
+  // Every file but the declaration file and the decorated file.
+  assert.equal(withDeclarations.emitted, 8);
+  assert.equal(withDeclarations.withKinds, 0);
+  assert.ok(withDeclarations.declarationThread !== null, 'a declaration thread emitted');
+  const withoutDeclarations = traced(['--checkers', '1', '--declaration', 'false', '--declarationMap', 'false']);
+  assert.equal(withoutDeclarations.emitted, 8);
+  assert.equal(withoutDeclarations.withKinds, 1);
+  assert.equal(withoutDeclarations.declarationThread, null);
+  // With checker threads, the declaration thread emits the declarations while they check, when it has a CPU of its
+  // own (`declarationThreadPays`): with 2 checkers, on more than 2 CPUs.
+  const withCheckers = traced(['--checkers', '2']);
+  if (availableParallelism() > 2)
+    assert.ok(withCheckers.declarationThread !== null, 'a declaration thread emitted with checkers');
+  else assert.equal(withCheckers.declarationThread, null, 'no declaration thread without a CPU of its own');
 });
