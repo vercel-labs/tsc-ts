@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tempDir } from './temp.mjs';
@@ -454,6 +455,10 @@ test('emit threads start and finish without failing', { skip: tscTsMissing }, ()
   assert.equal(withoutDeclarations.emitted, 8);
   assert.equal(withoutDeclarations.withKinds, 1);
   assert.equal(withoutDeclarations.declarationThread, null);
-  // With checker threads, the declaration thread emits the declarations while they check.
-  assert.ok(traced(['--checkers', '2']).declarationThread !== null, 'a declaration thread emitted with checkers');
+  // With checker threads, the declaration thread emits the declarations while they check, when it has a CPU of its
+  // own (`declarationThreadPays`): with 2 checkers, on more than 2 CPUs.
+  const withCheckers = traced(['--checkers', '2']);
+  if (availableParallelism() > 2)
+    assert.ok(withCheckers.declarationThread !== null, 'a declaration thread emitted with checkers');
+  else assert.equal(withCheckers.declarationThread, null, 'no declaration thread without a CPU of its own');
 });
