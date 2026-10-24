@@ -319,3 +319,114 @@ test('parse and checker threads start and finish without failing', { skip: tscTs
   assert.match(result.stderr, /checkers: finished/);
   assert.doesNotMatch(result.stderr, /thread \d+ failed/);
 });
+
+// At `--checkers 1` in native builds, threads without a checker emit the JavaScript of the program
+// (parallel-emit.ts) while the main thread checks it and then emits the declarations, and the JavaScript of
+// files with decorator metadata, which asks the checker. Const enum values come from other files: their
+// enums, those they re-export or compute members from, a package's declarations and a global declaration.
+// The padding makes the program emit enough for threads (`littleEmitText`).
+const constEnumFiles = {
+  'src/enums.ts':
+    'export const enum Flags { None = 0, A = 1 << 0, B = 1 << 1, AB = A | B, Neg = -1, Big = 2 ** 40 }\n' +
+    'export const enum Names { First = "first", Quote = "it\'s \\"q\\"\\n", Joined = `${First}-${Quote}` }\n' +
+    'export enum Regular { X = 3, Y = X * 2 }\n' +
+    'export namespace Space { export const enum Inner { Deep = Flags.AB + 10 } }\n',
+  'src/derived.ts':
+    'import { Flags } from "./enums";\nexport const enum Derived { C = Flags.AB << 2, E = Flags.B | C }\n',
+  'src/reexport.ts': 'export { Flags as Renamed, Space } from "./enums";\nexport * from "./derived";\n',
+  'src/globals.d.ts': 'declare const enum Global { Q = 7, R = Q + 1 }\n',
+  'node_modules/ambient/package.json': '{ "name": "ambient", "types": "index.d.ts" }\n',
+  'node_modules/ambient/index.d.ts': 'export declare const enum Ambient { Z = 42, W = "w" }\n',
+  'src/use.ts':
+    'import { Flags, Names, Regular, Space } from "./enums";\nimport * as all from "./enums";\n' +
+    'import { Renamed, Derived } from "./reexport";\nimport type { Flags as Only } from "./enums";\n' +
+    'import { Ambient } from "ambient";\n' +
+    'export const values = [Flags.A, Flags["B"], Flags.AB, Flags.Neg, Flags.Big, Names.Quote, Names.Joined,\n' +
+    '  Regular.Y, Space.Inner.Deep, all.Flags.B, all.Space.Inner.Deep, Renamed.AB, Derived.C, Derived.E,\n' +
+    '  Global.Q, Global.R, Ambient.Z, Ambient.W];\n' +
+    'export function pick(f: Only) { return f === Flags.A ? Names.First : Ambient.W; }\n',
+  'src/decorated.ts':
+    'import { Flags } from "./enums";\nimport { Regular } from "./enums";\n' +
+    'declare function d(...args: any[]): any;\n' +
+    'export class Model { @d flags: Flags = Flags.AB; @d run(@d at: Date, r: Regular): Promise<void> { return Promise.resolve(); } }\n',
+  'src/data.json': '{ "name": "data", "values": [1, 2, 3] }\n',
+  'src/plain.js': 'export function plain(a) { return a + 1; }\n',
+  'src/index.ts':
+    'import data from "./data.json";\nimport { plain } from "./plain.js";\n' +
+    'export * from "./use";\nexport * from "./decorated";\nexport const summary = { name: data.name, next: plain(1) };\n',
+  'src/padding.ts':
+    'import { Flags } from "./enums";\nimport { Derived } from "./reexport";\n' +
+    Array.from(
+      { length: 800 },
+      (_, k) => `export function pad${k}(n: number) { return n + ${k} + Flags.A + Derived.E; }\n`,
+    ).join(''),
+  'tsconfig.json': JSON.stringify({
+    compilerOptions: {
+      target: 'ES2022',
+      strict: true,
+      types: [],
+      module: 'commonjs',
+      esModuleInterop: true,
+      resolveJsonModule: true,
+      allowJs: true,
+      experimentalDecorators: true,
+      emitDecoratorMetadata: true,
+      declaration: true,
+      declarationMap: true,
+      sourceMap: true,
+      listEmittedFiles: true,
+      rootDir: 'src',
+      outDir: 'out',
+    },
+    include: ['src'],
+  }),
+};
+
+test('JavaScript emit on emit threads matches emit on one thread', { skip: tscTsMissing }, () => {
+  for (const extra of [
+    {},
+    { emitDecoratorMetadata: false },
+    { module: 'esnext', preserveConstEnums: true, declaration: false, declarationMap: false },
+  ]) {
+    const config = JSON.parse(constEnumFiles['tsconfig.json']);
+    Object.assign(config.compilerOptions, extra);
+    const cwd = tempDir('tsc-ts-parallel-js-emit-');
+    for (const [path, content] of Object.entries({ ...constEnumFiles, 'tsconfig.json': JSON.stringify(config) })) {
+      mkdirSync(dirname(join(cwd, path)), { recursive: true });
+      writeFileSync(join(cwd, path), content);
+    }
+    const expected = run(cwd, ['--singleThreaded']);
+    assert.equal(expected.status, 0, expected.stdout);
+    assert.match(expected.outputs['use.js'], /42 \/\* Ambient\.Z \*\//);
+    assert.match(expected.outputs['use.js'], /14 \/\* Derived\.E \*\//);
+    assert.match(expected.outputs['padding.js'], /13 \/\* Space\.Inner\.Deep \*\/|14 \/\* Derived\.E \*\//);
+    const actual = run(cwd, ['--checkers', '1']);
+    assert.equal(actual.stdout, expected.stdout, `stdout with ${JSON.stringify(extra)}`);
+    assert.equal(actual.status, expected.status, `status with ${JSON.stringify(extra)}`);
+    assert.deepEqual(actual.outputs, expected.outputs, `outputs with ${JSON.stringify(extra)}`);
+  }
+});
+
+// The threads' trace shows that they emitted the files and none failed, which the output alone doesn't (the main
+// thread emits what a failed thread didn't).
+test('emit threads start and finish without failing', { skip: tscTsMissing }, () => {
+  const cwd = tempDir('tsc-ts-parallel-js-emit-threads-');
+  for (const [path, content] of Object.entries(constEnumFiles)) {
+    mkdirSync(dirname(join(cwd, path)), { recursive: true });
+    writeFileSync(join(cwd, path), content);
+  }
+  const result = spawnSync(tscTs[0], [...tscTs.slice(1), '-p', '.', '--pretty', 'false', '--checkers', '1'], {
+    cwd,
+    env: { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: bundledLibs, TSC_TS_CHECKERS_TRACE: '1' },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stdout);
+  assert.doesNotMatch(result.stderr, /emit threads: thread \d+ failed/);
+  // Under Node.js, which copies what it posts, there are no emit threads.
+  if (!/emit threads:/.test(result.stderr)) return;
+  let emitted = 0;
+  for (const match of result.stderr.matchAll(/emit threads: thread \d+ emitted (\d+) files/g))
+    emitted += Number(match[1]);
+  // Every file but the declaration file and the decorated file (decorator metadata).
+  assert.equal(emitted, 8);
+});

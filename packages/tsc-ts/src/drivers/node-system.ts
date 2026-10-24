@@ -28,7 +28,14 @@ import {
   readThreadProject,
 } from '../compiler/tsc-cli.js';
 import type { OutputWriter } from '../compiler/compile-program.js';
-import { compile, compileInParallel, compileThreads, SystemWriter } from '../compiler/tsc-compile.js';
+import {
+  compile,
+  compileEmitThreads,
+  compileInParallel,
+  compileThreads,
+  compileWithEmitThreads,
+  SystemWriter,
+} from '../compiler/tsc-compile.js';
 import { buildWithThreads } from '../compiler/tsc-build.js';
 import { watch, watchBuild, watchRestart } from '../compiler/tsc-watch.js';
 
@@ -292,7 +299,20 @@ function runCommandLineResult(sys: System, result: CommandLineResult): number {
   if (result.kind === 'exit') return result.status;
   if (result.kind === 'compile') {
     const threads = compileThreads(sys, result);
-    if (threads <= 1) return compile(sys, result);
+    if (threads <= 1) {
+      // Emit threads report back on this thread's event loop too.
+      const emitThreads = compileEmitThreads(result);
+      if (
+        emitThreads > 0 &&
+        compileWithEmitThreads(sys, result, emitThreads, (status) => {
+          markMemory();
+          mark('exit');
+          process.exit(status);
+        })
+      )
+        return watching;
+      return compile(sys, result);
+    }
     // Checker threads report back on this thread's event loop.
     compileInParallel(sys, result, threads, (status) => {
       markMemory();

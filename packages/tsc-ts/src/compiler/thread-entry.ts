@@ -16,6 +16,7 @@ import {
   parallelCheck,
   recycleFiles,
 } from './parallel-check.js';
+import { emitFromQueue, parallelEmit, postedEmitResult } from './parallel-emit.js';
 import { type LoadMessage, parallelParse } from './parallel-parse.js';
 import type { ParseThread } from './parse-thread.js';
 import { useLazyJSDocTable } from './parser.js';
@@ -38,7 +39,7 @@ export interface ThreadDrivers {
 export type ThreadSpawn = (data: ThreadData) => Worker;
 
 /** The `workerData` of a thread of tsc-ts. */
-export type ThreadData = CheckerThreadData | ParseThreadData | ReferenceThreadData;
+export type ThreadData = CheckerThreadData | EmitThreadData | ParseThreadData | ReferenceThreadData;
 
 export interface CheckerThreadData {
   readonly kind: 'check';
@@ -55,6 +56,17 @@ export interface CheckerThreadData {
   readonly emitKinds: number[] | undefined;
   readonly checking: boolean;
   readonly units: number[];
+}
+
+export interface EmitThreadData {
+  readonly kind: 'emit';
+  /** The shared, published program. */
+  readonly program: Program;
+  readonly index: number;
+  readonly counter: SharedArrayBuffer;
+  readonly files: number[];
+  readonly nodeIds: number;
+  readonly symbolIds: number;
 }
 
 export interface ParseThreadData {
@@ -105,6 +117,8 @@ export function startThreads(spawn: ThreadSpawn, drivers: ThreadDrivers, args: r
       units,
     });
   if (sharesPublishedGraphs) {
+    parallelEmit.spawn = (program, index, counter, files, nodeIds, symbolIds) =>
+      spawn({ kind: 'emit', program, index, counter, files, nodeIds, symbolIds });
     parallelParse.spawn = (configFileName, counter, index) =>
       spawn({ kind: 'parse', configFileName, args, counter, index });
     // The main thread compares the files a reference thread that failed did not.
@@ -123,6 +137,7 @@ export function runThread(data: unknown, drivers: ThreadDrivers): void {
   const kind = (data as { kind: string }).kind;
   if (kind === 'parse') runParseThread(data as ParseThreadData, drivers);
   else if (kind === 'references') runReferenceThread(data as ReferenceThreadData);
+  else if (kind === 'emit') runEmitThread(data as EmitThreadData, drivers);
   else runCheckerThread(data as CheckerThreadData, drivers);
 }
 
@@ -139,6 +154,22 @@ function runReferenceThread(data: ReferenceThreadData): void {
   useThreadTextCaches();
   compareReferencesOfThread(publish(job.program), job);
   mark('references compared');
+}
+
+/** An emit thread (parallel-emit.ts): emits JavaScript, without a checker. */
+function runEmitThread(job: EmitThreadData, drivers: ThreadDrivers): void {
+  setTimelineThread('e' + String(job.index));
+  mark('thread start');
+  // As on a checker thread, the shared program is never written.
+  reserveNodeIds(job.nodeIds);
+  reserveSymbolIds(job.symbolIds);
+  assignSymbolIdsAtCreation();
+  useLazyJSDocTable();
+  useThreadTextCaches();
+  const program = publish(job.program);
+  const result = emitFromQueue(program, job.index, new Int32Array(job.counter), job.files, drivers.outputWriter());
+  parentPort!.postMessage(postedEmitResult(result, program));
+  mark('result posted');
 }
 
 /** A checker thread (parallel-check.ts). */

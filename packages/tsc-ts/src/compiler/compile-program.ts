@@ -13,7 +13,7 @@ import { CheckerDeclarationEmitResolver, CheckerEmitResolver } from './checker-e
 import { getEmitModuleFormatOfFile } from './program-utilities.js';
 import { DeclarationGlobals, SyntacticDeclarationEmitResolver } from './transformers/declarations-syntactic.js';
 import { mark } from './timeline.js';
-import type { EmitResolver } from './transformers/emit-resolver.js';
+import { type EmitResolver, SyntacticEmitResolver } from './transformers/emit-resolver.js';
 import { ModuleFormatHost } from './transformers/module.js';
 import { type MergedGlobals, ModuleLookup, ReferenceResolver } from './transformers/reference-resolver.js';
 
@@ -193,6 +193,35 @@ export class EmitIndexes {
   }
 }
 
+/**
+ * The JavaScript emit of a program's files without a checker, for emit threads (parallel-emit.ts).
+ * JavaScript emit asks the checker only how decorator metadata serializes a type
+ * (`CheckerEmitResolver`); files that need that are emitted by a `ProgramEmitter`.
+ */
+export class JavaScriptEmitter {
+  private readonly host: ProgramEmitHost;
+
+  constructor(program: Program) {
+    const options = program.options;
+    const indexes = program.emitIndexes;
+    const references = new ReferenceResolver(
+      options,
+      program.getSourceFiles(),
+      new ProgramModules(program),
+      indexes !== undefined ? indexes.globals : undefined,
+    );
+    this.host = new ProgramEmitHost(program, new SyntacticEmitResolver(options, references));
+  }
+
+  emit(file: SourceFile, writer: OutputWriter): EmitResult {
+    const host = this.host;
+    host.writer = writer;
+    const result = emitFiles(host, [file], EmitOnly.Js);
+    host.writer = undefined;
+    return result;
+  }
+}
+
 /** A checked program and the emit of its files. */
 export class ProgramEmitter {
   private host: ProgramEmitHost | undefined = undefined;
@@ -354,16 +383,19 @@ export class PlainProgram extends CompilerProgram {
     const program = this.program;
     const files = program.getSourceFiles();
     const parallel = this.checked.emittedInParallel;
-    // Checker threads emitted the files they checked (parallel-check.ts); the others are emitted here, in order.
+    // Checker threads emitted the files they checked (parallel-check.ts), or emit threads their JavaScript
+    // (parallel-emit.ts); the rest is emitted here, in order.
     const result =
       parallel === undefined
         ? this.emitter.emit(files, EmitOnly.All, writer)
         : combineEmitResults(
             files.map((file, i) => {
               const emitted = parallel[i];
-              return emitted !== undefined
-                ? writeHeldOutputs(emitted, writer)
-                : this.emitter.emit([file], EmitOnly.All, writer);
+              if (emitted === undefined) return this.emitter.emit([file], EmitOnly.All, writer);
+              const written = writeHeldOutputs(emitted, writer);
+              // Emit threads emit JavaScript only; declarations need this thread's checker.
+              if (!this.checked.javaScriptEmittedOnThreads || !getEmitDeclarations(options)) return written;
+              return combineEmitResults([written, this.emitter.emit([file], EmitOnly.Dts, writer)]);
             }),
           );
     if (options.noEmit === true) {

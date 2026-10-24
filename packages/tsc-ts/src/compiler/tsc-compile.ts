@@ -22,6 +22,7 @@ import {
   TimeStampHost,
 } from './incremental.js';
 import { checkerThreads, shareWithCheckers, startParallelCheck, traceSingleChecker } from './parallel-check.js';
+import { emitThreads, startParallelEmit } from './parallel-emit.js';
 import { sharesPublishedGraphs } from '@scriptc/threads';
 import { getNormalizedAbsolutePath } from './path.js';
 import { sortAndDeduplicateDiagnostics } from './program.js';
@@ -120,6 +121,69 @@ export function compileThreads(_sys: System, work: CompileWork): number {
   const options = work.program.options;
   mark('compile threads');
   return checkerThreads(options.checkers, options.singleThreaded, work.program);
+}
+
+/** The number of threads to emit JavaScript on while this thread checks (`compileWithEmitThreads`), or 0. */
+export function compileEmitThreads(work: CompileWork): number {
+  return emitThreads(work.program, work.program.options.singleThreaded);
+}
+
+/**
+ * Like `compile`, with this thread checking the program while `threads` threads emit its JavaScript
+ * (parallel-emit.ts); calls `done` with the exit status once it is emitted and reported. Returns
+ * false where emit threads don't apply, and `compile` runs instead: an incremental program, which
+ * emits what changed, one that emits nothing or waits for its errors to emit (`noEmitOnError`), and
+ * `composite` and `outFile`, whose emit depends on the whole program.
+ */
+export function compileWithEmitThreads(
+  sys: System,
+  work: CompileWork,
+  threads: number,
+  done: (status: ExitStatus) => void,
+): boolean {
+  const program = work.program;
+  const options = program.options;
+  if (
+    work.incremental ||
+    options.noEmit === true ||
+    options.noEmitOnError === true ||
+    options.listFilesOnly === true ||
+    options.composite === true ||
+    (options.outFile ?? '') !== ''
+  )
+    return false;
+  const times = new CompileTimes();
+  times.configTime = work.configTime;
+  times.parseTime = work.parseTime;
+  const bindStart = performance.now();
+  const checked = new CheckedProgram(program);
+  times.bindTime = performance.now() - bindStart;
+  shareWithCheckers(checked);
+  const compilerProgram = new PlainProgram(checked, times);
+  let diagnostics: Diagnostic[] | undefined = undefined;
+  let emitted = false;
+  const report = (): void => {
+    if (diagnostics === undefined || !emitted) return;
+    const result = reportEmitAndErrors(
+      sys,
+      compilerProgram,
+      diagnostics,
+      work.reporter,
+      work.errorSummary,
+      new SystemWriter(sys),
+      outputLocale(options),
+    );
+    traceSingleChecker(checked);
+    done(emitStatusAndReportStatistics(sys, compilerProgram, result));
+  };
+  startParallelEmit(checked, threads, () => {
+    emitted = true;
+    report();
+  });
+  diagnostics = getDiagnosticsOfProgram(compilerProgram, false);
+  mark('diagnostics collected');
+  report();
+  return true;
 }
 
 /**
@@ -285,6 +349,19 @@ export function emitFilesAndReportErrors(
 ): CompileResult {
   const diagnostics = getDiagnosticsOfProgram(program, false);
   mark('diagnostics collected');
+  return reportEmitAndErrors(sys, program, diagnostics, reporter, errorSummary, writer, locale);
+}
+
+/** The rest of `emitFilesAndReportErrors`, with the program's `diagnostics` collected. */
+function reportEmitAndErrors(
+  sys: System,
+  program: CompilerProgram,
+  diagnostics: Diagnostic[],
+  reporter: DiagnosticReporter,
+  errorSummary: ErrorSummaryReporter,
+  writer: OutputWriter,
+  locale: Locale,
+): CompileResult {
   let emitResult = new EmitResult();
   emitResult.emitSkipped = true;
   if (program.options.listFilesOnly !== true) {
