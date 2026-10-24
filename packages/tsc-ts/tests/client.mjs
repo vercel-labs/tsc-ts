@@ -21,10 +21,7 @@ export class Client {
       stdio: pipe === undefined ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'ignore', 'pipe'],
       env: { ...process.env, ...env },
     });
-    this.buffer = Buffer.alloc(0);
-    this.waiters = [];
-    this.stderr = '';
-    this.calls = [];
+    this.init();
     const receive = (chunk) => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
       this.drain();
@@ -41,6 +38,33 @@ export class Client {
     this.child.on('exit', () => {
       for (const w of this.waiters.splice(0)) w.reject(new Error(`server exited: ${this.stderr}`));
     });
+  }
+
+  // A client of the server listening on the Unix socket `path` (`tsc-ts --api --listen`). `close()` resolves once
+  // the server has closed the connection.
+  static connect(path) {
+    const client = Object.create(Client.prototype);
+    client.init();
+    client.socket = connect(path);
+    client.socket.on('data', (chunk) => {
+      client.buffer = Buffer.concat([client.buffer, chunk]);
+      client.drain();
+    });
+    client.output = client.socket;
+    // Resolves to 0, or to 1 after a connection error.
+    client.exited = new Promise((resolve) => client.socket.once('close', (error) => resolve(error ? 1 : 0)));
+    client.socket.on('error', (error) => (client.stderr += `${error.message}\n`));
+    client.socket.once('close', () => {
+      for (const w of client.waiters.splice(0)) w.reject(new Error(`connection closed: ${client.stderr}`));
+    });
+    return client;
+  }
+
+  init() {
+    this.buffer = Buffer.alloc(0);
+    this.waiters = [];
+    this.stderr = '';
+    this.calls = [];
   }
 
   // Sends a request and returns { type: 'response' | 'error', payload: Buffer }.
