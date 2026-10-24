@@ -4,7 +4,7 @@
     { "name": "tscTsListen", "symbol": "tsc_ts_listen", "params": ["string"], "returns": "i32" },
     { "name": "tscTsAccept", "symbol": "tsc_ts_accept", "params": ["i32", "i32"], "returns": "i32" },
     { "name": "tscTsClose", "symbol": "tsc_ts_close", "params": ["i32"], "returns": "void" },
-    { "name": "tscTsUnlisten", "symbol": "tsc_ts_unlisten", "params": ["i32", "string"], "returns": "void" }
+    { "name": "tscTsUnlink", "symbol": "tsc_ts_unlink", "params": ["string"], "returns": "void" }
   ],
   "libraries": ["../dist/listen-posix.o"]
 }

@@ -30,11 +30,11 @@ declare function tscTsOpenPipe(name: string): number;
 
 // The Unix socket server (native/listen-posix.c, linked into the Linux and macOS builds): a socket listening at a path,
 // which it binds with mode 0600, or -1 after an error message; the next client of this user, -2 when none connects
-// within the timeout, or -1 after an error message; and closing a client, or the socket and its file.
+// within the timeout, or -1 after an error message; closing a descriptor; and removing the socket file.
 declare function tscTsListen(path: string): number;
 declare function tscTsAccept(listener: number, timeoutMs: number): number;
 declare function tscTsClose(fd: number): void;
-declare function tscTsUnlisten(listener: number, path: string): void;
+declare function tscTsUnlink(path: string): void;
 
 // Runs the server until the client closes its end; returns the exit status.
 export function runServer(args: string[], defaultLibraryPath: string): number {
@@ -72,7 +72,8 @@ export function runServer(args: string[], defaultLibraryPath: string): number {
  * the symbols of the whole process, continue from earlier clients) and reuses the parses of files whose text is
  * unchanged. Exits when no client connects for `idleExit` seconds, or after a client when the
  * resident memory is above the limit (TSC_TS_LISTEN_MEMORY megabytes, or 2.5 times the memory after the first
- * client), since syntax trees, symbols and types are never freed natively. Removes the socket file when it exits.
+ * client), since syntax trees, symbols and types are never freed natively. To stop, it removes the socket file, so no
+ * client can connect any more, serves the clients that connected before, and exits.
  */
 function serveClients(path: string, idleExit: number, fs: ClientFileSystem, session: Session): number {
   const listener = tscTsListen(path);
@@ -80,9 +81,15 @@ function serveClients(path: string, idleExit: number, fs: ClientFileSystem, sess
   const megabytes = Number(process.env.TSC_TS_LISTEN_MEMORY ?? '');
   let limit = megabytes > 0 ? megabytes * 1048576 : 0;
   let status = 0;
+  let stopping = false;
   for (;;) {
-    const fd = tscTsAccept(listener, idleExit * 1000);
-    if (fd === -2) break;
+    const fd = tscTsAccept(listener, stopping ? 0 : idleExit * 1000);
+    if (fd === -2) {
+      if (stopping) break;
+      tscTsUnlink(path);
+      stopping = true;
+      continue;
+    }
     if (fd < 0) {
       status = 1;
       break;
@@ -98,9 +105,13 @@ function serveClients(path: string, idleExit: number, fs: ClientFileSystem, sess
     session.reset();
     const memory = residentMemory();
     if (limit === 0) limit = memory * firstClientFactor;
-    else if (memory > limit) break;
+    else if (memory > limit && !stopping) {
+      tscTsUnlink(path);
+      stopping = true;
+    }
   }
-  tscTsUnlisten(listener, path);
+  if (!stopping) tscTsUnlink(path);
+  tscTsClose(listener);
   return status;
 }
 

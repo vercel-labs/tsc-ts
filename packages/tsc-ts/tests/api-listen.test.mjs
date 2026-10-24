@@ -92,7 +92,7 @@ async function freshSession(dir) {
 }
 
 async function socketSession(server, dir) {
-  const client = Client.connect(server.socket);
+  const client = server.client ?? Client.connect(server.socket);
   const result = await session(client, dir);
   assert.equal(await client.close(), 0, client.stderr);
   return result;
@@ -153,14 +153,25 @@ test('the server exits when no client connects for the idle time', { skip, timeo
   assert.equal(existsSync(server.socket), false, 'the server removes its socket file');
 });
 
-test('the server exits after a client when its memory is above the limit', { skip, timeout: 300_000 }, async () => {
-  const dir = copyProject();
-  const server = listen(dir, [], { TSC_TS_LISTEN_MEMORY: '1' });
-  await server.ready;
-  await socketSession(server, dir);
-  assert.equal(await server.exited, 0, server.stderr);
-  assert.equal(existsSync(server.socket), false, 'the server removes its socket file');
-});
+test(
+  'the server exits after a client when its memory is above the limit, serving the clients that connected before',
+  { skip, timeout: 300_000 },
+  async () => {
+    const dir = copyProject();
+    const expected = await freshSession(dir);
+    const server = listen(dir, [], { TSC_TS_LISTEN_MEMORY: '1' });
+    await server.ready;
+    const first = Client.connect(server.socket);
+    assert.equal(await first.json('ping'), 'pong');
+    // The second client connects while the server serves the first one.
+    const second = Client.connect(server.socket);
+    await new Promise((resolve) => second.socket.once('connect', resolve));
+    assert.equal(await first.close(), 0);
+    assert.deepEqual(await socketSession({ socket: server.socket, client: second }, dir), expected);
+    assert.equal(await server.exited, 0, server.stderr);
+    assert.equal(existsSync(server.socket), false, 'the server removes its socket file');
+  },
+);
 
 test(
   'a socket another server listens on is refused, and a socket file left by a server is replaced',

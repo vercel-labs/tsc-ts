@@ -23,7 +23,7 @@
 
 #include "listen-posix.h"
 
-/* The socket file this process bound, which it removes when it stops if the
+/* The socket file this process bound, which tsc_ts_unlink removes if the
  * path still names it. */
 static dev_t bound_device;
 static ino_t bound_inode;
@@ -89,7 +89,8 @@ int32_t tsc_ts_listen(const uint8_t *bytes, size_t size) {
   }
   if (listen(fd, 16) != 0) {
     fprintf(stderr, "tsc-ts: cannot listen on socket %s: %s\n", address.sun_path, strerror(errno));
-    tsc_ts_unlisten(fd, bytes, size);
+    tsc_ts_unlink(bytes, size);
+    close(fd);
     return -1;
   }
   return fd;
@@ -122,8 +123,7 @@ int32_t tsc_ts_accept(int32_t listener, int32_t timeout_ms) {
     int wait = -1;
     if (deadline >= 0) {
       int64_t left = deadline - now_ms();
-      if (left <= 0) return -2;
-      wait = left > INT32_MAX ? INT32_MAX : (int)left;
+      wait = left <= 0 ? 0 : left > INT32_MAX ? INT32_MAX : (int)left;
     }
     struct pollfd entry = {listener, POLLIN, 0};
     int ready = poll(&entry, 1, wait);
@@ -132,7 +132,10 @@ int32_t tsc_ts_accept(int32_t listener, int32_t timeout_ms) {
       fprintf(stderr, "tsc-ts: cannot wait for a client: %s\n", strerror(errno));
       return -1;
     }
-    if (ready == 0) continue;
+    if (ready == 0) {
+      if (deadline >= 0 && now_ms() >= deadline) return -2;
+      continue;
+    }
     int fd = accept(listener, NULL, NULL);
     if (fd < 0) {
       /* The client gave up before it was accepted. */
@@ -154,12 +157,11 @@ void tsc_ts_close(int32_t fd) {
   if (fd >= 0) close(fd);
 }
 
-void tsc_ts_unlisten(int32_t listener, const uint8_t *bytes, size_t size) {
+void tsc_ts_unlink(const uint8_t *bytes, size_t size) {
   struct sockaddr_un address;
   struct stat info;
   if (bound && socket_address(&address, bytes, size) && stat(address.sun_path, &info) == 0 &&
       info.st_dev == bound_device && info.st_ino == bound_inode)
     unlink(address.sun_path);
   bound = 0;
-  tsc_ts_close(listener);
 }
