@@ -1,9 +1,9 @@
 // `tsc-ts --api --listen`: on Linux and macOS the server listens on the Unix socket it is given and serves one client
 // at a time on it. Each client gets the responses a new server over standard input and output gives, and the server
 // reads every file through the client again; it exits after an idle time or above its memory limit, removing the
-// socket file.
+// socket file. native/listen-posix.test.c checks how it treats a socket file that exists.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, cpSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -216,3 +216,16 @@ test('-idle-exit needs -listen', { skip }, () => {
   assert.equal(result.status, 2);
   assert.match(result.stderr, /-idle-exit needs -listen/);
 });
+
+test(
+  'the socket server refuses a socket a server listens on without waiting, and replaces a socket file left behind',
+  { skip: !posix && 'needs Linux or macOS', timeout: 120_000 },
+  () => {
+    const binary = join(tempDir('tsc-ts-listen-test-'), 'listen-posix-test');
+    const sources = ['native/listen-posix.test.c', 'native/listen-posix.c'];
+    execFileSync('clang', ['-std=c11', '-Wall', '-Wextra', '-Werror', ...sources, '-o', binary]);
+    const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /refuses a socket a server listens on/);
+  },
+);

@@ -44,11 +44,15 @@ static void close_on_exec(int fd) {
   if (flags >= 0) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
-/* Whether a server accepts connections on the socket at `address`. */
+/* Whether a server listens on the socket at `address`. The probe does not
+ * wait: a server whose queue of pending clients is full still listens. */
 static int socket_answers(const struct sockaddr_un *address) {
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) return 0;
-  int answers = connect(fd, (const struct sockaddr *)address, sizeof *address) == 0;
+  int flags = fcntl(fd, F_GETFL);
+  if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  int answers = connect(fd, (const struct sockaddr *)address, sizeof *address) == 0 || errno == EAGAIN ||
+                errno == EWOULDBLOCK || errno == EINPROGRESS;
   close(fd);
   return answers;
 }
