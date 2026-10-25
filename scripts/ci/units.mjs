@@ -22,6 +22,7 @@ const parts = {
 // (src/drivers/cli.ts, dist/cli). Each of their units has a native twin, `native:<unit id>`.
 const nativeFiles = {
   'packages/tsc-ts/tests/api.test.mjs': 'TSC_TS_BIN',
+  'packages/tsc-ts/tests/api-libraries-from-disk.test.mjs': 'TSC_TS_BIN',
   'packages/tsc-ts/tests/api-listen.test.mjs': 'TSC_TS_BIN',
   'packages/tsc-ts/tests/api-pipe.test.mjs': 'TSC_TS_BIN',
   'packages/tsc-ts/tests/build.test.mjs': 'TSC_TS_BIN',
