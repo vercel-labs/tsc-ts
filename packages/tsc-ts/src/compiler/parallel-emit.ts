@@ -70,20 +70,36 @@ const littleEmitText = 50_000;
 /**
  * The number of threads to emit the JavaScript of `program` on, or 0 to emit it on this thread:
  * where threads can start and the program emits enough, one fewer than the CPUs, at most
- * `maxEmitThreads`.
+ * `maxEmitThreads`. `emitKinds` are what the emit of each file includes (`emitsJavaScript`).
  */
-export function emitThreads(program: Program, singleThreaded: boolean | undefined): number {
+export function emitThreads(
+  program: Program,
+  singleThreaded: boolean | undefined,
+  emitKinds: readonly number[] | undefined = undefined,
+): number {
   if (parallelEmit.spawn === undefined || singleThreaded === true) return 0;
   const cpus = availableParallelism();
   if (cpus < 2) return 0;
-  const options = program.options;
+  const files = program.getSourceFiles();
   let text = 0;
-  for (const file of program.getSourceFiles())
-    if (sourceFileMayBeEmitted(file, options)) {
-      text += file.end;
+  for (let i = 0; i < files.length; i++)
+    if (emitsJavaScript(program, emitKinds, i)) {
+      text += files[i]!.end;
       if (text >= littleEmitText) return Math.min(cpus - 1, maxEmitThreads);
     }
   return 0;
+}
+
+/**
+ * Whether the emit of file `index` of `program` includes its JavaScript. `emitKinds` are what the emit of
+ * each file includes, by file index: an `EmitOnly`, or -1 for nothing, as an incremental program's pending
+ * emit selects (`IncrementalProgram.emitKindsOnCheckers`); `undefined` where every file that may be emitted
+ * is emitted in full.
+ */
+function emitsJavaScript(program: Program, emitKinds: readonly number[] | undefined, index: number): boolean {
+  if (emitKinds === undefined) return sourceFileMayBeEmitted(program.getSourceFiles()[index]!, program.options);
+  const kind = emitKinds[index]!;
+  return kind === EmitOnly.All || kind === EmitOnly.Js;
 }
 
 /**
@@ -96,20 +112,25 @@ function needsMetadataKinds(file: SourceFile, program: Program): boolean {
 }
 
 /**
- * Emits the JavaScript of the files of `checked` on `threads` threads and calls `done` once they are
- * emitted; the program must be shared (`shareWithCheckers`). The emit results go to
- * `checked.emittedInParallel`, which `PlainProgram.emit` completes on this thread. Returns at once, with the
- * indexes of the files left for `startMetadataEmit`: the results arrive on this thread's event loop.
+ * Emits the JavaScript of the files of `checked` whose emit includes it (`emitKinds`) on `threads` threads
+ * and calls `done` once they are emitted; the program must be shared (`shareWithCheckers`). The emit results
+ * go to `checked.emittedInParallel`, which the program's emit (`PlainProgram`, `IncrementalProgram`) completes
+ * on this thread. Returns at once, with the indexes of the files left for `startMetadataEmit`: the results
+ * arrive on this thread's event loop.
  */
-export function startParallelEmit(checked: CheckedProgram, threads: number, done: () => void): number[] {
+export function startParallelEmit(
+  checked: CheckedProgram,
+  threads: number,
+  done: () => void,
+  emitKinds: readonly number[] | undefined = undefined,
+): number[] {
   const program = checked.program;
-  const options = program.options;
   const files = program.getSourceFiles();
   const order: number[] = [];
   const metadata: number[] = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i]!;
-    if (!sourceFileMayBeEmitted(file, options)) continue;
+    if (!emitsJavaScript(program, emitKinds, i)) continue;
     if (needsMetadataKinds(file, program)) metadata.push(i);
     else order.push(i);
   }
@@ -204,26 +225,32 @@ export function declarationThreadPays(checkers: number): boolean {
 
 /**
  * Starts the declaration thread: one checker thread that only emits, while the program is checked on this
- * thread (`--checkers 1`) or on checker threads that emit only JavaScript, and calls `done` once it is done. It emits the declarations of every file of `checked`, and also the
+ * thread (`--checkers 1`) or on checker threads that emit only JavaScript, and calls `done` once it is done. It
+ * emits the declarations of every file of `checked` whose emit includes them (`emitKinds`), and also the
  * JavaScript of `metadata` (file indexes, from `startParallelEmit`), whose decorator metadata asks a checker. Its
  * checker checks only what emit asks; it reports nothing but the emit results, which it writes and which the
- * returned array receives by file index (undefined for a file it didn't emit, which `PlainProgram.emit` then
+ * returned array receives by file index (undefined for a file it didn't emit, which the program's emit then
  * emits here). Declaration files and decorator metadata are the same with any checker that emits them.
  */
 export function startDeclarationThread(
   checked: CheckedProgram,
   metadata: readonly number[],
   done: () => void,
+  emitKinds: readonly number[] | undefined = undefined,
 ): (EmitResult | undefined)[] {
   const program = checked.program;
   const options = program.options;
+  const files = program.getSourceFiles();
   const kinds: number[] = [];
   const results: (EmitResult | undefined)[] = [];
-  for (const file of program.getSourceFiles()) {
-    kinds.push(sourceFileMayBeEmitted(file, options) ? EmitOnly.Dts : -1);
+  for (let i = 0; i < files.length; i++) {
+    let declarations: boolean;
+    if (emitKinds === undefined) declarations = sourceFileMayBeEmitted(files[i]!, options);
+    else declarations = emitKinds[i] === EmitOnly.All || emitKinds[i] === EmitOnly.Dts;
+    kinds.push(declarations ? EmitOnly.Dts : -1);
     results.push(undefined);
   }
-  for (const i of metadata) kinds[i] = EmitOnly.All;
+  for (const i of metadata) kinds[i] = emitKinds === undefined ? EmitOnly.All : emitKinds[i]!;
   startParallelCheck(checked, 1, () => done(), true, kinds, false, results);
   mark('declaration thread spawned');
   return results;

@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -493,4 +493,151 @@ test('emit threads start and finish without failing', { skip: tscTsMissing }, ()
   if (availableParallelism() > 2)
     assert.ok(withCheckers.declarationThread !== null, 'a declaration thread emitted with checkers');
   else assert.equal(withCheckers.declarationThread, null, 'no declaration thread without a CPU of its own');
+});
+
+// Incremental programs and `tsc -b` projects that emit every file emit their JavaScript on emit threads too, the
+// declaration thread emitting their declarations: an incremental program without build info, and a project of
+// `tsc -b` without build info or that isn't incremental. Their outputs and build info, with its signatures,
+// emit signatures and latest changed declaration file, are what one thread writes.
+function writeProject(cwd, projectFiles) {
+  for (const [path, content] of Object.entries(projectFiles)) {
+    mkdirSync(dirname(join(cwd, path)), { recursive: true });
+    writeFileSync(join(cwd, path), content);
+  }
+}
+
+function runTraced(cwd, args) {
+  const result = spawnSync(tscTs[0], [...tscTs.slice(1), ...args, '--pretty', 'false'], {
+    cwd,
+    env: { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: bundledLibs, TSC_TS_CHECKERS_TRACE: '1' },
+    encoding: 'utf8',
+  });
+  let emitted = 0;
+  for (const match of result.stderr.matchAll(/emit threads: thread \d+ emitted (\d+) files/g))
+    emitted += Number(match[1]);
+  assert.doesNotMatch(result.stderr, /thread \d+ failed/);
+  // Status lines of `tsc -b` start with the time.
+  const stdout = result.stdout.replace(/\d{1,2}:\d{2}:\d{2}( [AP]M)?/g, '<time>');
+  return { stdout, status: result.status, emitted };
+}
+
+// Native builds start emit threads where there is more than one CPU; under Node.js, which copies what it posts,
+// there are none.
+const emitsOnThreads = tscTs[0] !== process.execPath && availableParallelism() > 1;
+
+const incrementalConfigs = [
+  { incremental: true, tsBuildInfoFile: 'out/tsconfig.tsbuildinfo' },
+  { incremental: true, tsBuildInfoFile: 'out/tsconfig.tsbuildinfo', declaration: false, declarationMap: false },
+  { composite: true, tsBuildInfoFile: 'out/tsconfig.tsbuildinfo', include: ['src', 'src/*.json'] },
+];
+
+test('incremental programs without build info emit on emit threads as on one thread', { skip: tscTsMissing }, () => {
+  for (const extra of incrementalConfigs) {
+    const config = JSON.parse(constEnumFiles['tsconfig.json']);
+    const { include, ...options } = extra;
+    Object.assign(config.compilerOptions, options);
+    if (include !== undefined) config.include = include;
+    const cwd = tempDir('tsc-ts-parallel-incremental-emit-');
+    writeProject(cwd, { ...constEnumFiles, 'tsconfig.json': JSON.stringify(config) });
+    const outputs = (args) => {
+      rmSync(join(cwd, 'out'), { recursive: true, force: true });
+      const result = runTraced(cwd, ['-p', '.', ...args]);
+      return { ...result, outputs: readOutputs(join(cwd, 'out')) };
+    };
+    const expected = outputs(['--singleThreaded']);
+    assert.equal(expected.status, 0, expected.stdout);
+    const label = JSON.stringify(extra);
+    assert.ok(expected.outputs['tsconfig.tsbuildinfo'] !== undefined, `build info ${label}`);
+    const actual = outputs(['--checkers', '1']);
+    if (emitsOnThreads) assert.ok(actual.emitted > 0, `files emitted on emit threads ${label}`);
+    assert.equal(actual.stdout, expected.stdout, `stdout ${label}`);
+    assert.equal(actual.status, expected.status, `status ${label}`);
+    assert.deepEqual(actual.outputs, expected.outputs, `outputs ${label}`);
+  }
+});
+
+test('tsc -b emits on emit threads as on one thread', { skip: tscTsMissing }, () => {
+  const library = {
+    'lib/src/lib.ts':
+      'export const enum Level { Low = 1, High = 2 }\nexport function level(n: number) { return n > 1 ? Level.High : Level.Low; }\n',
+    'lib/tsconfig.json': JSON.stringify({
+      compilerOptions: {
+        composite: true,
+        strict: true,
+        types: [],
+        rootDir: 'src',
+        outDir: 'out',
+        tsBuildInfoFile: 'out/tsconfig.tsbuildinfo',
+      },
+      include: ['src'],
+    }),
+  };
+  // The last project isn't incremental: `tsc -b` writes its build info next to its config.
+  for (const extra of [...incrementalConfigs, { tsBuildInfoFile: undefined }]) {
+    const config = JSON.parse(constEnumFiles['tsconfig.json']);
+    const { include, ...options } = extra;
+    Object.assign(config.compilerOptions, options);
+    delete config.compilerOptions.listEmittedFiles;
+    config.include = include ?? config.include;
+    config.references = [{ path: '../lib' }];
+    const app = {};
+    for (const [path, content] of Object.entries(constEnumFiles)) app[`app/${path}`] = content;
+    app['app/src/level.ts'] =
+      'import { Level, level } from "../../lib/src/lib";\nexport const high = level(2) === Level.High;\n';
+    app['app/tsconfig.json'] = JSON.stringify(config);
+    const cwd = tempDir('tsc-ts-parallel-build-emit-');
+    writeProject(cwd, {
+      ...library,
+      ...app,
+      'tsconfig.json': JSON.stringify({ files: [], references: [{ path: 'app' }] }),
+    });
+    // Each project's outputs, and build info written next to its config.
+    const projectOutputs = (project) => {
+      const result = readOutputs(join(cwd, project, 'out'));
+      for (const name of readdirSync(join(cwd, project)))
+        if (name.endsWith('.tsbuildinfo')) result[name] = readFileSync(join(cwd, project, name), 'utf8');
+      return result;
+    };
+    const outputs = (args, clean = true) => {
+      if (clean)
+        for (const project of ['lib', 'app']) {
+          rmSync(join(cwd, project, 'out'), { recursive: true, force: true });
+          rmSync(join(cwd, project, 'tsconfig.tsbuildinfo'), { force: true });
+        }
+      const result = runTraced(cwd, ['-b', '.', '--verbose', ...args]);
+      return { ...result, outputs: { lib: projectOutputs('lib'), app: projectOutputs('app') } };
+    };
+    const label = JSON.stringify(extra);
+    const expected = outputs(['--singleThreaded']);
+    assert.equal(expected.status, 0, expected.stdout);
+    assert.ok(
+      Object.keys(expected.outputs.app).some((name) => name.endsWith('.tsbuildinfo')),
+      `build info ${label}`,
+    );
+    const actual = outputs(['--checkers', '1']);
+    if (emitsOnThreads) assert.ok(actual.emitted > 0, `files emitted on emit threads ${label}`);
+    assert.equal(actual.stdout, expected.stdout, `stdout ${label}`);
+    assert.equal(actual.status, expected.status, `status ${label}`);
+    assert.deepEqual(actual.outputs, expected.outputs, `outputs ${label}`);
+    // A rebuild after a change: an incremental project emits what changed on this thread, and one that isn't
+    // incremental emits every file again, on emit threads.
+    const rebuild = (args) => {
+      outputs(['--singleThreaded']);
+      const edited = join(cwd, 'app/src/level.ts');
+      writeFileSync(edited, app['app/src/level.ts'] + 'export const low = level(0);\n');
+      // Newer than the outputs, which a time stamp of the same tick isn't.
+      const later = Date.now() / 1000 + 10;
+      utimesSync(edited, later, later);
+      const result = outputs(args, false);
+      writeFileSync(join(cwd, 'app/src/level.ts'), app['app/src/level.ts']);
+      return result;
+    };
+    const expectedRebuild = rebuild(['--singleThreaded']);
+    const actualRebuild = rebuild(['--checkers', '1']);
+    if (emitsOnThreads)
+      assert.equal(actualRebuild.emitted > 0, extra.tsBuildInfoFile === undefined, `rebuild on emit threads ${label}`);
+    assert.equal(actualRebuild.stdout, expectedRebuild.stdout, `rebuild stdout ${label}`);
+    assert.equal(actualRebuild.status, expectedRebuild.status, `rebuild status ${label}`);
+    assert.deepEqual(actualRebuild.outputs, expectedRebuild.outputs, `rebuild outputs ${label}`);
+  }
 });

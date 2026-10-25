@@ -55,15 +55,20 @@ import {
   SystemFileSystem,
 } from './tsc-cli.js';
 import {
+  checkWhileThreadsEmit,
   emitFilesAndReportErrors,
+  emitKindsOf,
+  emitsOnThreads,
   exitStatusOf,
   rechecksOnThreads,
+  reportEmitAndErrors,
   Statistics,
   statisticsOf,
   SystemTimeStamps,
 } from './tsc-compile.js';
 import { sharesPublishedGraphs } from '@scriptc/threads';
 import { checkerThreads, parseThreads, shareWithCheckers, startParallelCheck } from './parallel-check.js';
+import { emitThreads } from './parallel-emit.js';
 import { LoadKind, ParseSession, clearPreparedFiles, parallelParse, reportPreparedFiles } from './parallel-parse.js';
 import { assignSymbolIdsAtCreation } from './symbol.js';
 
@@ -792,8 +797,44 @@ export class Orchestrator {
       });
       return true;
     }
+    if (mayUseThreads && this.checkWhileThreadsEmit(task, checked, times, oldSnapshot, then)) return true;
     this.emitAndReport(task, checked, times, oldSnapshot, undefined);
     return false;
+  }
+
+  /**
+   * The rest of `checkAndEmit` with one checker, as `tsc -p` compiles (`compileWithEmitThreads`, tsc-compile.ts):
+   * this thread checks the program while emit threads emit its JavaScript, and the declaration thread its
+   * declarations where that pays (parallel-emit.ts). Only for a project whose emit threads apply
+   * (`emitsOnThreads`) and that emits every file: one without old build info, or one that is not incremental.
+   * Returns whether the threads emit, and then calls `then` once the project is emitted.
+   */
+  private checkWhileThreadsEmit(
+    task: BuildTask,
+    checked: CheckedProgram,
+    times: CompileTimes,
+    oldSnapshot: Snapshot | undefined,
+    then: () => void,
+  ): boolean {
+    const program = checked.program;
+    const options = program.options;
+    if (!emitsOnThreads(options) || (oldSnapshot !== undefined && isIncremental(options))) return false;
+    let threads = emitThreads(program, options.singleThreaded);
+    if (threads === 0) return false;
+    // The program is shared before its checker does more than merge the globals.
+    shareWithCheckers(checked);
+    const incrementalProgram = this.incrementalProgramOf(task, checked, times, oldSnapshot);
+    const emitKinds = emitKindsOf(incrementalProgram);
+    if (emitKinds !== undefined) threads = emitThreads(program, options.singleThreaded, emitKinds);
+    if (threads === 0) {
+      this.emitAndReport(task, checked, times, oldSnapshot, undefined, incrementalProgram);
+      return false;
+    }
+    checkWhileThreadsEmit(incrementalProgram, threads, emitKinds, (diagnostics) => {
+      this.emitAndReport(task, checked, times, oldSnapshot, undefined, incrementalProgram, diagnostics);
+      then();
+    });
+    return true;
   }
 
   /**
@@ -869,22 +910,23 @@ export class Orchestrator {
     oldSnapshot: Snapshot | undefined,
     /** The wall time of checker threads that checked the program, as reported. */
     parallelCheckTime: number | undefined,
-    /** The incremental program, where `recheckOnThreads` made it. */
+    /** The incremental program, where `recheckOnThreads` or `checkWhileThreadsEmit` made it. */
     made?: IncrementalProgram,
+    /** The program's diagnostics, where `checkWhileThreadsEmit` collected them. */
+    diagnostics?: Diagnostic[],
   ): void {
     const resolved = task.resolved!;
     const sys = this.sys;
     const program = checked.program;
     const incrementalProgram = made ?? this.incrementalProgramOf(task, checked, times, oldSnapshot);
 
-    const result = emitFilesAndReportErrors(
-      sys,
-      incrementalProgram,
-      new TaskDiagnosticReporter(task, this.reporter, sys, this.locale),
-      new QuietSummary(sys, {}, this.locale),
-      new TaskWriter(this, task),
-      this.locale,
-    );
+    const reporter = new TaskDiagnosticReporter(task, this.reporter, sys, this.locale);
+    const summary = new QuietSummary(sys, {}, this.locale);
+    const writer = new TaskWriter(this, task);
+    const result =
+      diagnostics === undefined
+        ? emitFilesAndReportErrors(sys, incrementalProgram, reporter, summary, writer, this.locale)
+        : reportEmitAndErrors(sys, incrementalProgram, diagnostics, reporter, summary, writer, this.locale);
     task.exitStatus = exitStatusOf(result);
     if (parallelCheckTime !== undefined) times.checkTime = parallelCheckTime;
     const options = program.options;
