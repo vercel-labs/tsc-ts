@@ -3143,7 +3143,8 @@ function checkGrammarObjectLiteralExpression(
   node: ObjectLiteralExpression,
   inDestructuring: boolean,
 ): boolean {
-  const seen = new Map<string, DeclarationMeaning>();
+  // An object literal with one property can't repeat a name, so it needs no table of names.
+  const seen = node.properties.nodes.length > 1 ? new Map<string, DeclarationMeaning>() : undefined;
   for (const property of node.properties.nodes) {
     if (property.kind === SyntaxKind.SpreadAssignment) {
       if (inDestructuring) {
@@ -3222,7 +3223,7 @@ function checkGrammarObjectLiteralExpression(
     }
     if (inDestructuring) continue;
     const effectiveName = getEffectivePropertyNameForPropertyNameNode(g.c, name);
-    if (effectiveName === undefined) continue;
+    if (effectiveName === undefined || seen === undefined) continue;
     const existingKind = seen.get(effectiveName);
     if (existingKind === undefined) {
       seen.set(effectiveName, currentKind);

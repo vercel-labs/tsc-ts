@@ -975,7 +975,9 @@ export function reorderCandidates(c: Checker, signatures: Signature[], callChain
       cutoffIndex++;
     } else spliceIndex = index;
     if (callChainFlags !== 0) signature = getOptionalCallSignature(c, signature, callChainFlags);
-    result.splice(spliceIndex, 0, signature);
+    // Most signatures go at the end, where a push is cheaper than an inserting splice.
+    if (spliceIndex === result.length) result.push(signature);
+    else result.splice(spliceIndex, 0, signature);
   }
   return result;
 }

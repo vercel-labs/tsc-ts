@@ -1574,7 +1574,9 @@ export function getPropertyOfTypeEx(
 ): Symbol | undefined {
   if (!isOwnReducedApparentType(t)) t = getReducedApparentTypeWorker(c, t);
   if ((t.flags & TypeFlags.Object) !== 0) {
-    const resolved = resolveStructuredTypeMembers(c, t);
+    // The first test of resolveStructuredTypeMembers, here where most lookups find the members resolved.
+    const resolved =
+      (t.objectFlags & ObjectFlags.MembersResolved) !== 0 ? (t as StructuredType) : resolveStructuredTypeMembers(c, t);
     const symbol = getResolvedMember(resolved, name);
     if (symbol !== undefined && includeTypeOnlyMembers) return symbol;
     if (symbol !== undefined) {

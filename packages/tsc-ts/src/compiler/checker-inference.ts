@@ -733,8 +733,13 @@ class InferenceState {
             // Keep candidates with the highest depth first.
             index = 0;
             while (index < inference.candidateDepths.length && inference.candidateDepths[index] >= this.depth) index++;
-            inference.candidates.splice(index, 0, candidate);
-            inference.candidateDepths.splice(index, 0, this.depth);
+            if (index === inference.candidates.length) {
+              inference.candidates.push(candidate);
+              inference.candidateDepths.push(this.depth);
+            } else {
+              inference.candidates.splice(index, 0, candidate);
+              inference.candidateDepths.splice(index, 0, this.depth);
+            }
             clearCachedInferences(this.inferences);
           }
         }

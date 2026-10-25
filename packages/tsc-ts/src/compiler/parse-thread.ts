@@ -49,6 +49,9 @@ class PreparingHost extends CompilerHost {
     );
     const t2 = timeline ? performance.now() : 0;
     bindSourceFile(file);
+    // Published now, while its nodes are in cache: the chunk's publish (`ParseThread.load`) then skips
+    // them, where walking the whole chunk's files at once reads each node from memory again.
+    publish(file);
     if (timeline) {
       const t3 = performance.now();
       this.readMs += t1 - t0;
