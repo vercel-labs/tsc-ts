@@ -413,6 +413,13 @@ export class Printer extends NameGeneratorHost {
   currentSourceFile: SourceFile | undefined;
   private sourceText: string;
   private lineStarts: readonly number[];
+  /**
+   * The line of the last `lineOf` lookup, `lookupLine`, and the positions it spans, `[lookupLineStart, lookupLineEnd)`,
+   * with `lookupLineEnd` -1 after the last line: printing reads positions mostly in order, so most lookups fall on that line.
+   */
+  private lookupLine: number;
+  private lookupLineStart: number;
+  private lookupLineEnd: number;
   private writer: TextWriter;
   private ownWriter: TextWriter | undefined;
   private uniqueHelperNames: Map<string, Identifier> | undefined;
@@ -427,10 +434,13 @@ export class Printer extends NameGeneratorHost {
   /** Emitting the `extends` clause of a conditional or infer type. */
   private inExtends: boolean;
   /**
-   * Saved comment state: emit flags, comment pos, comment end, container pos, container end, declaration list end.
+   * Saved comment state, 32-bit values: emit flags, comment pos, comment end, container pos, container end,
+   * declaration list end.
    * Flags are `commentFreeNode` for a node that `emitCommentsBeforeNode` handled in a comment-free range.
    */
-  private readonly commentStack: number[];
+  private commentStack: Int32Array;
+  /** The used length of `commentStack`: entries are written in place and kept for reuse once popped. */
+  private commentDepth: number;
   /** Start positions of `//` and `/*` in `sourceText`, ascending; made on first use for each file. */
   private commentStarts: Int32Array | undefined;
   /**
@@ -474,6 +484,9 @@ export class Printer extends NameGeneratorHost {
     this.currentSourceFile = undefined;
     this.sourceText = '';
     this.lineStarts = [];
+    this.lookupLine = -1;
+    this.lookupLineStart = 0;
+    this.lookupLineEnd = 0;
     this.writer = new TextWriter(options.newLine, 4);
     this.ownWriter = undefined;
     this.uniqueHelperNames = undefined;
@@ -485,7 +498,8 @@ export class Printer extends NameGeneratorHost {
     this.detachedComments = [];
     this.commentsDisabled = options.removeComments;
     this.inExtends = false;
-    this.commentStack = [];
+    this.commentStack = new Int32Array(96);
+    this.commentDepth = 0;
     this.commentStarts = undefined;
     this.freeStart = -1;
     this.freeEnd = -1;
@@ -540,6 +554,9 @@ export class Printer extends NameGeneratorHost {
     this.currentSourceFile = sourceFile;
     this.sourceText = sourceFile === undefined ? '' : sourceFile.text;
     this.lineStarts = sourceFile === undefined ? [] : sourceFile.lineStarts();
+    this.lookupLine = -1;
+    this.lookupLineStart = 0;
+    this.lookupLineEnd = 0;
     this.commentStarts = undefined;
     this.endCommentFreeRange();
     return true;
@@ -639,6 +656,8 @@ export class Printer extends NameGeneratorHost {
       case SyntaxKind.Identifier:
       case SyntaxKind.PrivateIdentifier:
       case SyntaxKind.JsxNamespacedName:
+        // Its text either way: the source text, or the text of a node from elsewhere.
+        if (this.textIsSourceText(node)) return (node as Identifier | PrivateIdentifier).text;
         if (!canUseSourceFile || !this.isInCurrentSourceFile(node)) {
           if (node instanceof Identifier) return node.text;
           if (node instanceof PrivateIdentifier) return node.text;
@@ -657,6 +676,38 @@ export class Printer extends NameGeneratorHost {
         throw new Error('Unexpected node kind ' + node.kind);
     }
     return getSourceTextOfNode(this.sourceText, node);
+  }
+
+  /**
+   * Whether the source text of an identifier or private identifier of the current file, from the end of its leading
+   * trivia to its end, is its text: the text ends the node, and the character before it is not part of the token, as
+   * it would be in an identifier written with escapes. Nodes from JSDoc may span other text, so they are left to the
+   * general path.
+   */
+  private textIsSourceText(node: Node): boolean {
+    if (!(node instanceof Identifier) && !(node instanceof PrivateIdentifier)) return false;
+    if ((node.flags & (NodeFlags.Reparsed | NodeFlags.JSDoc | NodeFlags.ReparserTransformedLiteral)) !== 0)
+      return false;
+    const text = node.text;
+    const source = this.sourceText;
+    const end = node.end;
+    const start = end - text.length;
+    if (text.length === 0 || start < node.pos || end > source.length) return false;
+    if (!source.startsWith(text, start)) return false;
+    if (start === node.pos) return true;
+    const before = source.charCodeAt(start - 1);
+    return !(
+      (before >= CharacterCodes.a && before <= CharacterCodes.z) ||
+      (before >= CharacterCodes.A && before <= CharacterCodes.Z) ||
+      (before >= CharacterCodes._0 && before <= CharacterCodes._9) ||
+      before === CharacterCodes._ ||
+      before === CharacterCodes.$ ||
+      before === CharacterCodes.backslash ||
+      before === CharacterCodes.openBrace ||
+      before === CharacterCodes.closeBrace ||
+      before === CharacterCodes.hash ||
+      before > CharacterCodes.maxAsciiCharacter
+    );
   }
 
   private isInCurrentSourceFile(node: Node): boolean {
@@ -741,7 +792,28 @@ export class Printer extends NameGeneratorHost {
   // Lines between nodes
 
   private positionsAreOnSameLine(pos1: number, pos2: number): boolean {
-    return getLinesBetweenPositions(this.lineStarts, pos1, pos2) === 0;
+    if (pos1 === pos2) return true;
+    const lower = pos1 < pos2 ? pos1 : pos2;
+    const upper = pos1 < pos2 ? pos2 : pos1;
+    // What getLinesBetweenPositions finds: no line starts in (lower, upper].
+    if (lower < 0) {
+      const first = this.lineStarts.length > 0 ? this.lineStarts[0] | 0 : -1;
+      return first < 0 || upper < first;
+    }
+    this.lineOf(lower);
+    return this.lookupLineEnd < 0 || upper < this.lookupLineEnd;
+  }
+
+  /** The zero-based line of `pos` (-1 before the first line), which becomes the line of the last lookup. */
+  private lineOf(pos: number): number {
+    if (pos >= this.lookupLineStart && (pos < this.lookupLineEnd || this.lookupLineEnd < 0) && this.lookupLine >= 0)
+      return this.lookupLine;
+    const starts = this.lineStarts;
+    const line = computeLineOfPosition(starts, pos);
+    this.lookupLine = line;
+    this.lookupLineStart = line >= 0 ? starts[line] | 0 : 0;
+    this.lookupLineEnd = line + 1 < starts.length ? starts[line + 1] | 0 : -1;
+    return line;
   }
 
   private rangeStart(pos: number): number {
@@ -1073,8 +1145,13 @@ export class Printer extends NameGeneratorHost {
 
   // Names
 
-  // Source text of names reparsed from JSDoc can span lines.
+  // Source text of names reparsed from JSDoc can span lines; an identifier's own source text has no line breaks.
   private emitIdentifierText(node: Identifier): boolean {
+    if (!this.context.autoGenerate.has(node) && this.textIsSourceText(node)) {
+      // writeText's answer for text without line breaks.
+      this.writer.write(node.text);
+      return false;
+    }
     return this.writer.writeText(this.getTextOfNode(node));
   }
 
@@ -4376,14 +4453,7 @@ export class Printer extends NameGeneratorHost {
     if (!this.shouldEmitComments(node)) return false;
     if (this.inCommentFreeRange(node)) {
       // What the general path does for a node without emit data and without comments.
-      this.commentStack.push(
-        commentFreeNode,
-        node.pos,
-        node.end,
-        this.containerPos,
-        this.containerEnd,
-        this.declarationListContainerEnd,
-      );
+      this.pushCommentState(commentFreeNode, node.pos, node.end);
       this.containerPos = node.pos;
       this.containerEnd = node.end;
       if (node.kind === SyntaxKind.VariableDeclarationList) this.declarationListContainerEnd = node.end;
@@ -4392,7 +4462,7 @@ export class Printer extends NameGeneratorHost {
     const flags = this.context.getEmitFlags(node);
     const pos = this.context.commentPos(node);
     const end = this.context.commentEnd(node);
-    this.commentStack.push(flags, pos, end, this.containerPos, this.containerEnd, this.declarationListContainerEnd);
+    this.pushCommentState(flags, pos, end);
     this.emitLeadingCommentsOfNode(node, flags, pos, end);
     if ((flags & EmitFlags.NoLeadingComments) === 0) {
       const synthesized = this.context.getSyntheticLeadingComments(node);
@@ -4402,17 +4472,36 @@ export class Printer extends NameGeneratorHost {
     return true;
   }
 
+  /** Saves the comment state of a node: its emit flags (or `commentFreeNode`), comment range and the containers. */
+  private pushCommentState(flags: number, pos: number, end: number): boolean {
+    let stack = this.commentStack;
+    const at = this.commentDepth;
+    if (at + 6 > stack.length) {
+      const grown = new Int32Array(stack.length * 2);
+      grown.set(stack);
+      this.commentStack = grown;
+      stack = grown;
+    }
+    stack[at] = flags;
+    stack[at + 1] = pos;
+    stack[at + 2] = end;
+    stack[at + 3] = this.containerPos;
+    stack[at + 4] = this.containerEnd;
+    stack[at + 5] = this.declarationListContainerEnd;
+    this.commentDepth = at + 6;
+    return true;
+  }
+
   private emitCommentsAfterNode(node: Node): boolean {
     const stack = this.commentStack;
-    const base = stack.length - 6;
-    // `| 0` keeps scriptc from typing array reads as possibly undefined.
-    const flags = stack[base] | 0;
-    const pos = stack[base + 1] | 0;
-    const end = stack[base + 2] | 0;
-    const containerPos = stack[base + 3] | 0;
-    const containerEnd = stack[base + 4] | 0;
-    const declarationListContainerEnd = stack[base + 5] | 0;
-    stack.length = base;
+    const base = this.commentDepth - 6;
+    const flags = stack[base]!;
+    const pos = stack[base + 1]!;
+    const end = stack[base + 2]!;
+    const containerPos = stack[base + 3]!;
+    const containerEnd = stack[base + 4]!;
+    const declarationListContainerEnd = stack[base + 5]!;
+    this.commentDepth = base;
     if (node === this.freeOwner) this.endCommentFreeRange();
     if (flags === commentFreeNode) {
       this.containerPos = containerPos;
