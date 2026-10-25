@@ -4,9 +4,10 @@
 // Builds an instrumented tsc-ts (Linux only, like --profile-generate), checks the tsc-ts sources and each --project
 // with it at --checkers 1, and merges the raw profiles into the committed one, keeping only the functions that ran
 // (merge-profiles --sparse). The committed profile was collected with the tsc-ts sources plus the benchmark apps'
-// tRPC (packages/server), TypeORM (packages/typeorm, tsconfig.bench.json), Playwright, and Excalidraw
-// (tsconfig.bench.json) checks. A profile from older sources still applies to the functions that did not change, so
-// refreshing it is a matter of gain, not of correctness. SCRIPTC selects the scriptc executable.
+// tRPC (packages/server), TypeORM (packages/typeorm, tsconfig.bench.json), Playwright, Excalidraw
+// (tsconfig.bench.json), Sentry, VS Code (src, tsconfig.bench.json), T3 Code server and T3 Code web (apps/server and
+// apps/web, tsconfig.bench.json) checks. A profile from older sources still applies to the functions that did not
+// change, so refreshing it is a matter of gain, not of correctness. SCRIPTC selects the scriptc executable.
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
