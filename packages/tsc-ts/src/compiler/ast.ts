@@ -8258,6 +8258,8 @@ export class SourceFile extends Node {
   identifierCount: number;
   nodeCount: number;
   textCount: number;
+  /** The API's binary encoding of this file, when an API server keeps it (`keptEncodingOf`). */
+  apiEncoding: Uint8Array | undefined;
   /** Module specifiers of imports, exports, `require` calls and `import()` types, in source order. */
   imports: Node[];
   /** Names of `declare module "x"` augmentations and `declare global` blocks in modules. */
@@ -8325,6 +8327,7 @@ export class SourceFile extends Node {
     this.identifierCount = 0;
     this.nodeCount = 0;
     this.textCount = 0;
+    this.apiEncoding = undefined;
     this.imports = [];
     this.moduleAugmentations = emptyNodes;
     this.ambientModuleNames = emptyStrings;

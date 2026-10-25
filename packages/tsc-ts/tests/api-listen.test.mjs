@@ -118,6 +118,40 @@ test('clients in sequence get the responses of new servers, after edits too', { 
   }
 });
 
+// The encodings of the project's files after the checker has run, as getSourceFile replies.
+async function encodingsAfterChecking(client, dir) {
+  await client.json('initialize');
+  const update = await client.json('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+  const base = { snapshot: update.snapshot, project: update.projects[0].id };
+  await client.json('getSemanticDiagnostics', base);
+  const replies = [];
+  for (const file of await client.json('getSourceFileNames', base)) {
+    if (!file.startsWith(dir)) continue;
+    const reply = await client.request('getSourceFile', { ...base, file });
+    replies.push(`getSourceFile ${reply.type} ${reply.payload.toString('base64')}`);
+  }
+  return replies;
+}
+
+test('the server encodes each source file once, as a new server does', { skip, timeout: 300_000 }, async () => {
+  const dir = copyProject();
+  const expected = await freshSession(dir);
+  const encodings = expected.replies.filter((reply) => reply.startsWith('getSourceFile '));
+  assert.ok(encodings.length > 0);
+  const server = listen(dir);
+  await server.ready;
+  try {
+    // The first client encodes the files after checking them (which parses their JSDoc), and the server keeps
+    // those encodings for the next client.
+    const client = Client.connect(server.socket);
+    assert.deepEqual(await encodingsAfterChecking(client, dir), encodings);
+    assert.equal(await client.close(), 0);
+    assert.deepEqual(await socketSession(server, dir), expected);
+  } finally {
+    server.child.kill();
+  }
+});
+
 test(
   'a client that closes its end during a call leaves the server serving the next client',
   { skip, timeout: 300_000 },
