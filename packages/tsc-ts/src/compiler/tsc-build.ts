@@ -797,16 +797,31 @@ export class Orchestrator {
       });
       return true;
     }
-    if (mayUseThreads && this.checkWhileThreadsEmit(task, checked, times, oldSnapshot, then)) return true;
+    if (mayUseThreads && this.emitsOnThreads(checked, oldSnapshot))
+      return this.checkWhileThreadsEmit(task, checked, times, oldSnapshot, then);
     this.emitAndReport(task, checked, times, oldSnapshot, undefined);
     return false;
   }
 
   /**
-   * The rest of `checkAndEmit` with one checker, as `tsc -p` compiles (`compileWithEmitThreads`, tsc-compile.ts):
-   * this thread checks the program while emit threads emit its JavaScript, and the declaration thread its
-   * declarations where that pays (parallel-emit.ts). Only for a project whose emit threads apply
-   * (`emitsOnThreads`) and that emits every file: one without old build info, or one that is not incremental.
+   * Whether `checkWhileThreadsEmit` builds the project of `checked`: one whose emit threads apply
+   * (`emitsOnThreads`), that emits every file (one without old build info, or one that is not incremental)
+   * and that emits enough for the threads (`emitThreads`).
+   */
+  private emitsOnThreads(checked: CheckedProgram, oldSnapshot: Snapshot | undefined): boolean {
+    const options = checked.program.options;
+    return (
+      emitsOnThreads(options) &&
+      (oldSnapshot === undefined || !isIncremental(options)) &&
+      emitThreads(checked.program, options.singleThreaded) > 0
+    );
+  }
+
+  /**
+   * The rest of `checkAndEmit` with one checker for a project that `emitsOnThreads` accepts, as `tsc -p` compiles
+   * (`compileWithEmitThreads`, tsc-compile.ts): this thread checks the program while emit threads emit its
+   * JavaScript, and the declaration thread its declarations where that pays (parallel-emit.ts). Where its pending
+   * emit leaves too little JavaScript for the threads (`emitDeclarationOnly`), this thread checks and emits it.
    * Returns whether the threads emit, and then calls `then` once the project is emitted.
    */
   private checkWhileThreadsEmit(
@@ -818,14 +833,11 @@ export class Orchestrator {
   ): boolean {
     const program = checked.program;
     const options = program.options;
-    if (!emitsOnThreads(options) || (oldSnapshot !== undefined && isIncremental(options))) return false;
-    let threads = emitThreads(program, options.singleThreaded);
-    if (threads === 0) return false;
     // The program is shared before its checker does more than merge the globals.
     shareWithCheckers(checked);
     const incrementalProgram = this.incrementalProgramOf(task, checked, times, oldSnapshot);
     const emitKinds = emitKindsOf(incrementalProgram);
-    if (emitKinds !== undefined) threads = emitThreads(program, options.singleThreaded, emitKinds);
+    const threads = emitThreads(program, options.singleThreaded, emitKinds);
     if (threads === 0) {
       this.emitAndReport(task, checked, times, oldSnapshot, undefined, incrementalProgram);
       return false;

@@ -641,3 +641,40 @@ test('tsc -b emits on emit threads as on one thread', { skip: tscTsMissing }, ()
     assert.deepEqual(actualRebuild.outputs, expectedRebuild.outputs, `rebuild outputs ${label}`);
   }
 });
+
+// A cold build whose pending emit has no JavaScript (`emitDeclarationOnly`) is emitted and reported on the main
+// thread once, as with one thread, though the program has enough text for emit threads.
+test('declaration-only incremental builds emit and report once', { skip: tscTsMissing }, () => {
+  const config = JSON.parse(constEnumFiles['tsconfig.json']);
+  Object.assign(config.compilerOptions, {
+    incremental: true,
+    tsBuildInfoFile: 'out/tsconfig.tsbuildinfo',
+    emitDeclarationOnly: true,
+  });
+  delete config.compilerOptions.listEmittedFiles;
+  const cwd = tempDir('tsc-ts-parallel-declaration-only-');
+  writeProject(cwd, {
+    ...constEnumFiles,
+    'src/wrong.ts': 'export const wrong: number = "not a number";\n',
+    'tsconfig.json': JSON.stringify(config),
+  });
+  for (const mode of [
+    ['-b', '.', '--verbose'],
+    ['-p', '.'],
+  ]) {
+    const outputs = (args) => {
+      rmSync(join(cwd, 'out'), { recursive: true, force: true });
+      const result = runTraced(cwd, [...mode, ...args]);
+      return { ...result, outputs: readOutputs(join(cwd, 'out')) };
+    };
+    const label = mode.join(' ');
+    const expected = outputs(['--singleThreaded']);
+    assert.equal(expected.stdout.match(/TS2322/g)?.length, 1, `one error ${label}`);
+    assert.ok(expected.outputs['tsconfig.tsbuildinfo'] !== undefined, `build info ${label}`);
+    const actual = outputs(['--checkers', '1']);
+    assert.equal(actual.emitted, 0, `nothing emitted on emit threads ${label}`);
+    assert.equal(actual.stdout, expected.stdout, `stdout ${label}`);
+    assert.equal(actual.status, expected.status, `status ${label}`);
+    assert.deepEqual(actual.outputs, expected.outputs, `outputs ${label}`);
+  }
+});
