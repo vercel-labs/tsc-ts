@@ -97,6 +97,13 @@ class NodeSystem extends System {
   }
 
   writeFile(path: string, text: string): boolean {
+    // Most outputs go to directories that exist: write first, and create the directory only when that fails.
+    try {
+      writeFileSync(path, text);
+      return true;
+    } catch {
+      // Created below.
+    }
     try {
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, text);
