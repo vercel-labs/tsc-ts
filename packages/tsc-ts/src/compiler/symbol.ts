@@ -156,12 +156,17 @@ export class SymbolRareFields implements ProgramLifetime {
   valueDeclaration: Node | undefined = undefined;
 }
 
-/** In `Symbol.bits`, above the check flags: the value declaration is the first declaration. */
-const valueDeclarationIsFirst = 1 << 30;
+/**
+ * In `Symbol.bits`, above the check flags: the value declaration is the first declaration. A const enum
+ * member, so that native builds read it as a constant rather than as a module variable.
+ */
+const enum SymbolBits {
+  ValueDeclarationIsFirst = 1 << 30,
+}
 
 export class Symbol implements ProgramLifetime {
   flags: SymbolFlags;
-  /** The check flags, and `valueDeclarationIsFirst`. */
+  /** The check flags, and `SymbolBits.ValueDeclarationIsFirst`. */
   private bits: number;
   readonly name: string;
   /**
@@ -186,19 +191,19 @@ export class Symbol implements ProgramLifetime {
   }
 
   get checkFlags(): CheckFlags {
-    return (this.bits & ~valueDeclarationIsFirst) as CheckFlags;
+    return (this.bits & ~SymbolBits.ValueDeclarationIsFirst) as CheckFlags;
   }
 
   set checkFlags(flags: CheckFlags) {
-    this.bits = (this.bits & valueDeclarationIsFirst) | flags;
+    this.bits = (this.bits & SymbolBits.ValueDeclarationIsFirst) | flags;
   }
 
   /** Makes `node` the first declaration, keeping the value declaration. */
   setFirst(node: Node | undefined): void {
-    if ((this.bits & valueDeclarationIsFirst) !== 0 && node !== this.declaration) {
+    if ((this.bits & SymbolBits.ValueDeclarationIsFirst) !== 0 && node !== this.declaration) {
       // The value declaration stays what it was.
       this.rareFieldsOrNew().valueDeclaration = this.declaration;
-      this.bits &= ~valueDeclarationIsFirst;
+      this.bits &= ~SymbolBits.ValueDeclarationIsFirst;
     }
     this.declaration = node;
   }
@@ -208,7 +213,7 @@ export class Symbol implements ProgramLifetime {
    * says; any other is kept in the rare fields.
    */
   get valueDeclaration(): Node | undefined {
-    if ((this.bits & valueDeclarationIsFirst) !== 0) return this.declaration;
+    if ((this.bits & SymbolBits.ValueDeclarationIsFirst) !== 0) return this.declaration;
     const group = this.rareFields;
     return group === undefined ? undefined : group.valueDeclaration;
   }
@@ -216,11 +221,11 @@ export class Symbol implements ProgramLifetime {
   set valueDeclaration(node: Node | undefined) {
     const group = this.rareFields;
     if (node !== undefined && node === this.declaration) {
-      this.bits |= valueDeclarationIsFirst;
+      this.bits |= SymbolBits.ValueDeclarationIsFirst;
       if (group !== undefined) group.valueDeclaration = undefined;
       return;
     }
-    this.bits &= ~valueDeclarationIsFirst;
+    this.bits &= ~SymbolBits.ValueDeclarationIsFirst;
     if (node !== undefined || group !== undefined) this.rareFieldsOrNew().valueDeclaration = node;
   }
 

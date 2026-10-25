@@ -517,6 +517,13 @@ export function isTypeRelatedTo(c: Checker, source: Type, target: Type, relation
     // Types that can't simplify must have identical flags.
     if (source.flags !== target.flags) return false;
     if ((source.flags & TypeFlags.Singleton) !== 0) return true;
+  } else {
+    // What the relater decides first for types that may simplify (Relater.isRelatedToEx): their normal forms are
+    // one type, or can be identical only with identical flags.
+    const s = getNormalizedType(c, source, false);
+    const t = getNormalizedType(c, target, true);
+    if (s === t) return true;
+    if (s.flags !== t.flags) return false;
   }
   if ((source.flags & TypeFlags.Object) !== 0 && (target.flags & TypeFlags.Object) !== 0) {
     const related = relation.get(

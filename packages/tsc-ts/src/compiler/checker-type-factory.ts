@@ -998,7 +998,8 @@ export function unionContainsSortedTypes(c: Checker, union: UnionType, types: re
 export function insertType(c: Checker, types: Type[], t: Type): boolean {
   const index = binarySearchTypes(c, types, t);
   if (index >= 0) return false;
-  types.splice(~index, 0, t);
+  if (~index === types.length) types.push(t);
+  else types.splice(~index, 0, t);
   return true;
 }
 
@@ -1214,7 +1215,8 @@ function insertTypeNearLast(c: Checker, set: TypeSet, t: Type): void {
     if (r < 0) low = middle + 1;
     else high = middle - 1;
   }
-  types.splice(low, 0, t);
+  if (low === types.length) types.push(t);
+  else types.splice(low, 0, t);
   set.last = low;
 }
 
