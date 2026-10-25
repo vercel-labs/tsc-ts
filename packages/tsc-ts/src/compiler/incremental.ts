@@ -1864,8 +1864,21 @@ class EmitFilesHandler {
       const files = program.program.getSourceFiles();
       const emittedOnCheckers = this.emittedOnCheckers();
       const wrapped = this.wrap(writer);
-      const result =
-        emittedOnCheckers.size === 0
+      const ahead = this.declarationsEmittedAhead();
+      const result = program.checked.javaScriptEmittedOnThreads
+        ? combineEmitResults(
+            files.map((file) =>
+              this.emitAfterEmitThreads(
+                file,
+                EmitOnly.All,
+                emittedOnCheckers.get(file),
+                ahead.get(file),
+                writer,
+                wrapped,
+              ),
+            ),
+          )
+        : emittedOnCheckers.size === 0
           ? program.emitter.emit(files, EmitOnly.All, wrapped)
           : combineEmitResults(
               files.map((file) => {
@@ -1901,18 +1914,74 @@ class EmitFilesHandler {
   /**
    * The emit results of the files checker threads emitted right after checking them (parallel-check.ts),
    * which are not emitted again here. Checker threads emit every file of a program without old build
-   * info, with the outputs its options select, as its pending emit asks.
+   * info, with the outputs its options select, as its pending emit asks. Emit threads emit only the
+   * JavaScript of the files (`javaScriptEmittedOnThreads`, `emitAfterEmitThreads`).
    */
   private emittedOnCheckers(): Map<SourceFile, EmitResult> {
+    return this.byFile(this.program.checked.emittedInParallel);
+  }
+
+  /** The declaration emit of the files the declaration thread emitted (parallel-emit.ts). */
+  private declarationsEmittedAhead(): Map<SourceFile, EmitResult> {
+    return this.byFile(this.program.checked.declarationsEmittedAhead);
+  }
+
+  /** The results of `results`, by file index, by file. */
+  private byFile(results: readonly (EmitResult | undefined)[] | undefined): Map<SourceFile, EmitResult> {
     const result = new Map<SourceFile, EmitResult>();
-    const emitted = this.program.checked.emittedInParallel;
-    if (emitted === undefined) return result;
+    if (results === undefined) return result;
     const files = this.program.program.getSourceFiles();
     for (let i = 0; i < files.length; i++) {
-      const fileResult = emitted[i];
+      const fileResult = results[i];
       if (fileResult !== undefined) result.set(files[i]!, fileResult);
     }
     return result;
+  }
+
+  /**
+   * The emit of `file` with `emitOnly` where emit threads emitted the JavaScript of the program's files
+   * while this thread checked it (`javaScriptEmittedOnThreads`, parallel-emit.ts): the outputs an emit thread
+   * emitted of its JavaScript (`javaScript`) and the declaration thread of its declarations (`declarations`),
+   * and the rest emitted here. A file no thread emitted is emitted here as without the threads.
+   */
+  private emitAfterEmitThreads(
+    file: SourceFile,
+    emitOnly: EmitOnly,
+    javaScript: EmitResult | undefined,
+    declarations: EmitResult | undefined,
+    writer: OutputWriter,
+    wrapped: OutputWriter,
+  ): EmitResult {
+    const program = this.program;
+    if (wrapped instanceof SignatureRecordingWriter) wrapped.file = file;
+    if (javaScript === undefined && declarations === undefined) return program.emitter.emit([file], emitOnly, wrapped);
+    const results: EmitResult[] = [];
+    if (emitOnly !== EmitOnly.Dts)
+      results.push(
+        javaScript !== undefined
+          ? this.writeThreadOutputs(file, javaScript, writer)
+          : program.emitter.emit([file], EmitOnly.Js, writer),
+      );
+    if (emitOnly !== EmitOnly.Js && getEmitDeclarations(program.snapshot.options))
+      results.push(
+        declarations !== undefined
+          ? this.writeThreadOutputs(file, declarations, writer)
+          : program.emitter.emit([file], EmitOnly.Dts, wrapped),
+      );
+    return combineEmitResults(results);
+  }
+
+  /**
+   * Writes the outputs a thread emitted for `file` with `writer`, as this thread would have written them:
+   * its declaration signatures are recorded (`recordDeclarationSignatures`), and the unchanged declaration
+   * files of a composite program are left unwritten.
+   */
+  private writeThreadOutputs(file: SourceFile, emitted: EmitResult, writer: OutputWriter): EmitResult {
+    const skips = this.recordDeclarationSignatures(file, emitted.declarationSignatures);
+    return writeHeldOutputs(
+      emitted,
+      skips === undefined ? writer : new HeldDeclarationWriter(writer, skips, this.program.host),
+    );
   }
 
   /** Records declaration signatures when declarations are emitted. */
@@ -1926,6 +1995,7 @@ class EmitFilesHandler {
     collectAllAffectedFiles(program);
     const wrapped = this.wrap(writer);
     const emittedOnCheckers = this.emittedOnCheckers();
+    const ahead = this.declarationsEmittedAhead();
     for (const [path, emitKind] of snapshot.affectedFilesPendingEmit) {
       const affectedFile = program.program.getSourceFileByPath(path);
       if (affectedFile === undefined || !program.program.sourceFileMayBeEmitted(affectedFile, false)) {
@@ -1939,13 +2009,10 @@ class EmitFilesHandler {
       if (!this.isForDtsErrors) {
         const emitOnly = emitOnlyOfPendingKind(pendingKind);
         const emitted = emittedOnCheckers.get(affectedFile);
-        if (emitted !== undefined) {
-          const skips = this.recordDeclarationSignatures(affectedFile, emitted.declarationSignatures);
-          result = writeHeldOutputs(
-            emitted,
-            skips === undefined ? writer : new HeldDeclarationWriter(writer, skips, program.host),
-          );
-        } else {
+        if (program.checked.javaScriptEmittedOnThreads)
+          result = this.emitAfterEmitThreads(affectedFile, emitOnly, emitted, ahead.get(affectedFile), writer, wrapped);
+        else if (emitted !== undefined) result = this.writeThreadOutputs(affectedFile, emitted, writer);
+        else {
           if (wrapped instanceof SignatureRecordingWriter) wrapped.file = affectedFile;
           result = program.emitter.emit([affectedFile], emitOnly, wrapped);
         }

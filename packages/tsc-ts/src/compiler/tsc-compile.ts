@@ -15,7 +15,7 @@ import {
 } from './compile-program.js';
 import { type Diagnostic, formattedReports, type Locale } from './diagnostics.js';
 import { EmitOnly, EmitResult } from './emitter.js';
-import { getEmitDeclarations } from './options.js';
+import { type CompilerOptions, getEmitDeclarations } from './options.js';
 import {
   FileBuildInfoReader,
   IncrementalProgram,
@@ -146,9 +146,9 @@ export function compileEmitThreads(work: CompileWork): number {
 /**
  * Like `compile`, with this thread checking the program while `threads` threads emit its JavaScript
  * (parallel-emit.ts); calls `done` with the exit status once it is emitted and reported. Returns
- * false where emit threads don't apply, and `compile` runs instead: an incremental program, which
- * emits what changed, one that emits nothing or waits for its errors to emit (`noEmitOnError`), and
- * `composite` and `outFile`, whose emit depends on the whole program.
+ * false, and `compile` runs instead, where emit threads don't apply (`emitsOnThreads`) and for an
+ * incremental program with build info, whose rebuild emits what changed. An incremental program
+ * without build info emits every file, as its pending emit holds (`emitKindsOf`).
  */
 export function compileWithEmitThreads(
   sys: System,
@@ -157,29 +157,91 @@ export function compileWithEmitThreads(
   done: (status: ExitStatus) => void,
 ): boolean {
   const program = work.program;
-  const options = program.options;
-  if (
-    work.incremental ||
-    options.noEmit === true ||
-    options.noEmitOnError === true ||
-    options.listFilesOnly === true ||
-    options.composite === true ||
-    (options.outFile ?? '') !== ''
-  )
-    return false;
+  if (!emitsOnThreads(program.options)) return false;
+  if (work.incremental && !checksIncrementalOnThreads(sys, program.commandLine.buildInfoFileName())) return false;
   const times = new CompileTimes();
   times.configTime = work.configTime;
   times.parseTime = work.parseTime;
   const bindStart = performance.now();
   const checked = new CheckedProgram(program);
   times.bindTime = performance.now() - bindStart;
+  // The program is shared before its checker does more than merge the globals.
   shareWithCheckers(checked);
-  const compilerProgram = new PlainProgram(checked, times);
+  let compilerProgram: CompilerProgram;
+  if (work.incremental) {
+    const old = oldSnapshotOf(sys, work, times);
+    const changesStart = performance.now();
+    compilerProgram = new IncrementalProgram(checked, times, old, new SystemTimeStamps(sys));
+    times.changesComputeTime = performance.now() - changesStart;
+  } else compilerProgram = new PlainProgram(checked, times);
+  const report = (diagnostics: Diagnostic[]): void => {
+    const result = reportEmitAndErrors(
+      sys,
+      compilerProgram,
+      diagnostics,
+      work.reporter,
+      work.errorSummary,
+      new SystemWriter(sys),
+      outputLocale(program.options),
+    );
+    traceSingleChecker(checked);
+    done(emitStatusAndReportStatistics(sys, compilerProgram, result));
+  };
+  const emitKinds = emitKindsOf(compilerProgram);
+  if (emitKinds !== undefined) threads = emitThreads(program, program.options.singleThreaded, emitKinds);
+  if (threads > 0) checkWhileThreadsEmit(compilerProgram, threads, emitKinds, report);
+  else {
+    const diagnostics = getDiagnosticsOfProgram(compilerProgram, false);
+    mark('diagnostics collected');
+    report(diagnostics);
+  }
+  return true;
+}
+
+/**
+ * Whether emit threads (parallel-emit.ts) can emit a program with `options` while this thread checks it:
+ * not one that emits nothing or waits for its errors to emit (`noEmitOnError`), nor one that emits a
+ * single `outFile` from the whole program.
+ */
+export function emitsOnThreads(options: CompilerOptions): boolean {
+  return (
+    options.noEmit !== true &&
+    options.noEmitOnError !== true &&
+    options.listFilesOnly !== true &&
+    (options.outFile ?? '') === ''
+  );
+}
+
+/**
+ * What emit threads emit of each file of `program`, by file index (`emitsJavaScript`, parallel-emit.ts):
+ * for an incremental program that keeps incremental state, the emit pending before checking
+ * (`IncrementalProgram.emitKindsOnCheckers`), which checking only adds to and the program's emit
+ * completes; `undefined` where every file is emitted in full.
+ */
+export function emitKindsOf(program: CompilerProgram): number[] | undefined {
+  if (!(program instanceof IncrementalProgram) || !program.snapshot.canUseIncrementalState()) return undefined;
+  return program.emitKindsOnCheckers(program.program.getSourceFiles());
+}
+
+/**
+ * Checks `compilerProgram` on this thread while `threads` emit threads emit the JavaScript of its files that
+ * `emitKinds` selects, and the declaration thread their declarations where that pays; then calls `report`
+ * with the program's diagnostics, once the outputs of every thread arrived for the program's emit to complete
+ * (`PlainProgram.emit`, `IncrementalProgram.emit`). The program must be shared (`shareWithCheckers`).
+ */
+export function checkWhileThreadsEmit(
+  compilerProgram: CompilerProgram,
+  threads: number,
+  emitKinds: readonly number[] | undefined,
+  report: (diagnostics: Diagnostic[]) => void,
+): void {
+  const checked = compilerProgram.checked;
+  const program = checked.program;
   let diagnostics: Diagnostic[] | undefined = undefined;
   // The first wave of emit threads, and the declaration thread or the second wave.
   let emitting = 2;
   let declarations: (EmitResult | undefined)[] | undefined = undefined;
-  const report = (): void => {
+  const reportOnce = (): void => {
     if (diagnostics === undefined || emitting > 0) return;
     if (declarations !== undefined) {
       // The declaration thread emitted all of each decorator metadata file: its result is the file's emit.
@@ -191,26 +253,16 @@ export function compileWithEmitThreads(
       }
       checked.declarationsEmittedAhead = declarations;
     }
-    const result = reportEmitAndErrors(
-      sys,
-      compilerProgram,
-      diagnostics,
-      work.reporter,
-      work.errorSummary,
-      new SystemWriter(sys),
-      outputLocale(options),
-    );
-    traceSingleChecker(checked);
-    done(emitStatusAndReportStatistics(sys, compilerProgram, result));
+    report(diagnostics);
   };
   const emitted = (): void => {
     emitting--;
-    report();
+    reportOnce();
   };
-  const metadata = startParallelEmit(checked, threads, emitted);
+  const metadata = startParallelEmit(checked, threads, emitted, emitKinds);
   // With declarations, the declaration thread also emits the files with decorator metadata.
-  if (getEmitDeclarations(options) && declarationThreadPays(1))
-    declarations = startDeclarationThread(checked, metadata, emitted);
+  if (getEmitDeclarations(program.options) && declarationThreadPays(1))
+    declarations = startDeclarationThread(checked, metadata, emitted, emitKinds);
   const found = getDiagnosticsOfProgram(compilerProgram, false);
   mark('diagnostics collected');
   // Else they are emitted with the kinds this thread's checker gives, now that it checked.
@@ -226,8 +278,7 @@ export function compileWithEmitThreads(
     } else emitting--;
   }
   diagnostics = found;
-  report();
-  return true;
+  reportOnce();
 }
 
 /**
@@ -500,7 +551,7 @@ export function emitFilesAndReportErrors(
 }
 
 /** The rest of `emitFilesAndReportErrors`, with the program's `diagnostics` collected. */
-function reportEmitAndErrors(
+export function reportEmitAndErrors(
   sys: System,
   program: CompilerProgram,
   diagnostics: Diagnostic[],
