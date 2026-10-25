@@ -227,13 +227,20 @@ const maxChunk = 16;
 const largeFile = 256 * 1024;
 
 /**
+ * The most text (bytes) a chunk of other files holds, about one large file's: a chunk ends with the file
+ * that reaches it. Sixteen of tsc-ts's own compiler sources, 50-200 KB each, made one chunk that kept its
+ * thread busy for 30-45 ms after the others were done.
+ */
+const maxChunkBytes = largeFile;
+
+/**
  * The files to hand out to parse threads, each queued once. Library files go out first, one per
  * chunk, also those found later through `/// <reference lib>`: a large one (`lib.dom.d.ts`) takes a
  * thread 100–150 ms, and queued behind other files it would be the last file the program waits for.
  * Then, for the same reason, large files, one per chunk: root files (TypeScript's 3 MB `checker.ts`,
  * which in a chunk of root files kept one thread busy after the others were done) and the files the
  * parse threads found (`csstype`'s 0.9 MB of declarations, found through React's). The other files go
- * out in program order, in chunks of up to `maxChunk`.
+ * out in program order, in chunks of up to `maxChunk` files and about `maxChunkBytes` of text.
  */
 export class ParseQueue {
   private readonly libraries = new LoadJobs();
@@ -281,7 +288,8 @@ export class ParseQueue {
 
   /**
    * The next chunk for one of `threads` parse threads, or `undefined` when nothing is left. With
-   * `full`, other files only go out `maxChunk` at a time, and stay queued until there are as many.
+   * `full`, other files only go out in full chunks, `maxChunk` files or `maxChunkBytes` of text, and stay
+   * queued until there are as many.
    */
   next(threads: number, full = false): LoadMessage | undefined {
     const libraries = this.libraries;
@@ -306,10 +314,13 @@ export class ParseQueue {
     }
     const queue = this.others;
     const left = queue.names.length - this.head;
-    if (left <= 0 || (full && left < maxChunk)) return undefined;
-    const size = full ? maxChunk : Math.min(maxChunk, Math.max(1, Math.floor(left / threads)));
+    if (left <= 0) return undefined;
+    const most = full ? maxChunk : Math.min(maxChunk, Math.max(1, Math.floor(left / threads)));
     const start = this.head;
-    const end = start + size;
+    let end = start;
+    let bytes = 0;
+    while (end < queue.names.length && end - start < most && bytes < maxChunkBytes) bytes += queue.sizes[end++]!;
+    if (full && end - start < maxChunk && bytes < maxChunkBytes) return undefined;
     this.head = end;
     return {
       stop: false,
