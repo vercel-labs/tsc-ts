@@ -174,7 +174,7 @@ import { SyntaxKind } from '../syntax-kind.js';
 import { type CommentRange, TokenFlags } from '../types.js';
 import { ScriptTarget } from '../options.js';
 import { fileExtensionIs } from '../path.js';
-import { isWhiteSpaceLike } from '../character-codes.js';
+import { CharacterCodes, isWhiteSpaceLike } from '../character-codes.js';
 import type { SourceMapGenerator } from '../sourcemap.js';
 import { EmitContext, compareEmitHelpers, type SynthesizedComment } from './emit-context.js';
 import { EmitFlags, GeneratedIdentifierFlags } from './emit-flags.js';
@@ -399,6 +399,9 @@ const enum State {
   SourceMaps = 1 << 1,
 }
 
+/** The saved emit flags of a node whose comments were not looked for (`Printer.inCommentFreeRange`). */
+const commentFreeNode = -1;
+
 export class Printer extends NameGeneratorHost {
   readonly options: PrinterOptions;
   readonly context: EmitContext;
@@ -423,8 +426,22 @@ export class Printer extends NameGeneratorHost {
   private commentsDisabled: boolean;
   /** Emitting the `extends` clause of a conditional or infer type. */
   private inExtends: boolean;
-  /** Saved comment state: emit flags, comment pos, comment end, container pos, container end, declaration list end. */
+  /**
+   * Saved comment state: emit flags, comment pos, comment end, container pos, container end, declaration list end.
+   * Flags are `commentFreeNode` for a node that `emitCommentsBeforeNode` handled in a comment-free range.
+   */
   private readonly commentStack: number[];
+  /** Start positions of `//` and `/*` in `sourceText`, ascending; made on first use for each file. */
+  private commentStarts: Int32Array | undefined;
+  /**
+   * A range of `sourceText`, `[freeStart, freeEnd)`, where no comment starts and the last character is not trivia,
+   * so no comment is found from any position in it; -1 when there is none. `freeOwner` is the node it was made for.
+   */
+  private freeStart: number;
+  private freeEnd: number;
+  /** Whether no trailing comment follows `freeEnd`. */
+  private freeEndTrailingNone: boolean;
+  private freeOwner: Node | undefined;
   /** Saved source map state: emit flags, pos, end, has token range. */
   private readonly sourceMapStack: number[];
   /** The token position after `enterToken` skipped trivia. */
@@ -469,6 +486,11 @@ export class Printer extends NameGeneratorHost {
     this.commentsDisabled = options.removeComments;
     this.inExtends = false;
     this.commentStack = [];
+    this.commentStarts = undefined;
+    this.freeStart = -1;
+    this.freeEnd = -1;
+    this.freeEndTrailingNone = false;
+    this.freeOwner = undefined;
     this.sourceMapStack = [];
     this.tokenPos = 0;
     this.sourceMapsDisabled = true;
@@ -518,6 +540,8 @@ export class Printer extends NameGeneratorHost {
     this.currentSourceFile = sourceFile;
     this.sourceText = sourceFile === undefined ? '' : sourceFile.text;
     this.lineStarts = sourceFile === undefined ? [] : sourceFile.lineStarts();
+    this.commentStarts = undefined;
+    this.endCommentFreeRange();
     return true;
   }
 
@@ -4350,6 +4374,21 @@ export class Printer extends NameGeneratorHost {
 
   private emitCommentsBeforeNode(node: Node): boolean {
     if (!this.shouldEmitComments(node)) return false;
+    if (this.inCommentFreeRange(node)) {
+      // What the general path does for a node without emit data and without comments.
+      this.commentStack.push(
+        commentFreeNode,
+        node.pos,
+        node.end,
+        this.containerPos,
+        this.containerEnd,
+        this.declarationListContainerEnd,
+      );
+      this.containerPos = node.pos;
+      this.containerEnd = node.end;
+      if (node.kind === SyntaxKind.VariableDeclarationList) this.declarationListContainerEnd = node.end;
+      return true;
+    }
     const flags = this.context.getEmitFlags(node);
     const pos = this.context.commentPos(node);
     const end = this.context.commentEnd(node);
@@ -4374,6 +4413,13 @@ export class Printer extends NameGeneratorHost {
     const containerEnd = stack[base + 4] | 0;
     const declarationListContainerEnd = stack[base + 5] | 0;
     stack.length = base;
+    if (node === this.freeOwner) this.endCommentFreeRange();
+    if (flags === commentFreeNode) {
+      this.containerPos = containerPos;
+      this.containerEnd = containerEnd;
+      this.declarationListContainerEnd = declarationListContainerEnd;
+      return true;
+    }
     if ((flags & EmitFlags.NoNestedComments) !== 0) this.commentsDisabled = false;
     if ((flags & EmitFlags.NoTrailingComments) === 0) {
       const synthesized = this.context.getSyntheticTrailingComments(node);
@@ -4393,6 +4439,83 @@ export class Printer extends NameGeneratorHost {
         declarationListContainerEnd,
       );
     return true;
+  }
+
+  /**
+   * Whether `node` has no emit data and lies in a range of the source text where no comment is found, so that its
+   * comments need not be looked for. Outside such a range, a node whose own range is one starts it (`freeOwner`).
+   */
+  private inCommentFreeRange(node: Node): boolean {
+    const pos = node.pos;
+    const end = node.end;
+    if (pos < 0 || end <= pos || node.kind === SyntaxKind.JsxText || node.kind === SyntaxKind.NotEmittedStatement)
+      return false;
+    if (this.freeEnd < 0) {
+      if (!this.startCommentFreeRange(pos, end)) return false;
+      this.freeOwner = node;
+    } else if (pos < this.freeStart) return false;
+    if (this.context.hasEmitNode(node)) return false;
+    return end < this.freeEnd || (end === this.freeEnd && this.freeEndTrailingNone);
+  }
+
+  private endCommentFreeRange(): boolean {
+    this.freeStart = -1;
+    this.freeEnd = -1;
+    this.freeEndTrailingNone = false;
+    this.freeOwner = undefined;
+    return true;
+  }
+
+  /** Whether the comment-free range shows that no trailing comment follows `pos`. */
+  private noCommentsAfter(pos: number): boolean {
+    return pos >= this.freeStart && (pos < this.freeEnd || (pos === this.freeEnd && this.freeEndTrailingNone));
+  }
+
+  /** Makes `[pos, end)` the comment-free range if no comment starts in it and its last character is not trivia. */
+  private startCommentFreeRange(pos: number, end: number): boolean {
+    const text = this.sourceText;
+    if (end > text.length) return false;
+    const last = text.charCodeAt(end - 1);
+    if (
+      last === CharacterCodes.space ||
+      last === CharacterCodes.tab ||
+      last === CharacterCodes.lineFeed ||
+      last === CharacterCodes.carriageReturn ||
+      last === CharacterCodes.verticalTab ||
+      last === CharacterCodes.formFeed ||
+      last > CharacterCodes.maxAsciiCharacter
+    )
+      return false;
+    const starts = this.commentStartsOfFile();
+    // The first comment start at or after `pos`.
+    let low = 0;
+    let high = starts.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (starts[middle]! < pos) low = middle + 1;
+      else high = middle;
+    }
+    if (low < starts.length && starts[low]! < end) return false;
+    this.freeStart = pos;
+    this.freeEnd = end;
+    this.freeEndTrailingNone = getTrailingCommentRanges(text, end) === undefined;
+    return true;
+  }
+
+  private commentStartsOfFile(): Int32Array {
+    const cached = this.commentStarts;
+    if (cached !== undefined) return cached;
+    const text = this.sourceText;
+    const length = text.length;
+    const list: number[] = [];
+    for (let i = text.indexOf('/'); i >= 0 && i + 1 < length; i = text.indexOf('/', i + 1)) {
+      const next = text.charCodeAt(i + 1);
+      if (next === CharacterCodes.slash || next === CharacterCodes.asterisk) list.push(i);
+    }
+    const starts = new Int32Array(list.length);
+    for (let i = 0; i < list.length; i++) starts[i] = list[i]!;
+    this.commentStarts = starts;
+    return starts;
   }
 
   /** Emits comments before a token; returns whether `emitCommentsAfterToken` applies, with the token's position in `tokenPos`. */
@@ -4505,6 +4628,7 @@ export class Printer extends NameGeneratorHost {
   private emitLeadingComments(pos: number, elided: boolean): boolean {
     if (this.commentsDisabled || this.currentSourceFile === undefined || pos < 0 || pos === this.containerPos)
       return false;
+    if (pos >= this.freeStart && pos < this.freeEnd) return false;
     // 1: only triple-slash comments, 2: all but triple-slash comments, 0: all.
     let tripleSlash = 0;
     if (!elided) {
@@ -4552,6 +4676,7 @@ export class Printer extends NameGeneratorHost {
       (this.containerEnd !== -1 && (pos === this.containerEnd || pos === this.declarationListContainerEnd))
     )
       return false;
+    if (this.noCommentsAfter(pos)) return false;
     const ranges = getTrailingCommentRanges(this.sourceText, pos);
     if (ranges === undefined) return false;
     let comments: CommentRange[] | undefined = undefined;
@@ -4567,6 +4692,7 @@ export class Printer extends NameGeneratorHost {
     if (this.commentsDisabled || this.currentSourceFile === undefined) return false;
     if (this.containerEnd !== -1 && (pos === this.containerEnd || pos === this.declarationListContainerEnd))
       return false;
+    if (this.noCommentsAfter(pos)) return false;
     const comments = getTrailingCommentRanges(this.sourceText, pos);
     if (comments === undefined) return false;
     for (const comment of comments) {

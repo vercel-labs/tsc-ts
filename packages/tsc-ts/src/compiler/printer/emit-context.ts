@@ -287,6 +287,11 @@ export class EmitContext extends NodeFactory {
 
   // Emit data
 
+  /** Whether `node` has emit data: flags, ranges, helpers or synthesized comments. */
+  hasEmitNode(node: Node): boolean {
+    return this.lookup(node) !== undefined;
+  }
+
   getEmitFlags(node: Node): EmitFlags {
     const emitNode = this.lookup(node);
     return emitNode === undefined ? EmitFlags.None : emitNode.emitFlags;
