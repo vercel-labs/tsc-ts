@@ -105,6 +105,26 @@ test('while root files are matched, other files go out to parse threads in full 
   assert.equal(queue.left(), 3);
 });
 
+test('a chunk of other files ends with the file that reaches about a large file of text', () => {
+  const queue = new ParseQueue();
+  for (let i = 0; i < 5; i++) queue.push(File, `/p/big${i}.ts`, 0, 100_000);
+  for (let i = 0; i < 4; i++) queue.push(File, `/p/small${i}.ts`, 0, 1000);
+  assert.deepEqual(queue.next(1).names, ['/p/big0.ts', '/p/big1.ts', '/p/big2.ts']);
+  assert.deepEqual(queue.next(1).names, [
+    '/p/big3.ts',
+    '/p/big4.ts',
+    '/p/small0.ts',
+    '/p/small1.ts',
+    '/p/small2.ts',
+    '/p/small3.ts',
+  ]);
+  // While root files are matched, a chunk with that much text is full with fewer than 16 files.
+  for (let i = 0; i < 4; i++) queue.push(File, `/p/next${i}.ts`, 0, 100_000);
+  assert.equal(queue.next(8, true).names.length, 3);
+  assert.equal(queue.next(8, true), undefined);
+  assert.equal(queue.left(), 1);
+});
+
 function project() {
   const dir = tempDir('tsc-ts-parallel-schedule-project-');
   const files = {
