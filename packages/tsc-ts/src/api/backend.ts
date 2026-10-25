@@ -897,6 +897,12 @@ export function encodeSourceFile(file: SourceFile): Uint8Array {
   return encodeFile(file);
 }
 
+// The file's encoding, made on first use and kept on the file. A parsed file's encoding does not change: lazily
+// parsed JSDoc encodes the same whenever it is parsed.
+export function keptEncodingOf(file: SourceFile): Uint8Array {
+  return (file.apiEncoding ??= encodeFile(file));
+}
+
 // Decodes a node from the API's binary AST format; throws on malformed data.
 export function decodeNode(data: Uint8Array): Node {
   return decodeNodes(data);

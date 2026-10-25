@@ -15,6 +15,9 @@ export interface SessionOptions {
   currentDirectory: string;
   defaultLibraryPath: string;
   useCaseSensitiveFileNames: boolean;
+  // Keep each source file's encoding after the first getSourceFile, for the clients that follow (`--listen`,
+  // where parsed files outlive a client).
+  keepEncodings?: boolean;
 }
 
 // A loaded tsconfig.json. Snapshots share it until its files change.
@@ -635,7 +638,8 @@ export class Session {
   private sourceFile(params: proto.ProjectFileParams): Reply {
     const loaded = this.snapshot(params.snapshot).project(params.project);
     const file = loaded.project.sourceFile(documentFileName(params.file));
-    return file === undefined ? new Uint8Array(0) : backend.encodeSourceFile(file);
+    if (file === undefined) return new Uint8Array(0);
+    return this.options.keepEncodings === true ? backend.keptEncodingOf(file) : backend.encodeSourceFile(file);
   }
 
   private sourceFileNames(params: proto.ProjectParams): string[] {

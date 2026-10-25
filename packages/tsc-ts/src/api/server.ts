@@ -55,6 +55,7 @@ export function runServer(args: string[], defaultLibraryPath: string): number {
       currentDirectory: options.cwd,
       defaultLibraryPath,
       useCaseSensitiveFileNames: isFileSystemCaseSensitive(),
+      keepEncodings: options.listen !== undefined,
     },
     options.timing,
   );
