@@ -2,7 +2,7 @@
 // disk instead of through the client's callbacks, and answers as it does when every read goes through them.
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, relative, resolve } from 'node:path';
 import test from 'node:test';
 import { Client } from './client.mjs';
 import { tempDir } from './temp.mjs';
@@ -12,8 +12,8 @@ const lib = bundledLib !== undefined && existsSync(bundledLib) ? realpathSync(bu
 const skip = lib === '' ? 'needs the scriptc toolchain' : tscTsMissing;
 
 // The responses to a session that loads the project and reads its files and diagnostics, and the client's calls.
-async function session(dir, args) {
-  const client = new Client(tscTs, dir, { TSC_TS_LIB_DIR: lib }, { args });
+async function session(dir, args, libDir = lib) {
+  const client = new Client(tscTs, dir, { TSC_TS_LIB_DIR: libDir }, { args });
   const replies = [];
   const call = async (method, params) => {
     const reply = await client.request(method, params);
@@ -43,4 +43,8 @@ test('the server reads its default library files from the disk', { skip, timeout
     actual.calls,
     expected.calls.filter((call) => !underLib(call)),
   );
+  // TSC_TS_LIB_DIR relative to the session's directory, with `.` and `..` segments, names the same directory.
+  const dotted = await session(dir, ['--default-libraries-from-disk'], `${relative(dir, lib)}/../${basename(lib)}/.`);
+  assert.deepEqual(dotted.replies, expected.replies);
+  assert.deepEqual(dotted.calls, actual.calls);
 });

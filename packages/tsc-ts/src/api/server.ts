@@ -4,6 +4,7 @@
 //   tsc --api [--cwd DIR] [--callbacks=readFile,fileExists,...] [--timing] [--pipe \\.\pipe\NAME]
 //             [--listen SOCKET [--idle-exit SECONDS]] [--default-libraries-from-disk]
 import { existsSync } from 'node:fs';
+import { getNormalizedAbsolutePath } from '../compiler/path.js';
 import { Connection } from './connection.js';
 import { ClientFileSystem, isCallback } from './fs.js';
 import type { Callback } from './fs.js';
@@ -50,7 +51,11 @@ export function runServer(args: string[], defaultLibraryPath: string): number {
     input = fd;
     output = fd;
   }
-  const fs = new ClientFileSystem(options.callbacks, options.librariesFromDisk ? defaultLibraryPath : undefined);
+  // The directory as the file loader resolves it: against the session's directory, without `.` and `..`.
+  const libraryDirectory = options.librariesFromDisk
+    ? getNormalizedAbsolutePath(defaultLibraryPath, options.cwd)
+    : undefined;
+  const fs = new ClientFileSystem(options.callbacks, libraryDirectory);
   const session = new Session(
     {
       fs,
