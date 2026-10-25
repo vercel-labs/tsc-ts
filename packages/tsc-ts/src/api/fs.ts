@@ -1,5 +1,6 @@
 // The server's file system: the disk, with operations the client asked to
-// handle (`--callbacks`) forwarded to it.
+// handle (`--callbacks`) forwarded to it, except for paths in the default
+// library directory with `--default-libraries-from-disk`.
 import {
   type DirectoryEntries,
   diskEntries,
@@ -33,8 +34,18 @@ interface EntriesResult {
 
 export class ClientFileSystem {
   private connection: Connection | undefined;
+  // The directory whose paths are always read from the disk, with a trailing slash.
+  private readonly diskDirectory: string | undefined;
 
-  constructor(private readonly callbacks: Set<Callback>) {}
+  constructor(
+    private readonly callbacks: Set<Callback>,
+    diskDirectory?: string,
+  ) {
+    if (diskDirectory !== undefined) {
+      const directory = diskDirectory.replace(/\\/g, '/');
+      this.diskDirectory = directory.endsWith('/') ? directory : directory + '/';
+    }
+  }
 
   connect(connection: Connection): void {
     this.connection = connection;
@@ -83,6 +94,8 @@ export class ClientFileSystem {
   // The client's JSON reply, or undefined to use the disk.
   private call(name: Callback, path: string): string | undefined {
     if (!this.callbacks.has(name)) return undefined;
+    const disk = this.diskDirectory;
+    if (disk !== undefined && (path.startsWith(disk) || path + '/' === disk)) return undefined;
     if (this.connection === undefined) throw new Error(`${name} called before the connection was set`);
     const reply = this.connection.call(name, JSON.stringify(path));
     return reply === '' || reply === 'null' ? undefined : reply;

@@ -13,10 +13,11 @@ const Call = 6;
 export const callbacks = ['readFile', 'fileExists', 'directoryExists', 'realpath', 'getAccessibleEntries'];
 
 export class Client {
-  // command: [executable, ...args] that starts `tsc --api`. With `pipe` (Windows), the server serves on the named
-  // pipe it creates, as scriptc's Node host starts it, and the client connects to it once it exists.
-  constructor(command, cwd, env = {}, { pipe } = {}) {
-    const args = [...command.slice(1), '--api', '--cwd', cwd, `--callbacks=${callbacks.join(',')}`];
+  // command: [executable, ...args] that starts `tsc --api`; `args` are more server flags. With `pipe` (Windows), the
+  // server serves on the named pipe it creates, as scriptc's Node host starts it, and the client connects to it once
+  // it exists.
+  constructor(command, cwd, env = {}, { pipe, args: extra = [] } = {}) {
+    const args = [...command.slice(1), '--api', '--cwd', cwd, `--callbacks=${callbacks.join(',')}`, ...extra];
     this.child = spawn(command[0], pipe === undefined ? args : [...args, '--pipe', pipe], {
       stdio: pipe === undefined ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'ignore', 'pipe'],
       env: { ...process.env, ...env },

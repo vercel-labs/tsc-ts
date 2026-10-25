@@ -2,7 +2,7 @@
 // to one client at a time on a Unix socket it creates.
 //
 //   tsc --api [--cwd DIR] [--callbacks=readFile,fileExists,...] [--timing] [--pipe \\.\pipe\NAME]
-//             [--listen SOCKET [--idle-exit SECONDS]]
+//             [--listen SOCKET [--idle-exit SECONDS]] [--default-libraries-from-disk]
 import { existsSync } from 'node:fs';
 import { Connection } from './connection.js';
 import { ClientFileSystem, isCallback } from './fs.js';
@@ -16,6 +16,8 @@ interface ServerOptions {
   pipe: string | undefined;
   listen: string | undefined;
   idleExit: number | undefined;
+  // Read the files in the default library directory from the disk, without callbacks.
+  librariesFromDisk: boolean;
 }
 
 /** How long a `--listen` server waits for a client before it exits, by default. */
@@ -48,7 +50,7 @@ export function runServer(args: string[], defaultLibraryPath: string): number {
     input = fd;
     output = fd;
   }
-  const fs = new ClientFileSystem(options.callbacks);
+  const fs = new ClientFileSystem(options.callbacks, options.librariesFromDisk ? defaultLibraryPath : undefined);
   const session = new Session(
     {
       fs,
@@ -134,6 +136,7 @@ function parseArgs(args: string[]): ServerOptions | undefined {
     pipe: undefined,
     listen: undefined,
     idleExit: undefined,
+    librariesFromDisk: false,
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -159,6 +162,9 @@ function parseArgs(args: string[]): ServerOptions | undefined {
       }
       case 'timing':
         options.timing = eq < 0 || arg.slice(eq + 1) === 'true';
+        break;
+      case 'default-libraries-from-disk':
+        options.librariesFromDisk = eq < 0 || arg.slice(eq + 1) === 'true';
         break;
       case 'pipe': {
         // Only the native Windows build links the pipe server.
@@ -201,7 +207,7 @@ function parseArgs(args: string[]): ServerOptions | undefined {
 
 function usage(message: string): undefined {
   process.stderr.write(
-    `${message}\nUsage of api:\n  -callbacks string\n  -cwd string\n  -idle-exit int\n  -listen string\n  -pipe string\n  -timing\n`,
+    `${message}\nUsage of api:\n  -callbacks string\n  -cwd string\n  -default-libraries-from-disk\n  -idle-exit int\n  -listen string\n  -pipe string\n  -timing\n`,
   );
   return undefined;
 }

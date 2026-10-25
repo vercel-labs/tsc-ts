@@ -16,7 +16,7 @@ comments), and on every full run, which includes scriptc upgrades (the lockfile 
 compiles the shipped native tsc-ts (`npm run build:native`, `packages/tsc-ts/dist/tsc`) and a native command line
 driver (`src/drivers/cli.ts`, `dist/cli`) next to the `build` job, with scriptc's runtime cache kept per scriptc
 version. The `native test` shards then run the native twins (`native:<unit>`) of the selected units of the test files
-that take a native build: `TSC_TS_BIN` for api, api-listen, api-pipe, build, library-checking, parallel-emit, projects, scriptc
+that take a native build: `TSC_TS_BIN` for api, api-libraries-from-disk, api-listen, api-pipe, build, library-checking, parallel-emit, projects, scriptc
 and tsc-project, `TSC_TS_CLI` for program and command-line. With the native lane, the `API server (windows)` job builds
 the native tsc-ts on Windows, with the named pipe server `--api --pipe` serves on (`native/pipe-win32.c`, compiled
 with zig), and runs `api-pipe.test.mjs` with it, over the pipe and over standard input and output, and `native/pipe-win32.test.c`, which checks that the pipe's DACL grants access to the current user only. Locally:
