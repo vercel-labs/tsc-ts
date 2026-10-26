@@ -78,6 +78,15 @@ test('declarations keep exported shapes and drop implementations', async () => {
   );
 });
 
+test('declarations stop at a recursive array alias whose type arguments grow', async () => {
+  const { read, stdout } = await emit({
+    'globals.ts': 'interface Array<T> { length: number; }\n',
+    'grow.ts': ['export function f() {', '  type R<T> = R<T[]>[];', '  return null! as R<number>;', '}', ''].join('\n'),
+  });
+  assert.equal(read('grow.d.ts'), undefined);
+  assert.match(stdout, /error TS7056:/);
+});
+
 test('declarations write inferred types from the checker', async () => {
   const { read, stdout } = await emit({
     'e.ts': [
