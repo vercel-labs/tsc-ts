@@ -408,6 +408,15 @@ export abstract class CompilerProgram {
     return this.checked.getGlobalDiagnostics(withCheckerThreads);
   }
 
+  /**
+   * Whether the global diagnostics found by checking are reported after the semantic diagnostics. An
+   * incremental program has them in the semantic diagnostics of the files they were found in
+   * (`CheckedProgram.globalsInFileDiagnostics`).
+   */
+  reportsGlobalDiagnosticsOfChecking(): boolean {
+    return !this.checked.globalsInFileDiagnostics;
+  }
+
   /** Semantic diagnostics of every file. */
   abstract getSemanticDiagnostics(): Diagnostic[];
 
@@ -527,7 +536,7 @@ export function getDiagnosticsOfProgram(
     program.times.emitTime += nestedEmitTime;
     for (const d of semantic) result.push(d);
     // Checking may have found more, such as missing global types.
-    for (const d of program.getGlobalDiagnostics()) result.push(d);
+    if (program.reportsGlobalDiagnosticsOfChecking()) for (const d of program.getGlobalDiagnostics()) result.push(d);
     mark('semantic diagnostics');
   }
   if (!declarationsLater && declarationDiagnosticsDue(program, result, withDeclarationDiagnostics))

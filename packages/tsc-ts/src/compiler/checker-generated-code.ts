@@ -20,15 +20,6 @@ import { ModuleKind, ScriptTarget, getEmitModuleKind, getUseDefineForClassFields
 import { moduleKindName } from './program-utilities.js';
 import { SyntaxKind } from './syntax-kind.js';
 
-/** A collision check that waits until the file is checked, when the flags it reads are complete. */
-export class DeferredCollisionCheck {
-  constructor(
-    readonly node: Node,
-    /** `Reflect` rather than `WeakMap` and `WeakSet`. */
-    readonly reflect: boolean,
-  ) {}
-}
-
 /** An error that is not reported under noEmit, since it is about the emitted code. */
 export function errorSkippedOnNoEmit(
   c: Checker,
@@ -51,9 +42,9 @@ export function checkCollisionsForDeclarationName(c: Checker, node: Node, name: 
     c.languageVersion <= ScriptTarget.ES2021 &&
     (needCollisionCheckForIdentifier(node, name, 'WeakMap') || needCollisionCheckForIdentifier(node, name, 'WeakSet'))
   )
-    c.deferredCollisionChecks.push(new DeferredCollisionCheck(node, false));
+    c.deferredDiagnostics.push(() => checkWeakMapSetCollision(c, node));
   if (c.languageVersion <= ScriptTarget.ES2021 && needCollisionCheckForIdentifier(node, name, 'Reflect'))
-    c.deferredCollisionChecks.push(new DeferredCollisionCheck(node, true));
+    c.deferredDiagnostics.push(() => checkReflectCollision(c, node));
   if (isClassLike(node) && (node.flags & NodeFlags.Ambient) === 0 && getText(name) === 'Object') {
     if (c.host.getEmitModuleFormatOfFile(getSourceFileOfNode(name)) < ModuleKind.ES2015)
       c.error(
@@ -172,17 +163,6 @@ export function markSuperPropertyInStaticInitializer(c: Checker, node: Node): vo
   )
     if (scope.kind !== SyntaxKind.SourceFile || isExternalOrCommonJSModule(scope as SourceFile))
       c.nodeLinks(scope).flags |= NodeCheckFlags.ContainsSuperPropertyInStaticInitializer;
-}
-
-/** Reports the `WeakMap`, `WeakSet` and `Reflect` collisions found while checking the file. */
-export function produceDeferredCollisionChecks(c: Checker): void {
-  const checks = c.deferredCollisionChecks;
-  if (checks.length === 0) return;
-  c.deferredCollisionChecks = [];
-  for (const check of checks) {
-    if (check.reflect) checkReflectCollision(c, check.node);
-    else checkWeakMapSetCollision(c, check.node);
-  }
 }
 
 function checkWeakMapSetCollision(c: Checker, node: Node): void {

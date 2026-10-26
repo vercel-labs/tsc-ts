@@ -109,6 +109,16 @@ export function lookupSymbolChain(
   yieldModuleSymbol: boolean,
 ): Symbol[] {
   b.trackSymbol(symbol, b.enclosingDeclaration, meaning);
+  return lookupSymbolChainWorker(b, symbol, meaning, yieldModuleSymbol);
+}
+
+/** `lookupSymbolChain` without tracking the symbol's accessibility. */
+function lookupSymbolChainWorker(
+  b: NodeBuilder,
+  symbol: Symbol,
+  meaning: SymbolFlags,
+  yieldModuleSymbol: boolean,
+): Symbol[] {
   // Qualified only with somewhere to qualify from, and never for type parameters.
   if (
     (symbol.flags & SymbolFlags.TypeParameter) === 0 &&
@@ -537,7 +547,13 @@ export function symbolToEntityNameNode(b: NodeBuilder, symbol: Symbol): Node {
 }
 
 export function symbolToExpression(b: NodeBuilder, symbol: Symbol, meaning: SymbolFlags): Node {
-  const chain = lookupSymbolChain(b, symbol, meaning, false);
+  b.trackSymbol(symbol, b.enclosingDeclaration, meaning);
+  return symbolToExpressionWorker(b, symbol, meaning);
+}
+
+/** `symbolToExpression` without tracking the symbol's accessibility. */
+function symbolToExpressionWorker(b: NodeBuilder, symbol: Symbol, meaning: SymbolFlags): Node {
+  const chain = lookupSymbolChainWorker(b, symbol, meaning, false);
   return createExpressionFromSymbolChain(b, chain, chain.length - 1);
 }
 
@@ -878,8 +894,9 @@ function getPropertyNameNodeForSymbolFromNameType(
       );
     return createPropertyNameNodeForIdentifierOrLiteral(b, name, singleQuote, stringNamed, isMethod);
   }
+  // The reference is tracked where the name is used; spelling it here must not track it in this scope.
   if ((nameType.flags & TypeFlags.UniqueESSymbol) !== 0)
-    return b.created(new ComputedPropertyName(symbolToExpression(b, nameType.symbol!, SymbolFlags.Value)));
+    return b.created(new ComputedPropertyName(symbolToExpressionWorker(b, nameType.symbol!, SymbolFlags.Value)));
   return undefined;
 }
 

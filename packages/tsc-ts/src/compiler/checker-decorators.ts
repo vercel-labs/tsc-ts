@@ -404,7 +404,7 @@ export function getDecoratorArgumentCount(c: Checker, node: Node, signature: Sig
     case SyntaxKind.GetAccessor:
     case SyntaxKind.SetAccessor:
       // Decorators with only two parameters get only two arguments.
-      return signature.parameters.length <= 2 ? 2 : 3;
+      return getParameterCount(c, signature) <= 2 ? 2 : 3;
   }
   return 3;
 }

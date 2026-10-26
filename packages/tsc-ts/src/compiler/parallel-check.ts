@@ -73,7 +73,8 @@ export function residentMB(): number[] {
  * the main thread emits the program (`checkersEmit`). `emitKinds`, by file index, is what the emit of
  * each file includes (an `EmitOnly`, or -1 for none) where not every output of every file is emitted
  * (an incremental program's rebuild); `undefined` for all of them. `units` are the statement ranges of
- * declaration files the order has positions for (`CheckPlan.units`).
+ * declaration files the order has positions for (`CheckPlan.units`). `globalsInFileDiagnostics` is the main
+ * thread's `CheckedProgram.globalsInFileDiagnostics`.
  */
 export type CheckerSpawn = (
   program: Program | undefined,
@@ -87,6 +88,7 @@ export type CheckerSpawn = (
   emitKinds: number[] | undefined,
   checking: boolean,
   units: number[],
+  globalsInFileDiagnostics: boolean,
 ) => Worker;
 
 export class ParallelCheck {
@@ -2030,6 +2032,7 @@ export function startParallelCheck(
       emitKinds,
       checking,
       units,
+      checked.globalsInFileDiagnostics,
     );
     worker.on('message', (message: unknown) => {
       mark(`result from c${i}`);

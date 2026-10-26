@@ -2156,6 +2156,16 @@ export class SymbolLinks implements ProgramLifetime {
     this.rare().enumChecked = value;
   }
 
+  get mergedExportsChecked(): boolean {
+    const rare = this.rareLinks;
+    return rare === undefined ? false : rare.mergedExportsChecked;
+  }
+
+  set mergedExportsChecked(value: boolean) {
+    if (value === false && this.rareLinks === undefined) return;
+    this.rare().mergedExportsChecked = value;
+  }
+
   get variances(): VarianceFlags[] | undefined {
     const rare = this.rareLinks;
     return rare === undefined ? undefined : rare.variances;
@@ -2265,6 +2275,7 @@ export class RareSymbolLinks implements ProgramLifetime {
   indexSignaturesChecked: boolean;
   typeParametersChecked: boolean;
   enumChecked: boolean;
+  mergedExportsChecked: boolean;
   variances: VarianceFlags[] | undefined;
   // Assignment tracking
   lastAssignmentPos: number;
@@ -2292,6 +2303,7 @@ export class RareSymbolLinks implements ProgramLifetime {
     this.indexSignaturesChecked = false;
     this.typeParametersChecked = false;
     this.enumChecked = false;
+    this.mergedExportsChecked = false;
     this.variances = undefined;
     this.lastAssignmentPos = 0;
     this.hasDefiniteAssignment = false;

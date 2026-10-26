@@ -128,30 +128,18 @@ function anyIterationTypes(c: Checker): IterationTypes {
   return new IterationTypes(c.anyType, c.anyType, c.anyType);
 }
 
-/** A not-iterable error, reported once the file is checked so printing its type can't recurse. */
-export class DeferredIterationError {
-  readonly errorNode: Node;
-  readonly type: Type;
-  readonly allowAsyncIterables: boolean;
-  readonly related: Diagnostic[];
-
-  constructor(errorNode: Node, type: Type, allowAsyncIterables: boolean, related: Diagnostic[]) {
-    this.errorNode = errorNode;
-    this.type = type;
-    this.allowAsyncIterables = allowAsyncIterables;
-    this.related = related;
-  }
-}
-
-/** Reports the not-iterable errors deferred while checking a file. */
-export function produceDeferredIterationErrors(c: Checker): void {
-  const errors = c.deferredIterationErrors;
-  if (errors.length === 0) return;
-  c.deferredIterationErrors = [];
-  for (const e of errors) {
-    const diagnostic = reportTypeNotIterableError(c, e.errorNode, e.type, e.allowAsyncIterables);
-    for (const d of e.related) diagnostic.addRelatedInfo(d);
-  }
+/** Defers a not-iterable error, so printing its type can't resolve types that are being resolved. */
+function deferTypeNotIterableError(
+  c: Checker,
+  errorNode: Node,
+  t: Type,
+  allowAsyncIterables: boolean,
+  related: Diagnostic[],
+): void {
+  c.deferredDiagnostics.push(() => {
+    const diagnostic = reportTypeNotIterableError(c, errorNode, t, allowAsyncIterables);
+    for (const d of related) diagnostic.addRelatedInfo(d);
+  });
 }
 
 // ---- Global types
@@ -494,8 +482,7 @@ function getIterationTypesOfIterableWorker(
     for (const constituent of typesOf(t)) {
       const iterationTypes = getIterationTypesOfIterableWorker(c, constituent, use, undefined);
       if (!iterationTypes.hasTypes()) {
-        if (errorNode !== undefined && c.saveDeferredDiagnostics)
-          c.deferredIterationErrors.push(new DeferredIterationError(errorNode, t, allowAsync, []));
+        if (errorNode !== undefined) deferTypeNotIterableError(c, errorNode, t, allowAsync, []);
         return noIterationTypes();
       }
       all.push(iterationTypes);
@@ -525,8 +512,7 @@ function getIterationTypesOfIterableWorker(
       return allowAsync ? getAsyncFromSyncIterationTypes(c, iterationTypes, errorNode) : iterationTypes;
     }
   }
-  if (errorNode !== undefined && c.saveDeferredDiagnostics)
-    c.deferredIterationErrors.push(new DeferredIterationError(errorNode, t, allowAsync, diagnostics));
+  if (errorNode !== undefined) deferTypeNotIterableError(c, errorNode, t, allowAsync, diagnostics);
   return noIterationTypes();
 }
 

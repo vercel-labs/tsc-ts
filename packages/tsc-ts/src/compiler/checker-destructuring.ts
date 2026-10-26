@@ -110,7 +110,12 @@ import {
 } from './checker-expressions.js';
 import { IterationUse, checkIteratedTypeOrElementType, createIterableType } from './checker-iteration.js';
 import { ScriptTarget } from './options.js';
-import { checkBinaryExpression, checkReferenceExpression, removeDefinitelyFalsyTypes } from './checker-operators.js';
+import {
+  checkBinaryExpression,
+  checkReferenceExpression,
+  grammarErrorOnNode,
+  removeDefinitelyFalsyTypes,
+} from './checker-operators.js';
 import { TypeFacts, getNonNullableType, getTypeWithFacts, hasTypeFacts } from './checker-flow.js';
 import { sliceTupleType } from './checker-signatures.js';
 import { getPropertyNameFromType, isTypeUsableAsPropertyName, maybeTypeOfKind } from './checker-utilities.js';
@@ -462,7 +467,7 @@ function padObjectLiteralType(c: Checker, t: Type, pattern: Node): Type {
   const missingElements: BindingElement[] = [];
   for (const node of getElements(pattern)!.nodes) {
     const e = node as BindingElement;
-    if (e.initializer === undefined) continue;
+    if (e.dotDotDotToken !== undefined) continue;
     const name = getPropertyNameFromBindingElement(c, e);
     if (name !== undefined && getPropertyOfType(c, t, name) === undefined) missingElements.push(e);
   }
@@ -471,7 +476,7 @@ function padObjectLiteralType(c: Checker, t: Type, pattern: Node): Type {
   for (const prop of getPropertiesOfObjectType(c, t)) members.set(prop.name, prop);
   for (const e of missingElements) {
     const symbol = c.newSymbol(SymbolFlags.Property | SymbolFlags.Optional, getPropertyNameFromBindingElement(c, e)!);
-    c.symbolTypes.set(getSymbolId(symbol), getTypeFromBindingElement(c, e, false, false));
+    c.symbolTypes.set(getSymbolId(symbol), getTypeFromBindingElement(c, e, false, true));
     members.set(symbol.name, symbol);
   }
   const result = createAnonymousType(c, t.symbol, members, [], [], getIndexInfosOfType(c, t));
@@ -588,6 +593,8 @@ function checkObjectLiteralDestructuringPropertyAssignment(
   const property = properties[propertyIndex]!;
   if (property.kind === SyntaxKind.PropertyAssignment || property.kind === SyntaxKind.ShorthandPropertyAssignment) {
     const name = getName(property)!;
+    if (name.kind === SyntaxKind.PrivateIdentifier)
+      grammarErrorOnNode(c, name, Diagnostics.Private_identifiers_cannot_be_used_in_destructuring_patterns);
     markDestructuredPropertyAsReferenced(c, objectLiteralType, name, property, rightIsThis);
     const exprType = getLiteralTypeFromPropertyName(c, name) ?? c.errorType;
     if (isTypeUsableAsPropertyName(exprType)) {

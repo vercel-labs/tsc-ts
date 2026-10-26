@@ -195,7 +195,12 @@ export function checkPropertyAccessExpressionOrQualifiedName(
           );
         return c.anyType;
       }
-      if (name !== '') reportNonexistentProperty(c, right, isThisTypeParameter(leftType) ? apparentType : leftType);
+      if (name !== '') {
+        // Deferred, since printing the containing type can resolve it completely, and report circularities
+        // while it is being resolved.
+        const containingType = isThisTypeParameter(leftType) ? apparentType : leftType;
+        c.deferredDiagnostics.push(() => reportNonexistentProperty(c, right, containingType));
+      }
       return c.errorType;
     }
     if (indexInfo.isReadonly && (assignmentKind !== AssignmentKind.None || isDeleteTarget(node)))

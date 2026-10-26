@@ -1146,9 +1146,15 @@ function getSyntacticNullishnessSemantics(c: Checker, nodeIn: Node): PredicateSe
         // The right operand decides.
         case SyntaxKind.CommaToken:
         case SyntaxKind.EqualsToken:
-        case SyntaxKind.QuestionQuestionToken:
-        case SyntaxKind.QuestionQuestionEqualsToken:
           return getSyntacticNullishnessSemantics(c, binary.right);
+        // The left operand when it isn't nullish, otherwise the right operand.
+        case SyntaxKind.QuestionQuestionToken:
+        case SyntaxKind.QuestionQuestionEqualsToken: {
+          const left = getSyntacticNullishnessSemantics(c, binary.left);
+          let result = left & PredicateSemantics.Never;
+          if ((left & PredicateSemantics.Always) !== 0) result |= getSyntacticNullishnessSemantics(c, binary.right);
+          return result;
+        }
       }
       return PredicateSemantics.Never;
     }

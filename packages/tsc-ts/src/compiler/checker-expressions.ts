@@ -208,8 +208,10 @@ import {
   checkDeleteExpression,
   checkPostfixUnaryExpression,
   checkPrefixUnaryExpression,
+  grammarErrorOnNode,
   isTypeAssertion,
 } from './checker-operators.js';
+import { fileExtensionIsOneOf } from './path.js';
 import { checkJsx } from './checker-jsx.js';
 import { getRegularTypeOfObjectLiteral } from './checker-literals.js';
 import {
@@ -445,8 +447,10 @@ function getReturnTypeOfSingleNonGenericSignature(c: Checker, funcType: Type, ki
 }
 
 export function checkComputedPropertyName(c: Checker, node: Node): Type {
-  const nodeId = (node as ComputedPropertyName).expression.id;
+  const nodeId = node.id;
   if (c.resolvedTypes.get(nodeId) === undefined) {
+    // A reference to the name while its expression is checked sees a circular type.
+    c.resolvedTypes.set(nodeId, c.circularConstraintType);
     const expression = (node as ComputedPropertyName).expression;
     const container = node.parent!.parent!;
     // `[x in y]` in a type member is a mapped type written in the wrong place, reported by the parser.
@@ -1567,32 +1571,25 @@ export function getFlowTypeOfAccessExpression(
     return propType;
   if (propType === c.autoType) return getFlowTypeOfAutoTypedProperty(c, node, prop);
   propType = getNarrowableTypeForReference(c, propType, node, checkMode);
-  // `this.x` in the constructor of x's class starts out uninitialized under strictPropertyInitialization.
+  // `this.x` in the constructor of x's class starts out uninitialized under strictPropertyInitialization,
+  // and a JavaScript `this.x = …` declaration is unassigned before it in its own function.
   let assumeUninitialized = false;
-  const expression = getExpression(node);
-  if (
-    c.strictNullChecks &&
-    c.strictPropertyInitialization &&
-    expression !== undefined &&
-    expression.kind === SyntaxKind.ThisKeyword &&
-    prop !== undefined
-  ) {
+  if (c.strictNullChecks && prop !== undefined) {
     const declaration = prop.valueDeclaration;
-    if (declaration !== undefined && isPropertyWithoutInitializer(declaration) && !isStatic(declaration)) {
-      const flowContainer = getControlFlowContainer(node);
+    const expression = getExpression(node);
+    if (c.strictPropertyInitialization && expression !== undefined && expression.kind === SyntaxKind.ThisKeyword) {
+      if (declaration !== undefined && isPropertyWithoutInitializer(declaration) && !isStatic(declaration)) {
+        const flowContainer = getControlFlowContainer(node);
+        assumeUninitialized =
+          flowContainer.kind === SyntaxKind.Constructor &&
+          flowContainer.parent === declaration.parent &&
+          (declaration.flags & NodeFlags.Ambient) === 0;
+      }
+    } else
       assumeUninitialized =
-        flowContainer.kind === SyntaxKind.Constructor &&
-        flowContainer.parent === declaration.parent &&
-        (declaration.flags & NodeFlags.Ambient) === 0;
-    }
-  }
-  // A JavaScript `this.x = …` declaration is unassigned before it in its own function.
-  if (c.strictNullChecks && prop !== undefined && !assumeUninitialized) {
-    const declaration = prop.valueDeclaration;
-    assumeUninitialized =
-      declaration instanceof BinaryExpression &&
-      declaration.left.kind === SyntaxKind.PropertyAccessExpression &&
-      getControlFlowContainer(node) === getControlFlowContainer(declaration);
+        declaration instanceof BinaryExpression &&
+        declaration.left.kind === SyntaxKind.PropertyAccessExpression &&
+        getControlFlowContainer(node) === getControlFlowContainer(declaration);
   }
   const initialType = assumeUninitialized ? getOptionalType(c, propType, false) : propType;
   const flowType = getFlowTypeOfReference(c, node, propType, initialType, undefined);
@@ -1764,6 +1761,15 @@ function hasNumericPropertyNames(c: Checker, t: Type): boolean {
 // ---- Assertions
 
 function checkAssertion(c: Checker, node: Node, checkMode: CheckMode): Type {
+  if (node.kind === SyntaxKind.TypeAssertionExpression) {
+    const file = getSourceFileOfNode(node);
+    if (fileExtensionIsOneOf(file.fileName, ['.mts', '.cts']))
+      grammarErrorOnNode(
+        c,
+        node,
+        Diagnostics.This_syntax_is_reserved_in_files_with_the_mts_or_cts_extension_Use_an_as_expression_instead,
+      );
+  }
   // `<T>expr`, over `<T>`.
   if (node.kind === SyntaxKind.TypeAssertionExpression && shouldCheckErasableSyntax(c, node)) {
     const file = getSourceFileOfNode(node);
@@ -1777,8 +1783,10 @@ function checkAssertion(c: Checker, node: Node, checkMode: CheckMode): Type {
       ),
     );
   }
+  const exprType = checkExpressionEx(c, getExpression(node)!, checkMode);
+  // The type node is checked in every case, including the `const` of `x as const`.
+  checkTypeNodeIfPresent(c, getType(node));
   if (isConstTypeReference(getType(node)!)) {
-    const exprType = checkExpressionEx(c, getExpression(node)!, checkMode);
     if (!isValidConstAssertionArgument(c, getExpression(node)!))
       c.error(
         getExpression(node)!,
@@ -1786,10 +1794,8 @@ function checkAssertion(c: Checker, node: Node, checkMode: CheckMode): Type {
       );
     return getRegularTypeOfLiteralType(c, exprType);
   }
-  const exprType = checkExpressionEx(c, getExpression(node)!, checkMode);
   // The operand is compared with the asserted type once, after the last check of the operand.
   c.nodeLinks(node).assertionExpressionType = exprType;
-  checkTypeNodeIfPresent(c, getType(node));
   checkNodeDeferred(c, node);
   return getTypeFromTypeNode(c, getType(node)!);
 }
