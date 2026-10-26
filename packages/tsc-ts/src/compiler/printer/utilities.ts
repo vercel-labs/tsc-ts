@@ -31,7 +31,12 @@ import {
   PrivateIdentifier,
   getExpression,
 } from '../ast.js';
-import { OperatorPrecedence, getBinaryOperatorPrecedence } from '../ast-utilities.js';
+import {
+  OperatorPrecedence,
+  getBinaryOperatorPrecedence,
+  isJSDocTypeExpressionOrChild,
+  normalizeJSDocTypeSourceText,
+} from '../ast-utilities.js';
 import {
   CharacterCodes,
   isDigit,
@@ -687,7 +692,8 @@ export function getLiteralText(node: Node, sourceText: string | undefined, flags
 /** The source text of a node without leading trivia, as tsgo's GetSourceTextOfNodeFromSourceFile. */
 export function getSourceTextOfNode(sourceText: string, node: Node): string {
   if (node.pos === node.end && node.pos >= 0 && node.kind !== SyntaxKind.EndOfFile) return '';
-  const text = sourceText.substring(skipTrivia(sourceText, node.pos), node.end);
+  let text = sourceText.substring(skipTrivia(sourceText, node.pos), node.end);
+  if (isJSDocTypeExpressionOrChild(node)) text = normalizeJSDocTypeSourceText(text);
   if ((node.flags & NodeFlags.ReparserTransformedLiteral) !== 0) {
     if (node instanceof StringLiteral)
       return (node.tokenFlags & TokenFlags.SingleQuote) !== 0 ? "'" + text + "'" : '"' + text + '"';

@@ -400,7 +400,7 @@ function checkParameter(c: Checker, node: Node): void {
   }
 }
 
-function isVariableLike(node: Node): boolean {
+export function isVariableLike(node: Node): boolean {
   switch (node.kind) {
     case SyntaxKind.BindingElement:
     case SyntaxKind.EnumMember:

@@ -128,11 +128,13 @@ import {
   getBaseTypeVariableOfClass,
   getNonMissingTypeOfSymbol,
   getOptionalType,
+  getTypeForVariableLikeDeclaration,
   getTypeOfSymbol,
   getWriteTypeOfSymbol,
   isReadonlySymbol,
   removeMissingType,
 } from './checker-symbol-types.js';
+import { isVariableLike } from './checker-declarations.js';
 import {
   getFirstIdentifier,
   getGlobalTypeAliasSymbol,
@@ -1438,7 +1440,8 @@ export class NodeBuilder {
   private shouldWriteTypeOfFunctionSymbol(symbol: Symbol, typeId: number): Symbol | undefined {
     const c = this.c;
     let isStaticMethodSymbol = false;
-    if ((symbol.flags & SymbolFlags.Method) !== 0)
+    // `typeof C.name` can only be written when the member's name is an identifier.
+    if ((symbol.flags & SymbolFlags.Method) !== 0 && isIdentifierText(symbol.name))
       for (const d of getDeclarations(symbol))
         if (isStatic(d) && !hasLateBindableIndexSignature(c, d)) isStaticMethodSymbol = true;
     let isNonLocalFunctionSymbol = false;
@@ -1765,7 +1768,7 @@ export class NodeBuilder {
     this.enclosingDeclaration =
       propertySymbol.valueDeclaration ??
       (declarationCount(propertySymbol) > 0 ? propertySymbol.declaration! : saveEnclosingDeclaration);
-    const propertyName = getPropertyNameNodeForSymbol(this, propertySymbol);
+    const propertyName = getPropertyNameNodeForSymbol(this, propertySymbol, saveEnclosingDeclaration);
     this.enclosingDeclaration = saveEnclosingDeclaration;
     this.approximateLength += symbolName(propertySymbol).length + 1;
     if ((propertySymbol.flags & SymbolFlags.Accessor) !== 0) {
@@ -2495,6 +2498,9 @@ export class NodeBuilder {
       declaration = symbol.valueDeclaration ?? (declarationCount(symbol) > 0 ? symbol.declaration! : undefined);
     if (symbol === undefined && declaration !== undefined) symbol = getSymbolOfDeclaration(c, declaration);
     let t = type;
+    // A variable named by a binding pattern has no symbol.
+    if (t === undefined && symbol === undefined && declaration !== undefined && isVariableLike(declaration))
+      t = getTypeForVariableLikeDeclaration(c, declaration, false);
     if (t === undefined && symbol !== undefined) {
       t = this.enclosingSymbolTypes.get(getSymbolId(symbol));
       if (t === undefined) {
@@ -2563,20 +2569,27 @@ export class NodeBuilder {
       tryReuse &&
       this.enclosingDeclaration !== undefined &&
       declaration !== undefined &&
-      symbol !== undefined &&
       (isAccessorKind(declaration) ||
         (hasInferredTypeKind(declaration) &&
           (declaration.flags & NodeFlags.Synthesized) === 0 &&
           (t.objectFlags & ObjectFlags.RequiresWidening) === 0))
     ) {
-      const remove = this.addSymbolTypeToContext(symbol, t);
+      const remove = symbol !== undefined ? this.addSymbolTypeToContext(symbol, t) : undefined;
       let pt: PseudoType = isAccessorKind(declaration)
         ? pseudo.getTypeOfAccessor(declaration)
         : pseudo.getTypeOfDeclaration(declaration);
-      if (pt.kind === PseudoTypeKind.NoResult && declaration.kind === SyntaxKind.BinaryExpression) {
-        // The first annotated assignment declares the type for the rest.
+      if (
+        pt.kind === PseudoTypeKind.NoResult &&
+        declaration.kind === SyntaxKind.BinaryExpression &&
+        symbol !== undefined
+      ) {
+        // The first annotated assignment declares the type for the rest. A type alias's type isn't an annotation.
         for (const d of getDeclarations(symbol))
-          if (getType(d) !== undefined) {
+          if (
+            getType(d) !== undefined &&
+            d.kind !== SyntaxKind.TypeAliasDeclaration &&
+            d.kind !== SyntaxKind.JSTypeAliasDeclaration
+          ) {
             pt = pseudo.getTypeOfDeclaration(d);
             break;
           }
@@ -2617,7 +2630,7 @@ export class NodeBuilder {
           }
         }
       }
-      remove();
+      if (remove !== undefined) remove();
     }
     if (result === undefined) {
       if (reportedInferenceFallback) {

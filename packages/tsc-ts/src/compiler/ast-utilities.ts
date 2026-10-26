@@ -25,6 +25,8 @@ import {
   getText,
   getType,
 } from './ast.js';
+import { isTypeNodeKind } from './binder-utilities.js';
+import { CharacterCodes, isLineBreak, isWhiteSpaceLike } from './character-codes.js';
 import { skipTrivia } from './scanner.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { TokenFlags } from './types.js';
@@ -394,10 +396,45 @@ export function tagNamesAreEquivalent(lhs: Node, rhs: Node): boolean {
   throw new Error('Unhandled case in tagNamesAreEquivalent');
 }
 
+/** Whether `node` is a JSDoc type expression or a type node in one. */
+export function isJSDocTypeExpressionOrChild(node: Node): boolean {
+  if (node.kind === SyntaxKind.JSDocTypeExpression) return true;
+  if ((node.flags & (NodeFlags.JSDoc | NodeFlags.Reparsed)) === 0) return false;
+  for (let current: Node | undefined = node; current !== undefined; current = current.parent)
+    if (isTypeNodeKind(current.kind)) return true;
+  return false;
+}
+
+/** The text of a JSDoc type with the leading whitespace and `*` of each line removed, and LF line breaks. */
+export function normalizeJSDocTypeSourceText(text: string): string {
+  let result = '';
+  let lineStart = 0;
+  let multiline = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    if (!isLineBreak(ch)) continue;
+    result += stripLeadingJSDocComment(text.substring(lineStart, i)) + '\n';
+    multiline = true;
+    if (ch === CharacterCodes.carriageReturn && text.charCodeAt(i + 1) === CharacterCodes.lineFeed) i++;
+    lineStart = i + 1;
+  }
+  if (!multiline) return stripLeadingJSDocComment(text);
+  return result + stripLeadingJSDocComment(text.substring(lineStart));
+}
+
+function stripLeadingJSDocComment(line: string): string {
+  let start = 0;
+  while (start < line.length && isWhiteSpaceLike(line.charCodeAt(start))) start++;
+  if (start < line.length && line.charCodeAt(start) === CharacterCodes.asterisk) start++;
+  while (start < line.length && isWhiteSpaceLike(line.charCodeAt(start))) start++;
+  return start === 0 ? line : line.substring(start);
+}
+
 /** The source text of a node, without leading trivia. */
 export function getTextOfNodeFromSourceText(sourceText: string, node: Node): string {
   if (nodeIsMissing(node)) return '';
-  const text = sourceText.substring(skipTrivia(sourceText, node.pos), node.end);
+  let text = sourceText.substring(skipTrivia(sourceText, node.pos), node.end);
+  if (isJSDocTypeExpressionOrChild(node)) text = normalizeJSDocTypeSourceText(text);
   if ((node.flags & NodeFlags.ReparserTransformedLiteral) !== 0) {
     if (node instanceof StringLiteral)
       return ((node as StringLiteral).tokenFlags & TokenFlags.SingleQuote) !== 0 ? "'" + text + "'" : '"' + text + '"';

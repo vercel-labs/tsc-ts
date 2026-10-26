@@ -718,11 +718,24 @@ class ChainSearch {
   isAccessible(fromTable: Symbol, resolvedAlias: Symbol | undefined, ignoreQualification: boolean): boolean {
     const c = this.c;
     const symbol = getMergedSymbol(c, this.symbol);
-    const likeSymbols =
+    let likeSymbols =
       this.symbol === resolvedAlias ||
       this.symbol === fromTable ||
       (resolvedAlias !== undefined && symbol === getMergedSymbol(c, resolvedAlias)) ||
       symbol === getMergedSymbol(c, fromTable);
+    // An alias of an alias, such as `export =` of a class that a top-level export also names, resolves further.
+    if (!likeSymbols && resolvedAlias !== undefined && (resolvedAlias.flags & SymbolFlags.Alias) !== 0) {
+      const seen = new Set<Symbol>();
+      let alias = resolvedAlias;
+      while ((alias.flags & SymbolFlags.Alias) !== 0 && !seen.has(alias)) {
+        seen.add(alias);
+        alias = getMergedSymbol(c, resolveAlias(c, alias));
+        if (symbol === alias) {
+          likeSymbols = true;
+          break;
+        }
+      }
+    }
     if (!likeSymbols) return false;
     // An external module in the global table isn't accessible by name; otherwise the name must be qualifiable.
     return (
