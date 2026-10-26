@@ -941,11 +941,13 @@ export class Session {
     if (file === undefined) return null;
     let list: backend.CompletionList | undefined;
     try {
+      // As tsc, a request without symbols prepares auto-imports; one with symbols uses only those prepared.
       list = q.project.completionsAtPosition(
         file,
         params.position ?? 0,
         params.triggerCharacter,
         params.includeSymbol === true,
+        params.includeSymbol !== true,
       );
     } catch (e) {
       if (e instanceof backend.NeedsAutoImports) {

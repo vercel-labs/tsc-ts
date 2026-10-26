@@ -122,6 +122,8 @@ import { ConfigParser, JsonArray, JsonObject, type JsonValue, ParsedCommandLine 
 import { isTypeAssignableTo } from '../compiler/relations.js';
 import { typeToString } from '../compiler/type-printer.js';
 import { type CompletionList, getCompletionsAtPosition } from '../services/completions.js';
+import { type AutoImportRegistry, buildAutoImportRegistry } from '../services/auto-import-view.js';
+import { combinePaths, getDirectoryPath } from '../compiler/path.js';
 import {
   getReferencedSymbolsForNode,
   getReferencesToSymbolInFile,
@@ -239,6 +241,8 @@ export const enum SignatureKind {
 // queries. Diagnostics come from a separate checker, as in tsc --api.
 export class Project {
   private readonly checker: Checker;
+  // The exports auto-imports offer from the program's files, extracted with a checker of their own on first use.
+  private autoImports: AutoImportRegistry | undefined;
 
   private constructor(
     private readonly config: ParsedCommandLine,
@@ -406,14 +410,44 @@ export class Project {
     };
   }
 
-  /** Completions at a UTF-16 position; throws `NeedsAutoImports` where tsgo needs its auto-import registry. */
+  /**
+   * Completions at a UTF-16 position. With `withAutoImports`, auto-imports come from the program's files, as tsc
+   * prepares them for a request; without, or for a file with a `node_modules` directory above it, whose packages'
+   * exports are not indexed, a completion list that needs them throws `NeedsAutoImports`.
+   */
   completionsAtPosition(
     file: SourceFile,
     position: number,
     triggerCharacter: string | undefined,
     includeSymbols: boolean,
+    withAutoImports: boolean,
   ): CompletionList | undefined {
-    return getCompletionsAtPosition(this.checker, this.program, file, position, triggerCharacter, includeSymbols);
+    const autoImports = withAutoImports && !this.hasNodeModulesAbove(file) ? this.autoImportRegistry() : undefined;
+    return getCompletionsAtPosition(
+      this.checker,
+      this.program,
+      file,
+      position,
+      triggerCharacter,
+      includeSymbols,
+      autoImports,
+    );
+  }
+
+  private autoImportRegistry(): AutoImportRegistry {
+    this.autoImports ??= buildAutoImportRegistry(this.program, this.checked.createChecker());
+    return this.autoImports;
+  }
+
+  // Whether a directory above the file has a `node_modules` directory.
+  private hasNodeModulesAbove(file: SourceFile): boolean {
+    let directory = getDirectoryPath(file.fileName);
+    for (;;) {
+      if (this.program.host.fs.directoryExists(combinePaths(directory, 'node_modules'))) return true;
+      const parent = getDirectoryPath(directory);
+      if (parent === directory) return false;
+      directory = parent;
+    }
   }
 
   // The node at a UTF-16 position: the touching property name or token.

@@ -19,6 +19,7 @@ import {
   ImportEqualsDeclaration,
   NewExpression,
   type Node,
+  NodeFlags,
   NodeVisitor,
   type NodeList,
   type SourceFile,
@@ -1035,4 +1036,49 @@ function findNextToken(previousToken: Node, file: SourceFile): Node | undefined 
   // The token that starts where `previousToken` ends.
   const token = findPrecedingToken(file, skipTrivia(file.text, previousToken.end, false, false, false) + 1);
   return token !== undefined && token.pos === previousToken.end ? token : undefined;
+}
+
+/**
+ * Whether the file probably ends statements with semicolons, from its first five statements and members that need a
+ * semicolon or a line break: when one has a semicolon for each five without, or when at most one lacks one.
+ */
+export function probablyUsesSemicolons(file: SourceFile): boolean {
+  const counter = new SemicolonCounter(file);
+  file.forEachChild(counter);
+  // One statement without a semicolon may be one being written.
+  if (counter.withSemicolon === 0 && counter.withoutSemicolon <= 1) return true;
+  if (counter.withoutSemicolon === 0) return true;
+  return counter.withSemicolon * statementsToObserve > counter.withoutSemicolon;
+}
+
+const statementsToObserve = 5;
+
+class SemicolonCounter extends NodeVisitor {
+  withSemicolon = 0;
+  withoutSemicolon = 0;
+
+  constructor(private readonly file: SourceFile) {
+    super();
+  }
+
+  visitNode(node: Node): boolean {
+    const file = this.file;
+    if ((node.flags & NodeFlags.Reparsed) !== 0) return false;
+    if (syntaxRequiresTrailingSemicolonOrASI(node.kind)) {
+      const lastToken = getLastToken(node, file);
+      if (lastToken !== undefined && lastToken.kind === SyntaxKind.SemicolonToken) this.withSemicolon++;
+      else this.withoutSemicolon++;
+    } else if (syntaxRequiresTrailingCommaOrSemicolonOrASI(node.kind)) {
+      const lastToken = getLastToken(node, file);
+      if (lastToken !== undefined && lastToken.kind === SyntaxKind.SemicolonToken) this.withSemicolon++;
+      else if (lastToken !== undefined && lastToken.kind !== SyntaxKind.CommaToken) {
+        const lastTokenLine = getLineOfPosition(file, getStartOfNode(lastToken, file, false));
+        const nextTokenLine = getLineOfPosition(file, skipTrivia(file.text, lastToken.end));
+        // A missing semicolon in a single-line object type is insignificant.
+        if (lastTokenLine !== nextTokenLine) this.withoutSemicolon++;
+      }
+    }
+    if (this.withSemicolon + this.withoutSemicolon >= statementsToObserve) return true;
+    return node.forEachChild(this);
+  }
 }

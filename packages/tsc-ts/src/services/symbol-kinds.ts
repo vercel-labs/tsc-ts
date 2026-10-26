@@ -78,7 +78,8 @@ export const enum CompletionItemKind {
   Constant = 21,
 }
 
-export function getSymbolKind(c: Checker, symbol: Symbol, location: Node): ScriptElementKind {
+/** The kind of `symbol` at `location`. Without a checker, from the symbol's flags and declarations alone. */
+export function getSymbolKind(c: Checker | undefined, symbol: Symbol, location: Node): ScriptElementKind {
   const result = getSymbolKindOfConstructorPropertyMethodAccessorFunctionOrVar(c, symbol, location);
   if (result !== ScriptElementKind.Unknown) return result;
   const flags = symbol.combinedLocalAndExportSymbolFlags();
@@ -97,22 +98,25 @@ export function getSymbolKind(c: Checker, symbol: Symbol, location: Node): Scrip
 }
 
 function getSymbolKindOfConstructorPropertyMethodAccessorFunctionOrVar(
-  c: Checker,
+  c: Checker | undefined,
   symbol: Symbol,
   location: Node,
 ): ScriptElementKind {
-  const roots = getRootSymbols(c, symbol);
+  const roots = c === undefined ? [symbol] : getRootSymbols(c, symbol);
   // A method from a mapped type stays a method while it still has a call signature.
   if (
     roots.length === 1 &&
     (roots[0].flags & SymbolFlags.Method) !== 0 &&
-    getCallSignatures(c, getNonNullableType(c, getTypeOfSymbolAtLocation(c, symbol, location))).length > 0
+    (c === undefined ||
+      getCallSignatures(c, getNonNullableType(c, getTypeOfSymbolAtLocation(c, symbol, location))).length > 0)
   )
     return ScriptElementKind.MemberFunctionElement;
-  if (symbol === c.undefinedSymbol) return ScriptElementKind.VariableElement;
-  if (symbol === c.argumentsSymbol) return ScriptElementKind.LocalVariableElement;
-  if (location.kind === SyntaxKind.ThisKeyword || isThisInTypeQuery(location))
-    return ScriptElementKind.ParameterElement;
+  if (c !== undefined) {
+    if (symbol === c.undefinedSymbol) return ScriptElementKind.VariableElement;
+    if (symbol === c.argumentsSymbol) return ScriptElementKind.LocalVariableElement;
+    if (location.kind === SyntaxKind.ThisKeyword || isThisInTypeQuery(location))
+      return ScriptElementKind.ParameterElement;
+  }
   const flags = symbol.combinedLocalAndExportSymbolFlags();
   if ((flags & SymbolFlags.Variable) !== 0) {
     const valueDeclaration = symbol.valueDeclaration;
@@ -137,7 +141,7 @@ function getSymbolKindOfConstructorPropertyMethodAccessorFunctionOrVar(
   if ((flags & SymbolFlags.Constructor) !== 0) return ScriptElementKind.ConstructorImplementationElement;
   if ((flags & SymbolFlags.Signature) !== 0) return ScriptElementKind.IndexSignatureElement;
   if ((flags & SymbolFlags.Property) !== 0) {
-    if ((flags & SymbolFlags.Transient) !== 0 && (symbol.checkFlags & CheckFlags.Synthetic) !== 0) {
+    if (c !== undefined && (flags & SymbolFlags.Transient) !== 0 && (symbol.checkFlags & CheckFlags.Synthetic) !== 0) {
       // A union property of non-methods is a property.
       for (const root of roots)
         if ((root.flags & (SymbolFlags.PropertyOrAccessor | SymbolFlags.Variable)) !== 0)

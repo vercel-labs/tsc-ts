@@ -9,7 +9,6 @@ export class Differential {
     this.actual = new Client(actualCommand, cwd, actualEnv);
     this.ids = new IdMap();
     this.count = 0;
-    this.skipped = 0;
     this.failures = [];
     // The snapshot `snapshot` makes the next one from.
     this.latestSnapshot = undefined;
@@ -19,18 +18,14 @@ export class Differential {
 
   // Sends a request (params use the reference server's ids) to both servers,
   // records any difference, and returns the reference response (or undefined
-  // for an error). A pair of replies that `skip` accepts is not compared.
-  async call(method, params, { skip } = {}) {
+  // for an error).
+  async call(method, params) {
     const [a, b] = await Promise.all([
       this.expected.request(method, params),
       this.actual.request(method, this.ids.translate(method, params)),
     ]);
     this.count++;
     const where = `${method} ${JSON.stringify(params)}`;
-    if (skip?.(a, b) === true) {
-      this.skipped++;
-      return undefined;
-    }
     try {
       if (a.type !== b.type) throw new Error(`${a.type} vs ${b.type}: ${a.payload} | ${b.payload}`);
       if (a.type === 'error') {

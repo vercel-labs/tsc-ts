@@ -659,19 +659,11 @@ test('tsc-ts --api reuses written type nodes like tsc --api', { skip, timeout: 3
   report(d);
 });
 
-// Without symbols, tsc prepares auto-imports for a completion list that needs them and answers with their entries.
-// tsc-ts has no auto-import registry yet and refuses such a request, which is left out of the comparison until it is
-// ported.
-const needsAutoImports = (expected, actual) =>
-  expected.type === 'response' &&
-  actual.type === 'error' &&
-  actual.payload.toString() === 'completion list needs auto imports';
-
 // Completions at every position of each user file, and with symbols and trigger characters
 // where a trigger character was just typed.
 async function compareCompletions(d, base, file) {
   const text = readFileSync(file, 'utf8');
-  const call = (params) => d.call('getCompletionsAtPosition', { ...base, file, ...params }, { skip: needsAutoImports });
+  const call = (params) => d.call('getCompletionsAtPosition', { ...base, file, ...params });
   for (let position = 0; position <= text.length; position++) {
     await call({ position });
     const before = text[position - 1];
@@ -682,10 +674,23 @@ async function compareCompletions(d, base, file) {
   }
 }
 
+// tsc keeps the module specifiers of auto-imports by the file an export is found in, so for a file with a relative
+// module augmentation, which exports from the augmented module, the specifiers of the file's own exports depend on the
+// order tsc visits them. The completions comparison moves the project fixture's augmentation to a file of its own.
+function moveAugmentation(dir) {
+  const main = join(dir, 'src/main.ts');
+  const text = readFileSync(main, 'utf8');
+  const augmentation = /declare module '\.\/shapes\.ts' \{\n(?: .*\n)*\}\n/.exec(text)?.[0];
+  assert.ok(augmentation !== undefined, 'the fixture has a module augmentation');
+  writeFileSync(main, text.replace(augmentation, ''));
+  writeFileSync(join(dir, 'src/augment.ts'), 'export {};\n' + augmentation);
+}
+
 test('tsc-ts --api completes like tsc --api', { skip, timeout: 600_000 }, async () => {
-  for (const fixture of ['completions', 'services', 'project']) {
+  for (const fixture of ['completions', 'services', 'project', 'auto-imports']) {
     const dir = tempDir('tsc-ts-api-');
     cpSync(resolve('tests/fixtures', fixture), dir, { recursive: true });
+    if (fixture === 'project') moveAugmentation(dir);
     const d = new Differential([realTsc], tscTs, dir, env);
     try {
       await d.call('initialize');
@@ -697,10 +702,44 @@ test('tsc-ts --api completes like tsc --api', { skip, timeout: 600_000 }, async 
     } finally {
       await d.close();
     }
-    console.log(
-      `compared ${d.count - d.skipped} completions in ${fixture}, ${d.skipped} that need auto-imports skipped`,
-    );
+    console.log(`compared ${d.count} completions in ${fixture}`);
     report(d);
+  }
+});
+
+// The exports of packages in `node_modules` are not indexed yet, so a file with a `node_modules` directory above it
+// gets no auto-imports: a completion list that needs them is refused, where tsc answers.
+test('tsc-ts --api refuses auto-imports below a node_modules directory', { skip, timeout: 300_000 }, async () => {
+  const dir = tempDir('tsc-ts-api-');
+  writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }));
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'src/a.ts'), 'export const value = 1;\n');
+  writeFileSync(join(dir, 'src/b.ts'), 'val\n');
+  writeFileSync(join(dir, 'package.json'), '{"dependencies":{"pkg":"1.0.0"}}');
+  mkdirSync(join(dir, 'node_modules/pkg'), { recursive: true });
+  writeFileSync(join(dir, 'node_modules/pkg/package.json'), '{"name":"pkg","types":"index.d.ts"}');
+  writeFileSync(join(dir, 'node_modules/pkg/index.d.ts'), 'export declare const valuable: number;\n');
+  const servers = [new Client([realTsc], dir), new Client(tscTs, dir, env)];
+  try {
+    const replies = [];
+    for (const client of servers) {
+      await client.json('initialize');
+      const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+      const params = {
+        snapshot: update.snapshot,
+        project: update.projects[0].id,
+        file: join(dir, 'src/b.ts'),
+        position: 3,
+      };
+      replies.push(await client.request('getCompletionsAtPosition', params));
+    }
+    const [expected, actual] = replies;
+    assert.equal(expected.type, 'response');
+    assert.ok(JSON.parse(expected.payload.toString()).entries.some((e) => e.labelDetails?.description === 'pkg'));
+    assert.equal(actual.type, 'error');
+    assert.equal(actual.payload.toString(), 'completion list needs auto imports');
+  } finally {
+    for (const client of servers) await client.close();
   }
 });
 

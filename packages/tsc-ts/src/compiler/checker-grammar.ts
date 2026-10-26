@@ -3567,7 +3567,7 @@ function checkGrammarYieldExpression(g: GrammarChecker, node: Node): boolean {
   return hasError;
 }
 
-function isInParameterInitializerBeforeContainingFunction(node: Node): boolean {
+export function isInParameterInitializerBeforeContainingFunction(node: Node): boolean {
   let inBindingInitializer = false;
   let current = node;
   while (current.parent !== undefined && !isFunctionLike(current.parent)) {
