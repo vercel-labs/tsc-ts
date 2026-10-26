@@ -33,6 +33,7 @@ import {
   getDotDotDotToken,
   getExpression,
   getInitializer,
+  getName,
   getParameters,
   getTagName,
   getType,
@@ -129,7 +130,9 @@ export class AliasReferences extends NodeVisitor {
         top !== undefined && isPropertyAccessOrQualifiedName(top);
         top = top.parent
       )
-        if (isPartOfTypeNode(top)) return false;
+        // Names in an import type's qualifier, `ns.y` in `typeof import("./b").ns.y`, are exports of the
+        // imported module, not references to this file's imports.
+        if (isPartOfTypeNode(top) || isImportTypeQualifierPart(top)) return false;
       return this.markProperty(node);
     }
     if (node instanceof ExportAssignment) {
@@ -411,6 +414,17 @@ export class AliasReferences extends NodeVisitor {
   }
 }
 
+/** Whether `node` is the qualifier of an import type, or a part of one. */
+function isImportTypeQualifierPart(node: Node): boolean {
+  let current = node;
+  let parent = current.parent;
+  while (parent !== undefined && parent.kind === SyntaxKind.QualifiedName) {
+    current = parent;
+    parent = parent.parent;
+  }
+  return parent instanceof ImportTypeNode && parent.qualifier === current;
+}
+
 function isPropertyAccessOrQualifiedName(node: Node): boolean {
   return node.kind === SyntaxKind.PropertyAccessExpression || node.kind === SyntaxKind.QualifiedName;
 }
@@ -631,6 +645,10 @@ function isInExpressionContext(node: Node): boolean {
       return getExpression(parent) === node && !isPartOfTypeNode(parent);
     case SyntaxKind.ShorthandPropertyAssignment:
       return parent instanceof ShorthandPropertyAssignment && parent.objectAssignmentInitializer === node;
+    case SyntaxKind.FunctionExpression:
+    case SyntaxKind.ClassExpression:
+      // The name of a function or class expression is a declaration name, not an expression.
+      return getName(parent) !== node;
   }
   return isExpressionNode(parent);
 }

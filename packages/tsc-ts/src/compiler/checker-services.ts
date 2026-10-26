@@ -1088,6 +1088,10 @@ function isInExpressionContext(node: Node): boolean {
       return getExpression(parent) === node && !isPartOfTypeNode(parent);
     case SyntaxKind.ShorthandPropertyAssignment:
       return (parent as ShorthandPropertyAssignment).objectAssignmentInitializer === node;
+    case SyntaxKind.FunctionExpression:
+    case SyntaxKind.ClassExpression:
+      // The name of a function or class expression is a declaration name, not an expression.
+      return getName(parent) !== node;
   }
   return isExpressionNode(parent);
 }

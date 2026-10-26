@@ -2980,7 +2980,8 @@ export function getExternalModuleFileFromDeclaration(c: Checker, declaration: No
     if (name !== undefined && name.kind === SyntaxKind.StringLiteral) specifier = name;
   } else specifier = getExternalModuleName(declaration);
   if (specifier === undefined) return undefined;
-  const moduleSymbol = resolveExternalModuleNameWorker(c, specifier, specifier, undefined, false, false);
+  // Used by emit and type printing after checking reported any resolution errors, so it adds none.
+  const moduleSymbol = resolveExternalModuleNameWorker(c, specifier, specifier, undefined, true, false);
   if (moduleSymbol === undefined) return undefined;
   const file = getDeclarationOfKind(moduleSymbol, SyntaxKind.SourceFile);
   return file === undefined ? undefined : (file as SourceFile);

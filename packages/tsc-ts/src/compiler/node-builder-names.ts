@@ -67,6 +67,7 @@ import {
   getQualifiedLeftMeaning,
   getSymbolIfSameReference,
   hasNonGlobalAugmentationExternalModuleDeclaration,
+  isSymbolAccessibleByFlags,
   needsQualification,
 } from './symbol-accessibility.js';
 import { SyntaxKind } from './syntax-kind.js';
@@ -719,7 +720,11 @@ function isSingleQuotedStringNamed(d: Node): boolean {
 }
 
 /** The name node of a property. */
-export function getPropertyNameNodeForSymbol(b: NodeBuilder, symbol: Symbol): Node {
+export function getPropertyNameNodeForSymbol(
+  b: NodeBuilder,
+  symbol: Symbol,
+  enclosingDeclaration: Node | undefined,
+): Node {
   // A private name is the declaration's.
   const valueDeclaration = symbol.valueDeclaration;
   if (valueDeclaration !== undefined) {
@@ -741,7 +746,14 @@ export function getPropertyNameNodeForSymbol(b: NodeBuilder, symbol: Symbol): No
       break;
     }
   const isMethod = (symbol.flags & SymbolFlags.Method) !== 0;
-  const fromNameType = getPropertyNameNodeForSymbolFromNameType(b, symbol, singleQuote, stringNamed, isMethod);
+  const fromNameType = getPropertyNameNodeForSymbolFromNameType(
+    b,
+    symbol,
+    enclosingDeclaration,
+    singleQuote,
+    stringNamed,
+    isMethod,
+  );
   if (fromNameType !== undefined) return fromNameType;
   let name = symbol.name;
   const privateNamePrefix = '￾#';
@@ -775,12 +787,28 @@ function createPropertyNameNodeForIdentifierOrLiteral(
 function getPropertyNameNodeForSymbolFromNameType(
   b: NodeBuilder,
   symbol: Symbol,
+  enclosingDeclaration: Node | undefined,
   singleQuote: boolean,
   stringNamed: boolean,
   isMethod: boolean,
 ): Node | undefined {
   const nameType = b.c.symbolNameTypes.get(getSymbolId(symbol));
   if (nameType === undefined) return undefined;
+  // A name from an enum member stays a computed name, `[E.A]`, where the enum can be named.
+  if ((nameType.flags & TypeFlags.EnumLiteral) !== 0) {
+    const enumEnclosingDeclaration = enclosingDeclaration !== undefined ? enclosingDeclaration : b.enclosingFile;
+    const enumSymbol = nameType.symbol!.parent !== undefined ? nameType.symbol!.parent : nameType.symbol!;
+    if (
+      enumEnclosingDeclaration !== undefined &&
+      isSymbolAccessibleByFlags(b.c, enumSymbol, enumEnclosingDeclaration, SymbolFlags.Value)
+    ) {
+      const saveEnclosingDeclaration = b.enclosingDeclaration;
+      b.enclosingDeclaration = enumEnclosingDeclaration;
+      const result = b.created(new ComputedPropertyName(symbolToExpression(b, nameType.symbol!, SymbolFlags.Value)));
+      b.enclosingDeclaration = saveEnclosingDeclaration;
+      return result;
+    }
+  }
   if ((nameType.flags & TypeFlags.StringOrNumberLiteral) !== 0) {
     const literal = nameType as LiteralType;
     const name = (nameType.flags & TypeFlags.StringLiteral) !== 0 ? literal.stringValue : String(literal.numberValue);

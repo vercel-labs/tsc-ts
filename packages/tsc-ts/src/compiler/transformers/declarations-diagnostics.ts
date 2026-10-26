@@ -21,13 +21,13 @@ import {
   hasSyntacticModifier,
   isEntityNameExpression,
   isStatic,
-  isTypeNodeKind,
 } from '../binder-utilities.js';
 import { isFunctionLikeDeclarationKind } from '../ast-utilities.js';
 import { Diagnostic, type DiagnosticMessage, Diagnostics } from '../diagnostics.js';
 import { ModifierFlags } from '../ast.js';
 import { isStatement } from '../printer/utilities.js';
 import { SyntaxKind } from '../syntax-kind.js';
+import { isPartOfTypeNode } from './alias-references.js';
 import { isParameterPropertyDeclaration } from './utilities.js';
 import { SymbolAccessibility, type SymbolAccessibilityResult } from './declarations-resolver.js';
 import { getDeclarations } from '../symbol.js';
@@ -482,6 +482,8 @@ function parameterTypeMessage(node: Node, result: SymbolAccessibilityResult): Di
       );
     case SyntaxKind.FunctionDeclaration:
     case SyntaxKind.FunctionType:
+    case SyntaxKind.ArrowFunction:
+    case SyntaxKind.FunctionExpression:
       return byModuleName(
         result,
         Diagnostics.Parameter_0_of_exported_function_has_or_is_using_name_1_from_external_module_2_but_cannot_be_named,
@@ -713,7 +715,7 @@ export function createIsolatedDeclarationError(node: Node, requiresAddingUndefin
         Diagnostics.Extends_clause_can_t_contain_an_expression_with_isolatedDeclarations,
         [],
       );
-  if (isTypeNodeKind(node.kind) || node.kind === SyntaxKind.TypeQuery || isEntityNameExpression(node, false))
+  if (isPartOfTypeNode(node) || node.kind === SyntaxKind.TypeQuery || isEntityNameExpression(node, false))
     return addParentDeclarationRelatedInfo(
       node,
       createDiagnosticForNode(

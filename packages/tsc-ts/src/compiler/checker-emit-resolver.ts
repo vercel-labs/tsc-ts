@@ -115,6 +115,7 @@ import { SyntacticEmitResolver } from './transformers/emit-resolver.js';
 import type { Evaluation, ReferenceResolver } from './transformers/reference-resolver.js';
 import { TypeReferenceSerializationKind } from './transformers/type-serialization.js';
 import { TokenFlags } from './types.js';
+import { getSignatureOfFullSignatureType } from './checker-jsdoc.js';
 import { CheckFlags, declarationCount, getDeclarations, type Symbol, SymbolFlags } from './symbol.js';
 
 const declarationEmitInternalFlags = NodeBuilderInternalFlags.AllowUnresolvedNames;
@@ -284,6 +285,8 @@ export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {
     const signatures = getSignaturesOfSymbol(c, getSymbolOfDeclaration(c, node));
     if (signatures.length > 1) return true;
     if (signatures.length === 1) {
+      // A JSDoc `@type` signature of the function itself is not an overload.
+      if (signatures[0] === getSignatureOfFullSignatureType(c, node)) return false;
       const declaration = signatures[0].declaration;
       if (declaration !== node && declaration !== undefined && (declaration.flags & NodeFlags.JSDoc) === 0) return true;
     }

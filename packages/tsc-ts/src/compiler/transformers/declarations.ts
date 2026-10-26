@@ -183,6 +183,8 @@ export class DeclarationTransformer extends Transformer {
   private readonly expandoHosts: Map<Node, Node | undefined>;
   /** The namespace members for the assigned properties of each function, by statement. */
   private readonly expandoMembers: Map<Node, Node[]>;
+  /** Assigned properties of hosts that weren't visible when found, by host; written if the host becomes visible. */
+  private readonly deferredExpandoAssignments: Map<Node, BinaryExpression[]>;
   /** The `export =` for a CommonJS `module.exports = …`. */
   private cjsExportAssignment: Node | undefined;
   /** The exports for CommonJS `exports.x = …` assignments. */
@@ -221,6 +223,7 @@ export class DeclarationTransformer extends Transformer {
     this.lateStatementReplacements = new Map<Node, Node | undefined>();
     this.expandoHosts = new Map<Node, Node | undefined>();
     this.expandoMembers = new Map<Node, Node[]>();
+    this.deferredExpandoAssignments = new Map<Node, BinaryExpression[]>();
     this.cjsExportAssignment = undefined;
     this.cjsExportMembers = [];
     this.cjsExportAssignmentName = undefined;
@@ -293,6 +296,7 @@ export class DeclarationTransformer extends Transformer {
     this.lateStatementReplacements = new Map<Node, Node | undefined>();
     this.expandoHosts.clear();
     this.expandoMembers.clear();
+    this.deferredExpandoAssignments.clear();
     this.witnessedCjsExports.clear();
     this.cjsExportAssignment = undefined;
     this.cjsExportAssignmentName = undefined;
@@ -861,12 +865,14 @@ export class DeclarationTransformer extends Transformer {
       isVariableDeclarationInitializedToRequire(input)
     )
       return this.transformCjsRequireVariableDeclaration(input);
-    if (input.name instanceof BindingPattern) return this.recreateBindingPattern(input.name);
+    // A binding pattern with initializers becomes a declaration per name; without them it stays.
+    if (input.name instanceof BindingPattern && hasAnyBindingInitializers(input.name))
+      return this.recreateBindingPattern(input.name);
     // Variable types don't enter new diagnostic contexts.
     this.suppressNewDiagnosticContexts = true;
     return this.factory.updateVariableDeclaration(
       input,
-      input.name,
+      this.visitBindingName(input.name),
       undefined,
       this.ensureType(input, false),
       this.ensureNoInitializer(input),
@@ -1038,9 +1044,16 @@ export class DeclarationTransformer extends Transformer {
   private omitPrivateMethodType(input: Node): Node | undefined {
     const symbol = getSymbol(input);
     if (symbol !== undefined && declarationCount(symbol) > 0 && symbol.declaration !== input) return undefined;
-    const result = this.factory.created(
-      new PropertyDeclaration(this.ensureModifiers(input), getName(input)!, undefined, undefined, undefined),
-    );
+    // A method signature becomes a property signature, a method a property declaration.
+    let result: Node;
+    if (input.kind === SyntaxKind.MethodSignature)
+      result = this.factory.created(
+        new PropertySignatureDeclaration(this.ensureModifiers(input), getName(input)!, undefined, undefined, undefined),
+      );
+    else
+      result = this.factory.created(
+        new PropertyDeclaration(this.ensureModifiers(input), getName(input)!, undefined, undefined, undefined),
+      );
     this.context.assignCommentRange(result, input);
     return result;
   }
@@ -1119,9 +1132,14 @@ export class DeclarationTransformer extends Transformer {
       (input.parent.kind === SyntaxKind.SourceFile || input.parent.kind === SyntaxKind.ModuleBlock)
     ) {
       const result = this.factory.created(new ExportAssignment(undefined, isExportEquals, undefined, expression));
+      this.context.assignSourceMapRange(result, input);
       this.context.assignCommentRange(result, input);
       return result;
     }
+    // Types the default export can't name are reported for it, as class and function declarations too.
+    const tracker = this.tracker;
+    tracker.diagnosticContext = new DiagnosticContext(DiagnosticContextKind.DefaultExport, input, undefined);
+    tracker.pushErrorFallbackNode(assignment);
     const unwrapped = skipOuterExpressions(expression);
     const name = this.getNameOfExportedExpression(unwrapped, isExportEquals);
     // Class and function expressions become declarations.
@@ -1129,17 +1147,16 @@ export class DeclarationTransformer extends Transformer {
       const declaration =
         unwrapped instanceof ClassExpression
           ? this.transformClassExpressionToDeclaration(unwrapped, name, this.declareModifiers())
-          : this.transformFunctionLikeToDeclaration(unwrapped, name, this.declareModifiers());
+          : this.transformFunctionLikeToDeclaration(unwrapped, name, this.declareModifiers(), getType(assignment));
+      tracker.popErrorFallbackNode();
       this.context.assignCommentRange(declaration, input);
       const exportAssignment = this.factory.created(new ExportAssignment(undefined, isExportEquals, undefined, name));
+      this.context.assignSourceMapRange(exportAssignment, input);
       this.context.addEmitFlags(exportAssignment, EmitFlags.NoComments);
       return this.factory.createSyntaxList([exportAssignment, declaration]);
     }
     // Other expressions are written as a `_default` variable with the expression's type.
-    const tracker = this.tracker;
-    tracker.diagnosticContext = new DiagnosticContext(DiagnosticContextKind.DefaultExport, input, undefined);
     this.cjsExportAssignmentName = name;
-    tracker.pushErrorFallbackNode(assignment);
     let initializer: Node | undefined = undefined;
     if (isPrimitiveLiteralValue(skipParenthesesOnly(expression), true))
       initializer = this.resolver.createLiteralConstValue(this.context, this.parseNode(assignment), tracker);
@@ -1148,6 +1165,7 @@ export class DeclarationTransformer extends Transformer {
     tracker.popErrorFallbackNode();
     const statement = this.createConstStatement(declaration);
     const exportAssignment = this.factory.created(new ExportAssignment(undefined, isExportEquals, undefined, name));
+    this.context.assignSourceMapRange(exportAssignment, input);
     this.context.assignCommentRange(statement, input);
     return this.factory.createSyntaxList([statement, exportAssignment]);
   }
@@ -1159,8 +1177,24 @@ export class DeclarationTransformer extends Transformer {
     );
   }
 
-  private transformFunctionLikeToDeclaration(fn: Node, name: Identifier, modifiers: ModifierList): Node {
-    const fullSignature = getFullSignature(fn);
+  private transformFunctionLikeToDeclaration(
+    fn: Node,
+    name: Identifier,
+    modifiers: ModifierList,
+    fullSignatureType: Node | undefined,
+  ): Node {
+    // A JSDoc signature, of the function or of the assignment, is reused as the type of a `const`.
+    const fullSignature = getFullSignature(fn) ?? fullSignatureType;
+    if (fullSignature !== undefined)
+      return this.factory.createVariableStatement(
+        modifiers,
+        this.factory.createVariableDeclarationList(
+          this.factory.createNodeList([
+            this.factory.createVariableDeclaration(name, undefined, this.visitNode(fullSignature), undefined),
+          ]),
+          NodeFlags.Const,
+        ),
+      );
     return this.factory.created(
       new FunctionDeclaration(
         modifiers,
@@ -1169,7 +1203,7 @@ export class DeclarationTransformer extends Transformer {
         this.ensureTypeParams(fn, getTypeParameters(fn)),
         this.updateParamList(fn, getParameters(fn)!),
         this.ensureType(fn, false),
-        fullSignature === undefined ? undefined : this.visitNode(fullSignature),
+        undefined,
         undefined,
       ),
     );
@@ -1280,7 +1314,8 @@ export class DeclarationTransformer extends Transformer {
     if (isDeclaration(input) && this.isDeclarationAndNotVisible(input)) return undefined;
     if (isFunctionLike(input) && this.resolver.isImplementationOfOverload(input)) return undefined;
     const original = this.context.mostOriginal(input);
-    if (this.expandoHosts.has(original)) return this.createFullExpandoBlock(original);
+    if (this.expandoHosts.has(original) || this.deferredExpandoAssignments.has(original))
+      return this.createFullExpandoBlock(original);
     const previousEnclosingDeclaration = this.enclosingDeclaration;
     if (isEnclosingDeclaration(input)) this.enclosingDeclaration = input;
     const oldContext = tracker.diagnosticContext;
@@ -1349,7 +1384,8 @@ export class DeclarationTransformer extends Transformer {
       this.ensureModifiers(input),
       input.name,
       this.visitNodes(input.typeParameters),
-      this.visitNode(input.type)!,
+      // stripInternal can elide an `@internal` type on the right; it falls back to `any`, as index signatures do.
+      this.visitNode(input.type) ?? this.keyword(SyntaxKind.AnyKeyword),
     );
   }
 
@@ -2121,7 +2157,17 @@ export class DeclarationTransformer extends Transformer {
     const name = this.factory.createIdentifier(namespace.text);
     const property = this.tryGetPropertyName(left);
     if (property === '' || !isIdentifierText(property)) return false;
-    if (isDeclaration(declaration) && this.isDeclarationAndNotVisible(declaration)) return false;
+    const hostId = this.getExpandoHostId(declaration);
+    if (isDeclaration(declaration) && this.isDeclarationAndNotVisible(declaration)) {
+      // Writing the type of a visible declaration, such as `typeof f`, can make the host visible later.
+      let deferred = this.deferredExpandoAssignments.get(hostId);
+      if (deferred === undefined) {
+        deferred = [];
+        this.deferredExpandoAssignments.set(hostId, deferred);
+      }
+      deferred.push(node);
+      return false;
+    }
     if (declaration instanceof FunctionDeclaration && !shouldEmitFunctionProperties(declaration)) return false;
     this.transformExpandoHost(name, declaration);
     const exportName = this.factory.createIdentifier(property);
@@ -2135,21 +2181,21 @@ export class DeclarationTransformer extends Transformer {
       localName = exportName;
     if (localName === undefined || isNonContextualKeyword(stringToToken(localName.text)))
       localName = this.factory.createGeneratedNameForNode(node, GeneratedIdentifierFlags.None, '', '');
-    const hostId = this.getExpandoHostId(declaration);
     const scope = this.enterDiagnosticContext(node);
     let members = this.expandoMembers.get(hostId);
     if (members === undefined) {
       members = [];
       this.expandoMembers.set(hostId, members);
     }
+    let hasExport = false;
+    for (const member of members) if (member.kind === SyntaxKind.ExportDeclaration) hasExport = true;
     if (node.right instanceof Identifier) {
-      // Alias-like: `export { name }` or `export { name as alias }`.
+      // Alias-like: `export { name }` or `export { name as alias }`; the other members stay exported.
+      if (!hasExport) this.addExportModifierToExpandoMembers(members);
       members.push(this.transformBinaryExpressionToExportDeclaration(node, exportName));
       this.exitDiagnosticContext(scope);
       return true;
     }
-    let hasExport = false;
-    for (const member of members) if (member.kind === SyntaxKind.ExportDeclaration) hasExport = true;
     const variable = this.factory.createVariableStatement(
       hasExport ? this.factory.createModifierList([this.factory.createToken(SyntaxKind.ExportKeyword)]) : undefined,
       this.factory.createVariableDeclarationList(
@@ -2164,15 +2210,19 @@ export class DeclarationTransformer extends Transformer {
     if (local.text !== exportName.text || this.context.hasAutoGenerateInfo(local))
       statements.push(this.createExportDeclaration(local, exportName));
     // Members stay exported after an `export {}` is added.
-    if (statements.length > 1 && !hasExport)
-      for (let i = 0; i < members.length; i++)
-        members[i] = this.replaceModifiers(
-          members[i],
-          this.createModifiers(ModifierFlags.Export | getCombinedModifierFlags(members[i])),
-        );
+    if (statements.length > 1 && !hasExport) this.addExportModifierToExpandoMembers(members);
     for (const statement of statements) members.push(statement);
     this.exitDiagnosticContext(scope);
     return true;
+  }
+
+  /** Adds `export` to a host's members, before the first `export {}` is added to them. */
+  private addExportModifierToExpandoMembers(members: Node[]): void {
+    for (let i = 0; i < members.length; i++)
+      members[i] = this.replaceModifiers(
+        members[i],
+        this.createModifiers(ModifierFlags.Export | getCombinedModifierFlags(members[i])),
+      );
   }
 
   private tryGetPropertyName(node: Node): string {
@@ -2253,6 +2303,12 @@ export class DeclarationTransformer extends Transformer {
 
   /** A function with its assigned properties as a namespace of the same name. */
   private createFullExpandoBlock(id: Node): Node | undefined {
+    // Assignments deferred while the host wasn't visible; they are deferred again if it still isn't.
+    const deferred = this.deferredExpandoAssignments.get(id);
+    if (deferred !== undefined) {
+      this.deferredExpandoAssignments.delete(id);
+      for (const assignment of deferred) this.transformExpandoAssignment(assignment);
+    }
     const host = this.expandoHosts.get(id);
     const addOns = this.expandoMembers.get(id);
     if (addOns === undefined || host === undefined) return host;
@@ -2326,11 +2382,12 @@ export class DeclarationTransformer extends Transformer {
     if (getTextOfPropertyName(name) === 'constructor') return false;
     if (name instanceof Identifier && !isIdentifierText(name.text))
       name = this.factory.createStringLiteralFromNode(name);
+    // JSDoc modifiers such as `@readonly` and `@private` apply to the property.
+    let modifierFlags = this.ensureModifierFlags(node);
+    if (isStaticMember) modifierFlags |= ModifierFlags.Static;
     const property = this.factory.created(
       new PropertyDeclaration(
-        isStaticMember
-          ? this.factory.createModifierList([this.factory.createToken(SyntaxKind.StaticKeyword)])
-          : undefined,
+        this.createModifiers(modifierFlags),
         name,
         undefined,
         this.ensureType(node, false),
@@ -3120,4 +3177,13 @@ function getTextOfJSDocComment(comment: NodeList | undefined): string {
       text += getSourceTextOfNode(getSourceFileOfNode(n), n);
   }
   return text.trimEnd();
+}
+
+function hasAnyBindingInitializers(pattern: BindingPattern): boolean {
+  for (const element of pattern.elements.nodes) {
+    if (!(element instanceof BindingElement)) continue;
+    if (element.initializer !== undefined) return true;
+    if (element.name instanceof BindingPattern && hasAnyBindingInitializers(element.name)) return true;
+  }
+  return false;
 }
