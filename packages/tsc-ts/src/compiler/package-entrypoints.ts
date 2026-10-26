@@ -145,11 +145,13 @@ class ExportMapWalker {
     let excludeConditions = excludeConditionsIn;
     if (exports.type === 'string' && exports.value.startsWith('./')) {
       const target = exports.value;
+      // A target with `.` or `..` after its leading `./` offers nothing, as in tsc; for a pattern this also keeps the
+      // directory search inside the package. A literal target into `node_modules` offers nothing either.
+      const partsAfterFirst = getPathComponents(target).slice(2);
+      if (partsAfterFirst.includes('..') || partsAfterFirst.includes('.')) return;
       if (target.includes('*')) this.patternTarget(subpath, includeConditions, excludeConditions, target);
       else {
-        const partsAfterFirst = getPathComponents(target).slice(2);
-        if (partsAfterFirst.includes('..') || partsAfterFirst.includes('.') || partsAfterFirst.includes('node_modules'))
-          return;
+        if (partsAfterFirst.includes('node_modules')) return;
         const candidate = resolvePath(this.info.packageDirectory, target);
         const resolved = this.resolver.loadPackageExportTargetEntrypoint(this.info.packageDirectory, candidate, target);
         if (resolved !== '') {

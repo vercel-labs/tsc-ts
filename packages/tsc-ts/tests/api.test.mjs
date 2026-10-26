@@ -800,6 +800,52 @@ test('tsc-ts --api offers changed packages in auto-imports like tsc --api', { sk
   report(d);
 });
 
+// A wildcard exports target that leaves its package offers nothing, as in tsc, and auto-imports do not search the
+// directories outside the package for it.
+test(
+  'tsc-ts --api keeps auto-import searches inside a package with an escaping exports pattern',
+  { skip, timeout: 300_000 },
+  async () => {
+    const dir = tempDir('tsc-ts-api-');
+    const app = join(dir, 'app');
+    const outside = join(dir, 'outside');
+    mkdirSync(join(outside, 'deep'), { recursive: true });
+    writeFileSync(join(outside, 'deep/escaped.d.ts'), 'export declare const escapedValue: number;\n');
+    const pkg = join(app, 'node_modules/evil');
+    mkdirSync(join(pkg, 'lib'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'package.json'),
+      JSON.stringify({
+        name: 'evil',
+        version: '1.0.0',
+        exports: { './*': './../../../outside/*.js', './ok/*': './lib/*.js' },
+      }),
+    );
+    writeFileSync(join(pkg, 'lib/inside.d.ts'), 'export declare const escapedInside: number;\n');
+    writeFileSync(join(app, 'package.json'), '{"dependencies":{"evil":"1.0.0"}}');
+    const config = join(app, 'tsconfig.json');
+    writeFileSync(config, JSON.stringify({ compilerOptions: { module: 'esnext', moduleResolution: 'bundler' } }));
+    const use = join(app, 'use.ts');
+    writeFileSync(use, 'escaped\n');
+    const d = new Differential([realTsc], tscTs, app, env);
+    try {
+      await d.call('initialize');
+      const update = await d.snapshot({ openProjects: [config] });
+      const params = { snapshot: update.snapshot, project: update.projects[0].id, file: use, position: 7 };
+      const names = (await d.call('getCompletionsAtPosition', params)).entries.map((e) => e.name);
+      assert.ok(names.includes('escapedInside'));
+      assert.ok(!names.includes('escapedValue'));
+      const listed = d.actual.calls.filter(
+        ([method, path]) => method === 'getAccessibleEntries' && path.startsWith(outside),
+      );
+      assert.deepEqual(listed, []);
+    } finally {
+      await d.close();
+    }
+    report(d);
+  },
+);
+
 for (const fixture of ['services', 'project']) {
   test(
     `tsc-ts --api answers language service queries like tsc --api (${fixture})`,
