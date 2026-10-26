@@ -226,6 +226,11 @@ export class ParsedCommandLine implements OutputPathsHost {
   private outputDtsToReference: Map<string, SourceOutputAndProjectReference> | undefined = undefined;
   private commonSourceDirectoryValue: string | undefined = undefined;
   private referencePaths: string[] | undefined = undefined;
+  /**
+   * The config file's JSON, with what the configs it extends add to `files`, `include`, `exclude` and
+   * `compileOnSave`; `undefined` without a config file.
+   */
+  raw: JsonValue | undefined = undefined;
 
   constructor(
     readonly options: CompilerOptions,
@@ -1257,7 +1262,7 @@ export class ConfigParser {
       }
     }
 
-    return new ParsedCommandLine(
+    const parsedCommandLine = new ParsedCommandLine(
       options,
       parsed.typeAcquisition,
       fileNames,
@@ -1268,6 +1273,8 @@ export class ConfigParser {
       cs,
       literalFiles.size,
     );
+    parsedCommandLine.raw = raw;
+    return parsedCommandLine;
   }
 
   /** A config file's options with what it extends applied. */

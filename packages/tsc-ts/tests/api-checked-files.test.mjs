@@ -40,7 +40,7 @@ function project() {
 async function open(dir) {
   const client = new Client(tscTs, dir, env);
   await client.json('initialize');
-  const update = await client.json('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+  const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
   const base = { snapshot: update.snapshot, project: update.projects[0].id };
   return { client, base };
 }
@@ -61,7 +61,7 @@ test('checked-file diagnostics answer as the full check', { skip, timeout: 600_0
     );
     const semantic = new Map();
     for (const file of files)
-      semantic.set(file, await full.client.json('getSemanticDiagnostics', { ...full.base, file }));
+      semantic.set(file, await full.client.json('getSemanticDiagnostics', { ...full.base, files: [file] }));
     assert.ok(own.every((file) => semantic.get(file).length > 0));
 
     // Every file listed: the full check's answers.
@@ -97,7 +97,7 @@ test('checked-file diagnostics answer as the full check', { skip, timeout: 600_0
     // with getSemanticDiagnostics's error.
     assert.deepEqual((await some.client.json('getDiagnosticsOfCheckedFiles', some.base)).files, []);
     const missing = join(dir, 'src/missing.ts');
-    const refused = await some.client.request('getSemanticDiagnostics', { ...some.base, file: missing });
+    const refused = await some.client.request('getSemanticDiagnostics', { ...some.base, files: [missing] });
     assert.equal(refused.type, 'error');
     const refusedBatch = await some.client.request('getDiagnosticsOfCheckedFiles', {
       ...some.base,

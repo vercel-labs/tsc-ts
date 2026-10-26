@@ -62,6 +62,7 @@ export class Client {
   }
 
   init() {
+    this.latestSnapshot = undefined;
     this.buffer = Buffer.alloc(0);
     this.waiters = [];
     this.stderr = '';
@@ -85,6 +86,13 @@ export class Client {
     const reply = await this.request(method, params);
     if (reply.type === 'error') throw new Error(`${method}: ${reply.payload}`);
     return JSON.parse(reply.payload.toString());
+  }
+
+  // Makes a snapshot from the latest one with `changes` (see snapshotRequest).
+  async snapshot(changes, options) {
+    const reply = await this.json(...snapshotRequest(this.latestSnapshot, changes, options));
+    this.latestSnapshot = reply.snapshot;
+    return reply;
   }
 
   async close() {
@@ -132,18 +140,21 @@ export class Client {
   }
 }
 
+// Callback replies are TypeScript 7.1's: `{kind: 'value', value}`, `{kind: 'missing'}` for a file that is not there,
+// or `{kind: 'useOS'}` to let the server look itself.
 function answer(method, path) {
+  const value = (v) => ({ kind: 'value', value: v });
   switch (method) {
     case 'readFile':
-      return existsSync(path) && statSync(path).isFile() ? { content: readFileSync(path, 'utf8') } : null;
+      return existsSync(path) && statSync(path).isFile() ? value(readFileSync(path, 'utf8')) : { kind: 'missing' };
     case 'fileExists':
-      return existsSync(path) && statSync(path).isFile();
+      return value(existsSync(path) && statSync(path).isFile());
     case 'directoryExists':
-      return existsSync(path) && statSync(path).isDirectory();
+      return value(existsSync(path) && statSync(path).isDirectory());
     case 'realpath':
-      return existsSync(path) ? realpathSync(path) : path;
+      return value(existsSync(path) ? realpathSync(path) : path);
     case 'getAccessibleEntries': {
-      if (!existsSync(path)) return null;
+      if (!existsSync(path)) return { kind: 'useOS' };
       const files = [];
       const directories = [];
       for (const name of readdirSync(path).sort()) {
@@ -151,10 +162,10 @@ function answer(method, path) {
           (statSync(`${path}/${name}`).isDirectory() ? directories : files).push(name);
         } catch {}
       }
-      return { files, directories };
+      return value({ files, directories });
     }
   }
-  return null;
+  return { kind: 'useOS' };
 }
 
 function bin(data) {
@@ -203,4 +214,13 @@ function readFrame(b) {
   const payload = readBin();
   if (payload === undefined) return undefined;
   return { type, method: method.toString(), payload: Buffer.from(payload), size: i };
+}
+
+/**
+ * The request that makes a snapshot with `changes`: createSnapshot for the first, then updateSnapshot from `latest`.
+ * Each updates the programs of its projects (`ensurePrograms: true`), unless `ensure` is false.
+ */
+export function snapshotRequest(latest, changes = {}, { ensure = true } = {}) {
+  const params = ensure ? { ...changes, ensurePrograms: true } : changes;
+  return latest === undefined ? ['createSnapshot', params] : ['updateSnapshot', { snapshot: latest, changes: params }];
 }

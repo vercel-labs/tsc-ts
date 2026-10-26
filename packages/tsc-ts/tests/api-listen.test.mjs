@@ -56,7 +56,7 @@ async function session(client, dir) {
   await call('ping');
   const config = join(dir, 'tsconfig.json');
   await call('parseConfigFile', { file: config });
-  const update = await call('updateSnapshot', { openProjects: [config] });
+  const update = await call('createSnapshot', { openProjects: [config], ensurePrograms: true });
   const base = { snapshot: update.snapshot, project: update.projects[0].id };
   const files = await call('getSourceFileNames', base);
   for (const file of files) if (file.startsWith(dir)) await call('getSourceFile', { ...base, file });
@@ -70,14 +70,18 @@ async function session(client, dir) {
   const positions = Array.from({ length: readFileSync(file, 'utf8').length }, (_, i) => i);
   for (const symbol of await client.json('getSymbolsAtPositions', { ...base, file, positions })) {
     if (symbol === null || symbol.valueDeclaration === undefined) continue;
-    const renumbered = { ...symbol, parent: symbolId(symbol.parent), exportSymbol: symbolId(symbol.exportSymbol) };
+    const renumbered = {
+      ...symbol,
+      parent: symbolId(symbol.parent?.id),
+      exportSymbol: symbolId(symbol.exportSymbol?.id),
+    };
     replies.push(
-      `symbol ${symbolId(symbol.id)} ${JSON.stringify(renumbered, (key, value) => (key === 'id' ? undefined : value))}`,
+      `symbol ${symbolId(symbol.reference.id)} ${JSON.stringify(renumbered, (key, value) => (key === 'id' ? undefined : value))}`,
     );
-    const type = await client.json('getTypeOfSymbol', { ...base, symbol: symbol.id });
+    const type = await client.json('getTypeOfSymbol', { ...base, symbol: symbol.reference });
     if (type === null) continue;
     replies.push(
-      `type ${JSON.stringify({ ...type, symbol: symbolId(type.symbol), aliasSymbol: symbolId(type.aliasSymbol) })}`,
+      `type ${JSON.stringify({ ...type, symbol: symbolId(type.symbol?.id), aliasSymbol: symbolId(type.aliasSymbol?.id) })}`,
     );
     await call('typeToString', { ...base, type: type.id, location: symbol.valueDeclaration });
   }
@@ -121,7 +125,7 @@ test('clients in sequence get the responses of new servers, after edits too', { 
 // The encodings of the project's files after the checker has run, as getSourceFile replies.
 async function encodingsAfterChecking(client, dir) {
   await client.json('initialize');
-  const update = await client.json('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+  const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
   const base = { snapshot: update.snapshot, project: update.projects[0].id };
   await client.json('getSemanticDiagnostics', base);
   const replies = [];
@@ -168,7 +172,9 @@ test(
         else Client.prototype.write.call(this, type, method, payload);
       };
       await client.json('initialize');
-      await assert.rejects(client.request('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] }));
+      await assert.rejects(
+        client.request('createSnapshot', { openProjects: [join(dir, 'tsconfig.json')], ensurePrograms: true }),
+      );
       assert.deepEqual(await socketSession(server, dir), expected);
     } finally {
       server.child.kill();
