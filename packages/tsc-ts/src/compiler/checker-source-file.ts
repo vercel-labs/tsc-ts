@@ -58,7 +58,12 @@ import { nodeIsMissing } from './ast-utilities.js';
 import { getAttachedJSDoc } from './parser.js';
 import { shouldPreserveConstEnums } from './options.js';
 import { isReachableFlowNode } from './checker-narrowing.js';
-import { getTupleElementFlags, getTypeFromIndexedAccessTypeNode, getTypeFromTypeNode } from './checker-type-nodes.js';
+import {
+  getTupleElementFlags,
+  getTypeFromIndexedAccessTypeNode,
+  getTypeFromTypeNode,
+  isAssertionExpression,
+} from './checker-type-nodes.js';
 import { isArrayLikeType } from './checker-members.js';
 import {
   checkBlock,
@@ -111,6 +116,7 @@ import {
   checkComputedPropertyName,
   checkExpression,
   checkIndexedAccessIndexType,
+  isConstTypeReference,
 } from './checker-expressions.js';
 import { checkFunctionLikeBody } from './checker-functions.js';
 import { produceDeferredIterationErrors } from './checker-iteration.js';
@@ -446,6 +452,8 @@ function checkTypeNodeWorker(c: Checker, node: Node): void {
       break;
     case SyntaxKind.TypeReference:
     case SyntaxKind.ImportType: {
+      // `const` in `x as const` is not checked as a type: its type is the type of `x`.
+      if (isConstTypeReference(node) && isAssertionExpression(node.parent!)) break;
       const type = getTypeFromTypeNode(c, node);
       checkTypeArgumentConstraintsOfReference(c, node, type);
       checkDeprecatedTypeReference(c, node, type);

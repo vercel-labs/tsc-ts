@@ -547,7 +547,7 @@ function checkPropertyAccessibilityAtLocation(
           errorNode,
           Diagnostics.Property_0_is_private_and_only_accessible_within_class_1,
           symbolToString(c, prop),
-          typeToString(c, getDeclaringClass(c, prop)!),
+          typeToString(c, getDeclaringClass(c, prop) ?? containingTypeIn),
         );
       return false;
     }

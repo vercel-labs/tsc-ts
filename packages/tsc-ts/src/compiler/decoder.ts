@@ -203,7 +203,7 @@ import { protocolVersion } from './encoder.js';
 import { SyntaxKind } from './syntax-kind.js';
 
 const nodeSize = 28;
-const headerSize = 44;
+const headerSize = 64;
 const nodeListKind = 0xffffffff;
 
 const fieldKind = 0;
@@ -530,6 +530,13 @@ class Decoder {
     const node = this.node(bit);
     if (node === undefined) return undefined;
     if (node instanceof ImportClause) return node as ImportClause;
+    throw unexpected(node);
+  }
+
+  typeLiteral(bit: number): TypeLiteralNode | undefined {
+    const node = this.node(bit);
+    if (node === undefined) return undefined;
+    if (node instanceof TypeLiteralNode) return node as TypeLiteralNode;
     throw unexpected(node);
   }
 
@@ -1110,8 +1117,8 @@ class Decoder {
           this.modifiers(0),
           (common & 1) !== 0 ? SyntaxKind.NamespaceKeyword : SyntaxKind.ModuleKeyword,
           this.required(1),
-          undefined,
-          this.node(2),
+          this.typeLiteral(2),
+          this.node(3),
         );
       case SyntaxKind.ImportEqualsDeclaration:
         return new ImportEqualsDeclaration(
@@ -1164,7 +1171,7 @@ class Decoder {
           this.list(3),
         );
     }
-    if (kind <= SyntaxKind.DeferKeyword) return new Token(kind);
+    if (kind <= SyntaxKind.LastToken) return new Token(kind);
     throw invalid(`unhandled node kind ${kind} with ${this.children.length} children`);
   }
 }
@@ -1202,6 +1209,7 @@ function typeOperator(index: number): SyntaxKind {
 function importPhase(index: number): SyntaxKind | undefined {
   if (index === 1) return SyntaxKind.TypeKeyword;
   if (index === 2) return SyntaxKind.DeferKeyword;
+  if (index === 3) return SyntaxKind.SourceKeyword;
   return undefined;
 }
 

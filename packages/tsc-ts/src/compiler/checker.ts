@@ -108,7 +108,14 @@ import {
   mergeAmbientModulesAndAugmentations,
 } from './checker-symbols.js';
 import { PermissiveMapper, ReportingMapper, RestrictiveMapper, UniqueLiteralMapper } from './instantiation.js';
-import { Relation, RelationKey, type InternedRelationKey, type Relater, TypeComparer } from './relations.js';
+import {
+  Relation,
+  RelationKey,
+  type InternedRelationKey,
+  type Relater,
+  TypeComparer,
+  type VarianceStackEntry,
+} from './relations.js';
 import { TypeNodeVisitor, checkSourceFile } from './checker-source-file.js';
 import { InferenceCaches } from './checker-inference.js';
 import { AssignmentMarker, type FlowLoopInfo, type FlowState, type FlowWalk } from './checker-narrowing.js';
@@ -633,10 +640,16 @@ export class Checker implements TypeChecking {
 
   // Resolution stacks for cycle detection (see pushTypeResolution).
   resolutionStart = 0;
-  inVarianceComputation = false;
+  /** The generic types whose variances are being computed, outermost first. */
+  varianceStack: VarianceStackEntry[] = [];
 
   // Instantiation
   instantiationDepth = 0;
+  /** The types being instantiated, outermost first: the first `instantiationDepth` entries are current. */
+  readonly instantiationStack: Type[] = [];
+  /** The calls being resolved, outermost first: the first `callResolutionDepth` entries are current. */
+  readonly callResolutionStack: Node[] = [];
+  callResolutionDepth = 0;
   instantiationCount = 0;
   /** Instantiations over the checker's lifetime (statistics). */
   totalInstantiations = 0;

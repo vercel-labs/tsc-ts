@@ -17,6 +17,7 @@ import {
   TypeFlags,
   ObjectFlags,
   type TypeReference,
+  getMappedType,
 } from './checker-types.js';
 import {
   createTypeFromGenericGlobalType,
@@ -725,9 +726,9 @@ function getIterationTypesOfMethod(
       const mapper = (methodType as ObjectType).mapper;
       if (mapper !== undefined)
         return new IterationTypes(
-          mapper.map(typeParameters[0]!),
-          mapper.map(typeParameters[1]!),
-          methodName === 'next' ? mapper.map(typeParameters[2]!) : undefined,
+          getMappedType(typeParameters[0]!, mapper),
+          getMappedType(typeParameters[1]!, mapper),
+          methodName === 'next' ? getMappedType(typeParameters[2]!, mapper) : undefined,
         );
     }
   }

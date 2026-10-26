@@ -43,6 +43,7 @@ import {
   newTypeMapper,
   SimpleTypeMapper,
   TypeListCache,
+  getMappedType,
 } from './checker-types.js';
 import {
   IntersectionFlags,
@@ -87,6 +88,7 @@ import {
   type Symbol,
   SymbolFlags,
 } from './symbol.js';
+import { symbolToString } from './type-printer.js';
 
 // ---- Mappers that need the checker
 
@@ -104,8 +106,8 @@ export class CompositeTypeMapper extends TypeMapper {
   }
 
   map(type: Type): Type {
-    const t1 = this.m1.map(type);
-    return t1 !== type ? instantiateType(this.c, t1, this.m2) : this.m2.map(type);
+    const t1 = getMappedType(type, this.m1);
+    return t1 !== type ? instantiateType(this.c, t1, this.m2) : getMappedType(type, this.m2);
   }
 }
 
@@ -202,8 +204,18 @@ export function instantiateTypeWithAlias(
   }
   if (!could && (type.alias === undefined || !aliasCouldContainTypeVariables(c, type))) return type;
   if (c.instantiationDepth === 100 || c.instantiationCount >= 5000000) {
-    // Probably infinitely expanding generic types; stop with the error type.
-    c.error(c.currentNode, Diagnostics.Type_instantiation_is_excessively_deep_and_possibly_infinite);
+    // Probably infinitely expanding generic types; stop with the error type, naming the types whose
+    // instantiations nest three or more times.
+    const circularTypeNames = getCircularTypeNames(c);
+    if (circularTypeNames.length === 1)
+      c.error(c.currentNode, Diagnostics.Instantiations_of_type_0_appear_infinitely_circular, circularTypeNames[0]!);
+    else if (circularTypeNames.length > 1)
+      c.error(
+        c.currentNode,
+        Diagnostics.Instantiations_of_the_following_types_appear_infinitely_circular_Colon_0,
+        quotedAndCommaSeparated(circularTypeNames),
+      );
+    else c.error(c.currentNode, Diagnostics.Type_instantiation_is_excessively_deep_and_possibly_infinite);
     return c.errorType;
   }
   const depth = c.activeMapperDepth;
@@ -236,7 +248,11 @@ export function instantiateTypeWithAlias(
   }
   c.instantiationCount++;
   c.totalInstantiations++;
-  c.instantiationDepth++;
+  const instantiationDepth = c.instantiationDepth;
+  const instantiationStack = c.instantiationStack;
+  if (instantiationDepth < instantiationStack.length) instantiationStack[instantiationDepth] = type;
+  else instantiationStack.push(type);
+  c.instantiationDepth = instantiationDepth + 1;
   const result = instantiateTypeWorker(c, type, mapper, alias);
   if (index === -1) {
     // The mapper's slot stays until it is reused; its caches are released now.
@@ -272,6 +288,32 @@ export function instantiateTypeWithAlias(
   }
   c.instantiationDepth--;
   return result;
+}
+
+/**
+ * The names of the types that are instantiated three or more times on the current instantiation stack, by
+ * their alias where they have one, in the order they reach the third, each once.
+ */
+function getCircularTypeNames(c: Checker): string[] {
+  const counts = new Map<Type, number>();
+  const names: string[] = [];
+  const stack = c.instantiationStack;
+  for (let i = 0; i < c.instantiationDepth; i++) {
+    const t = stack[i]!;
+    const count = (counts.get(t) ?? 0) + 1;
+    counts.set(t, count);
+    if (count !== 3) continue;
+    const symbol = t.alias !== undefined ? t.alias.symbol : t.symbol;
+    if (symbol === undefined || symbol.name.length === 0 || symbol.name.charCodeAt(0) === 0xfffe) continue;
+    const name = symbolToString(c, symbol);
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/** `'a', 'b', 'c'`. */
+export function quotedAndCommaSeparated(items: readonly string[]): string {
+  return items.map((item) => "'" + item + "'").join(', ');
 }
 
 function aliasCouldContainTypeVariables(c: Checker, type: Type): boolean {
@@ -358,7 +400,7 @@ function isNonGenericTopLevelType(type: Type): boolean {
 
 function instantiateTypeWorker(c: Checker, type: Type, mapper: TypeMapper, alias: TypeAlias | undefined): Type {
   const flags = type.flags;
-  if ((flags & TypeFlags.TypeParameter) !== 0) return mapper.map(type);
+  if ((flags & TypeFlags.TypeParameter) !== 0) return getMappedType(type, mapper);
   if ((flags & TypeFlags.Object) !== 0) {
     const objectFlags = type.objectFlags;
     if ((objectFlags & (ObjectFlags.Reference | ObjectFlags.Anonymous | ObjectFlags.Mapped)) === 0) return type;
@@ -491,10 +533,10 @@ function getObjectTypeInstantiation(
   const typeMapper = type.mapper;
   const mapped = c.freeTypeLists.pop() ?? [];
   for (const tp of typeParameters) {
-    if (typeMapper === undefined) mapped.push(mapper.map(tp));
+    if (typeMapper === undefined) mapped.push(getMappedType(tp, mapper));
     else {
-      const t1 = typeMapper.map(tp);
-      mapped.push(t1 !== tp ? instantiateType(c, t1, mapper) : mapper.map(tp));
+      const t1 = getMappedType(tp, typeMapper);
+      mapped.push(t1 !== tp ? instantiateType(c, t1, mapper) : getMappedType(tp, mapper));
     }
   }
   const newAlias = alias ?? instantiateTypeAlias(c, type.alias, mapper);

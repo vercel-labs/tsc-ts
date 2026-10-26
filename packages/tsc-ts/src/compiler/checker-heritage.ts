@@ -115,7 +115,7 @@ import {
 import { Ternary } from './checker-types.js';
 import { symbolToString, typeToString } from './type-printer.js';
 import { checkFunctionOrConstructorSymbol } from './checker-overloads.js';
-import { isPropertyInitializedInConstructor } from './checker-classes.js';
+import { getConstructorAccessibilityError, isPropertyInitializedInConstructor } from './checker-classes.js';
 import {
   CheckFlags,
   declarationCount,
@@ -310,21 +310,13 @@ function getImplementsHeritageClauseElements(node: Node): Node[] {
 
 function checkBaseTypeAccessibility(c: Checker, t: Type, node: Node): void {
   const signatures = getSignaturesOfType(c, t, SignatureKind.Construct);
-  if (signatures.length === 0) return;
-  const declaration = signatures[0]!.declaration;
-  if (declaration === undefined || !hasSyntacticModifier(declaration, ModifierFlags.Private)) return;
-  const typeClassDeclaration = t.symbol !== undefined ? getClassLikeDeclarationOfSymbol(t.symbol) : undefined;
-  if (!isNodeWithinClass(node, typeClassDeclaration))
+  const error = getConstructorAccessibilityError(c, node, signatures, ModifierFlags.Private);
+  if (error !== undefined)
     c.error(
       node,
       Diagnostics.Cannot_extend_a_class_0_Class_constructor_is_marked_as_private,
-      getFullyQualifiedName(c, t.symbol!),
+      getFullyQualifiedName(c, error.declaringClass.symbol!),
     );
-}
-
-function isNodeWithinClass(node: Node, classDeclaration: Node | undefined): boolean {
-  for (let n: Node | undefined = node; n !== undefined; n = n.parent) if (n === classDeclaration) return true;
-  return false;
 }
 
 /** Reports each incompatible member, or the class as a whole when no member is to blame. */

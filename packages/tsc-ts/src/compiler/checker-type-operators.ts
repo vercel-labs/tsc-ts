@@ -61,6 +61,8 @@ import {
   ReferenceArgs,
   type TypeReference,
   VarianceFlags,
+  getMappedType,
+  getNonDistributedTypeParameter,
 } from './checker-types.js';
 import {
   UnionReduction,
@@ -119,7 +121,6 @@ import {
   getIndexTypeOfType,
   hasPropertiesOfType,
   keepPropertiesOnly,
-  memberResolutionFlags,
 } from './checker-members.js';
 import {
   getLateBoundSymbol,
@@ -328,13 +329,7 @@ function getIndexTypeForGenericType(c: Checker, t: Type, indexFlags: IndexFlags)
 }
 
 export function getLiteralTypeFromProperties(c: Checker, t: Type, include: TypeFlags, includeOrigin: boolean): Type {
-  const key =
-    'props' +
-    t.id +
-    ':' +
-    include +
-    (includeOrigin ? 'o' : '') +
-    ((memberResolutionFlags(c, t) & ObjectFlags.UnresolvedMembers) !== 0 ? 'u' : '');
+  const key = 'props' + t.id + ':' + include + (includeOrigin ? 'o' : '');
   const cached = c.cachedTypes.get(key);
   if (cached !== undefined) return cached;
   const origin =
@@ -1193,11 +1188,36 @@ export function getSimplifiedType(c: Checker, t: Type, writing: boolean): Type {
   if ((t.flags & TypeFlags.IndexedAccess) !== 0)
     return getSimplifiedIndexedAccessType(c, t as IndexedAccessType, writing);
   if ((t.flags & TypeFlags.Conditional) !== 0) return getSimplifiedConditionalType(c, t as ConditionalType, writing);
+  if ((t.flags & TypeFlags.Index) !== 0) return getSimplifiedIndexType(c, t as IndexType);
+  return t;
+}
+
+/** Simplifies `keyof` a generic mapped type with an `as` clause to the type of the keys it produces. */
+function getSimplifiedIndexType(c: Checker, t: IndexType): Type {
+  const target = t.target;
+  if (
+    isGenericMappedType(c, target) &&
+    getNameTypeFromMappedType(c, target as MappedType) !== undefined &&
+    !isMappedTypeWithKeyofConstraintDeclaration(c, target as MappedType)
+  )
+    return getIndexForMappedType(c, target as MappedType, IndexFlags.None);
   return t;
 }
 
 /** Simplifies `T extends U ? T : never` and `T extends U ? never : T` when the outcome is known. */
 function getSimplifiedConditionalType(c: Checker, t: ConditionalType, writing: boolean): Type {
+  const key = cachedTypeKey(
+    writing ? CachedTypeKind.SimplifiedConditionalForWriting : CachedTypeKind.SimplifiedConditionalForReading,
+    t.id,
+  );
+  const cached = c.cachedTypesById.get(key);
+  if (cached !== undefined) return cached;
+  const result = getSimplifiedConditionalTypeWorker(c, t, writing);
+  c.cachedTypesById.set(key, result);
+  return result;
+}
+
+function getSimplifiedConditionalTypeWorker(c: Checker, t: ConditionalType, writing: boolean): Type {
   const checkType = t.checkType;
   const extendsType = t.extendsType;
   const trueType = getTrueTypeFromConditionalType(c, t);
@@ -1561,7 +1581,9 @@ export function getModifiersTypeFromMappedType(c: Checker, t: MappedType): Type 
       const declaredType = getTypeFromMappedTypeNode(c, t.declaration!) as MappedType;
       const constraint = getConstraintTypeFromMappedType(c, declaredType);
       const extended =
-        (constraint.flags & TypeFlags.TypeParameter) !== 0 ? getConstraintOfTypeParameter(c, constraint) : constraint;
+        (constraint.flags & TypeFlags.TypeParameter) !== 0
+          ? getConstraintOfTypeParameter(c, getNonDistributedTypeParameter(constraint))
+          : constraint;
       side.modifiersType =
         extended !== undefined && (extended.flags & TypeFlags.Index) !== 0
           ? instantiateType(c, (extended as IndexType).target, t.mapper)
@@ -1584,17 +1606,12 @@ export function getActualTypeVariable(c: Checker, t: Type): Type {
   if ((t.flags & TypeFlags.Substitution) !== 0) return getActualTypeVariable(c, (t as SubstitutionType).baseType);
   if ((t.flags & TypeFlags.IndexedAccess) !== 0) {
     const access = t as IndexedAccessType;
-    if (
-      (access.objectType.flags & TypeFlags.Substitution) !== 0 ||
-      (access.indexType.flags & TypeFlags.Substitution) !== 0
-    )
-      return getIndexedAccessType(
-        c,
-        getActualTypeVariable(c, access.objectType),
-        getActualTypeVariable(c, access.indexType),
-      );
+    const objectType = getActualTypeVariable(c, access.objectType);
+    const indexType = getActualTypeVariable(c, access.indexType);
+    if (objectType !== access.objectType || indexType !== access.indexType)
+      return getIndexedAccessType(c, objectType, indexType);
   }
-  return t;
+  return getNonDistributedTypeParameter(t);
 }
 
 export const enum MappedTypeNameTypeKind {
@@ -1907,7 +1924,7 @@ function instantiateMappedTypeTemplate(
   )
     return getOptionalType(c, propType, true);
   if (c.strictNullChecks && (modifiers & MappedTypeModifiers.ExcludeOptional) !== 0 && isOptional)
-    return filterType(c, propType, (u) => (u.flags & TypeFlags.Undefined) === 0);
+    return removeMissingOrUndefinedType(c, propType);
   return propType;
 }
 
@@ -1975,7 +1992,7 @@ export function getConditionalTypeInstantiation(
   if (result === undefined) {
     const newMapper = newTypeMapper(root.outerTypeParameters, typeArguments);
     const checkType = root.checkType;
-    const distributionType = root.isDistributive ? getReducedType(c, newMapper.map(checkType)) : undefined;
+    const distributionType = root.isDistributive ? getReducedType(c, getMappedType(checkType, newMapper)) : undefined;
     // Distributive conditional types distribute over unions.
     if (
       distributionType !== undefined &&
@@ -2322,7 +2339,7 @@ function getTailRecursionRoot(c: Checker, newType: Type, newMapper: TypeMapper |
   const typeArguments: Type[] = [];
   for (const t of newRoot.outerTypeParameters) typeArguments.push(typeParamMapper.map(t));
   const newRootMapper = newTypeMapper(newRoot.outerTypeParameters, typeArguments);
-  const newCheckType = newRoot.isDistributive ? newRootMapper.map(newRoot.checkType) : undefined;
+  const newCheckType = newRoot.isDistributive ? getMappedType(newRoot.checkType, newRootMapper) : undefined;
   if (
     newCheckType === undefined ||
     newCheckType === newRoot.checkType ||
@@ -2435,7 +2452,7 @@ export function isTypeMatchedByTemplateLiteralType(
   target: TemplateLiteralType,
   compareTypes?: TemplateTypeComparer,
 ): boolean {
-  const inferences = inferTypesFromTemplateLiteralType(c, source, target);
+  const inferences = inferTypesFromTemplateLiteralType(c, source, target, compareTypes);
   if (inferences === undefined) return false;
   const compare = compareTypes ?? ((s: Type, t: Type) => isTypeAssignableTo(c, s, t));
   for (let i = 0; i < inferences.length; i++)

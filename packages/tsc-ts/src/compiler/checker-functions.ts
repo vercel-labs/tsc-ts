@@ -54,6 +54,7 @@ import {
   reportErrorsFromWidening,
   reportImplicitAny,
   WideningKind,
+  getWidenedTypeForVariableLikeDeclaration,
 } from './checker-symbol-types.js';
 import { getMergedSymbol, getSymbolOfDeclaration } from './checker-symbols.js';
 import {
@@ -238,7 +239,8 @@ function contextuallyCheckFunctionExpressionOrObjectLiteralMethod(c: Checker, no
     getType(node) === undefined &&
     resolvedReturnTypeOf(c, signature) === undefined
   ) {
-    const returnType = getReturnTypeFromBodyEx(c, node, checkMode);
+    // The resolved return type is cached, so it is computed without SkipContextSensitive to keep anyFunctionType out of it.
+    const returnType = getReturnTypeFromBodyEx(c, node, checkMode & ~CheckMode.SkipContextSensitive);
     if (resolvedReturnTypeOf(c, signature) === undefined) signatureSideOf(c, signature).resolvedReturnType = returnType;
   }
   checkFunctionLikeSignature(c, node);
@@ -328,7 +330,12 @@ function assignParameterSymbolType(c: Checker, parameter: Symbol, contextualType
   if (c.symbolTypes.get(id) !== undefined) return;
   const declaration = parameter.valueDeclaration;
   if (contextualType === undefined) {
-    c.symbolTypes.set(id, getTypeOfSymbol(c, parameter));
+    c.symbolTypes.set(
+      id,
+      declaration !== undefined
+        ? getWidenedTypeForVariableLikeDeclaration(c, declaration, true)
+        : getTypeOfSymbol(c, parameter),
+    );
     return;
   }
   c.symbolTypes.set(
@@ -1266,7 +1273,8 @@ function assignParameterType(c: Checker, declaration: Node): void {
   if (symbol === undefined) return;
   const id = getSymbolId(symbol);
   if (c.symbolTypes.get(id) !== undefined) return;
-  const t = getTypeOfSymbol(c, symbol);
+  // Without a context, the parameter's own type, reporting its implicit any errors.
+  const t = getWidenedTypeForVariableLikeDeclaration(c, declaration, true);
   c.symbolTypes.set(
     id,
     addOptionality(c, t, false, getInitializer(declaration) === undefined && isOptionalDeclaration(declaration)),

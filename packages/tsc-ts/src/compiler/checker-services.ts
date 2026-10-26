@@ -451,7 +451,7 @@ export function getTypeAtLocation(c: Checker, node: Node): Type {
   return getTypeOfNode(c, getReparsedNodeForNode(node));
 }
 
-function getTypeOfNode(c: Checker, node: Node): Type {
+export function getTypeOfNode(c: Checker, node: Node): Type {
   if (node.kind === SyntaxKind.SourceFile && !isExternalOrCommonJSModule(node as SourceFile)) return c.errorType;
   // Semantic questions inside `with` blocks have no answer.
   if ((node.flags & NodeFlags.InWithStatement) !== 0) return c.errorType;

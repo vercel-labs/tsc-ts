@@ -60,3 +60,20 @@ export function parsePseudoBigInt(literal: string): string {
   }
   return result;
 }
+
+/** Compares two bigint values in decimal, each optionally prefixed with `-`, by numeric value. */
+export function comparePseudoBigInts(a: string, b: string): number {
+  const negative = a.charCodeAt(0) === CharacterCodes.minus;
+  const r = pseudoBigIntSign(a) - pseudoBigIntSign(b);
+  if (r !== 0) return r;
+  const digitsA = negative ? a.substring(1) : a;
+  const digitsB = negative ? b.substring(1) : b;
+  let magnitude = digitsA.length - digitsB.length;
+  if (magnitude === 0) magnitude = digitsA < digitsB ? -1 : digitsA > digitsB ? 1 : 0;
+  return negative ? -magnitude : magnitude;
+}
+
+function pseudoBigIntSign(value: string): number {
+  if (value.charCodeAt(0) === CharacterCodes.minus) return -1;
+  return value === '0' ? 0 : 1;
+}

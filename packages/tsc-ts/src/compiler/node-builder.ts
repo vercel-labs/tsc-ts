@@ -205,6 +205,7 @@ import {
   type UnionOrIntersectionType,
   newTypeMapper,
   prependTypeMapping,
+  getNonDistributedTypeParameter,
 } from './checker-types.js';
 import {
   hasLateBindableIndexSignature,
@@ -874,7 +875,8 @@ export class NodeBuilder {
       this.approximateLength += 3;
       return this.keyword(SyntaxKind.AnyKeyword);
     }
-    let t = type;
+    // A distributed type parameter prints as the type parameter it was made from.
+    let t = getNonDistributedTypeParameter(type);
     if ((this.flags & NodeBuilderFlags.NoTypeReduction) === 0) t = getReducedType(c, t);
     const flags = t.flags;
     if ((flags & TypeFlags.Any) !== 0) {

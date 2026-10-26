@@ -43,6 +43,7 @@ import {
   isOptionalChain,
   isOutermostOptionalChain,
   isDottedName,
+  isFunctionExpressionOrArrowFunction,
 } from './binder-utilities.js';
 import { Diagnostic, type DiagnosticMessage, Diagnostics, chainDiagnostic } from './diagnostics.js';
 import { resolveInstanceofExpression } from './checker-operators.js';
@@ -147,6 +148,7 @@ import {
   checkNonNullType,
   checkNonNullTypeEx,
   checkTypeQueryExpression,
+  getResolvedSymbol,
 } from './checker-expressions.js';
 import { IterationUse, checkIteratedTypeOrElementType } from './checker-iteration.js';
 import { isContextSensitive } from './checker-functions.js';
@@ -207,7 +209,14 @@ import {
   resolveJsxOpeningLikeElement,
 } from './checker-jsx.js';
 import { isCommonJSRequire, resolveExternalModuleTypeByLiteral } from './checker-javascript.js';
-import { declarationCount, getDeclarations, InternalSymbolName, type Symbol, SymbolFlags } from './symbol.js';
+import {
+  copyDeclarations,
+  declarationCount,
+  getDeclarations,
+  InternalSymbolName,
+  type Symbol,
+  SymbolFlags,
+} from './symbol.js';
 
 /** The type of an optional chain's expression with the chain's `undefined` removed. */
 export function getOptionalExpressionType(c: Checker, exprType: Type, expression: Node): Type {
@@ -430,7 +439,7 @@ function resolveNewExpression(c: Checker, node: NewExpression, checkMode: CheckM
   }
   const constructSignatures = getSignaturesOfType(c, expressionType, SignatureKind.Construct);
   if (constructSignatures.length !== 0) {
-    if (!isConstructorAccessible(c, node, constructSignatures[0]!)) return resolveErrorCall(c, node);
+    if (!isConstructorAccessible(c, node, constructSignatures)) return resolveErrorCall(c, node);
     if (someSignature(constructSignatures, (s) => (s.flags & SignatureFlags.Abstract) !== 0)) {
       c.error(node, Diagnostics.Cannot_create_an_instance_of_an_abstract_class);
       return resolveErrorCall(c, node);
@@ -892,6 +901,8 @@ class CallState {
   candidates: Signature[];
   argCheckMode: CheckMode = CheckMode.Normal;
   isSingleNonGenericCandidate = false;
+  /** The call is resolved while its own resolution is in progress. */
+  recursiveResolution = false;
   candidatesForArgumentError: Signature[] = [];
   candidateForArgumentArityError: Signature | undefined = undefined;
   candidateForTypeArgumentError: Signature | undefined = undefined;
@@ -933,8 +944,19 @@ export function resolveCall(
     s.argCheckMode = CheckMode.SkipContextSensitive;
   // A subtype pass picks the best overload; assignability decides whether the call is an error.
   let result: Signature | undefined = undefined;
+  const callResolutionDepth = c.callResolutionDepth;
+  const callResolutionStack = c.callResolutionStack;
+  for (let i = 0; i < callResolutionDepth; i++)
+    if (callResolutionStack[i] === node) {
+      s.recursiveResolution = true;
+      break;
+    }
+  if (callResolutionDepth < callResolutionStack.length) callResolutionStack[callResolutionDepth] = node;
+  else callResolutionStack.push(node);
+  c.callResolutionDepth = callResolutionDepth + 1;
   if (candidates.length > 1) result = chooseOverload(c, s, c.subtypeRelation);
   if (result === undefined) result = chooseOverload(c, s, c.assignableRelation);
+  c.callResolutionDepth = callResolutionDepth;
   if (result !== undefined) return result;
   result = getCandidateForOverloadFailure(c, node, s.candidates, s.args, checkMode);
   // Cache now so that error reporting below handles circularities like getResolvedSignature would.
@@ -1031,7 +1053,11 @@ function chooseOverload(c: Checker, s: CallState, relation: Relation): Signature
           c,
           candidate.typeParameters,
           candidate,
-          isInJSFile(s.node) ? InferenceFlags.AnyDefault : InferenceFlags.None,
+          // A recursive resolution of a call with one candidate skips constraint checks during inference, which
+          // would otherwise report circularities.
+          (s.recursiveResolution && s.candidates.length === 1
+            ? InferenceFlags.NoConstraintChecks
+            : InferenceFlags.None) | (isInJSFile(s.node) ? InferenceFlags.AnyDefault : InferenceFlags.None),
           undefined,
         );
         typeArgumentTypes = inferTypeArguments(
@@ -1708,6 +1734,26 @@ function withHeadMessage(diagnostic: Diagnostic, headMessage: DiagnosticMessage 
   return headMessage !== undefined ? chainDiagnostic(diagnostic, headMessage) : diagnostic;
 }
 
+/** Whether `node` calls the `resolve` parameter of an executor passed to the global `new Promise`. */
+function isPromiseResolveArityError(c: Checker, node: Node): boolean {
+  if (node.kind !== SyntaxKind.CallExpression) return false;
+  const callee = getExpression(node)!;
+  if (callee.kind !== SyntaxKind.Identifier) return false;
+  const symbol = resolveName(c, callee, getText(callee), SymbolFlags.Value, undefined, false, false);
+  const declaration = symbol?.valueDeclaration;
+  if (
+    declaration === undefined ||
+    declaration.kind !== SyntaxKind.Parameter ||
+    !isFunctionExpressionOrArrowFunction(declaration.parent!) ||
+    declaration.parent!.parent?.kind !== SyntaxKind.NewExpression
+  )
+    return false;
+  const constructor = getExpression(declaration.parent!.parent!);
+  if (constructor === undefined || constructor.kind !== SyntaxKind.Identifier) return false;
+  const globalPromiseSymbol = getGlobalValueSymbol(c, 'Promise', false);
+  return globalPromiseSymbol !== undefined && getResolvedSymbol(c, constructor) === globalPromiseSymbol;
+}
+
 function getArgumentArityError(
   c: Checker,
   node: Node,
@@ -1750,7 +1796,16 @@ function getArgumentArityError(
     : minCount < maxCount
       ? minCount + '-' + maxCount
       : String(minCount);
+  // `resolve()` without an argument, where `resolve` is the parameter of a `new Promise` executor.
+  const isVoidPromiseError =
+    !hasRestParameter && parameterRange === '1' && args.length === 0 && isPromiseResolveArityError(c, node);
   const errorNode = getErrorNodeForCallNode(node);
+  if (isVoidPromiseError && isInJSFile(node))
+    return createDiagnosticForNode(
+      errorNode,
+      Diagnostics.Expected_1_argument_but_got_0_new_Promise_needs_a_JSDoc_hint_to_produce_a_resolve_that_can_be_called_without_arguments,
+      [],
+    );
   const message =
     node.kind === SyntaxKind.Decorator
       ? hasRestParameter
@@ -1758,7 +1813,9 @@ function getArgumentArityError(
         : Diagnostics.The_runtime_will_invoke_the_decorator_with_1_arguments_but_the_decorator_expects_0
       : hasRestParameter
         ? Diagnostics.Expected_at_least_0_arguments_but_got_1
-        : Diagnostics.Expected_0_arguments_but_got_1;
+        : isVoidPromiseError
+          ? Diagnostics.Expected_0_arguments_but_got_1_Did_you_forget_to_include_void_in_your_type_argument_to_Promise
+          : Diagnostics.Expected_0_arguments_but_got_1;
   if (minCount < args.length && args.length < maxCount)
     // Between min and max, but no overload matches.
     return withHeadMessage(
@@ -2106,10 +2163,13 @@ class InstantiationExpressionInstantiator {
       if (resolved.callSignatures.length !== 0 || resolved.constructSignatures.length !== 0) this.hasSignatures = true;
       if (callSignatures.length !== 0 || constructSignatures.length !== 0) this.hasApplicableSignature = true;
       if (callSignatures !== resolved.callSignatures || constructSignatures !== resolved.constructSignatures) {
+        // A symbol of its own, with the declarations of the instantiated type's symbol.
+        const symbol = c.newSymbol(SymbolFlags.None, InternalSymbolName.InstantiationExpression);
+        if (t.symbol !== undefined) copyDeclarations(symbol, t.symbol);
         const result = newObjectType(
           c,
           ObjectFlags.Anonymous | ObjectFlags.InstantiationExpressionType,
-          c.newSymbol(SymbolFlags.None, InternalSymbolName.InstantiationExpression),
+          symbol,
         ) as InstantiationExpressionType;
         setStructuredTypeMembers(c, result, resolved.members, callSignatures, constructSignatures, resolved.indexInfos);
         result.node = this.node;

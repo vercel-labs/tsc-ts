@@ -277,7 +277,13 @@ function getTypeOfVariableOrParameterOrPropertyWorker(c: Checker, symbol: Symbol
     case SyntaxKind.PropertySignature:
     case SyntaxKind.VariableDeclaration:
     case SyntaxKind.BindingElement:
-      result = getWidenedTypeForVariableLikeDeclaration(c, declaration, true);
+      // A parameter of a context sensitive function may get another type when its context is known, so
+      // its widening errors are left to that.
+      result = getWidenedTypeForVariableLikeDeclaration(
+        c,
+        declaration,
+        !isParameterOfContextSensitiveSignature(c, symbol),
+      );
       break;
     case SyntaxKind.PropertyAssignment:
     case SyntaxKind.ShorthandPropertyAssignment:
