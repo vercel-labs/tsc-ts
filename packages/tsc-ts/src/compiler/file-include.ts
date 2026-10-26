@@ -597,10 +597,16 @@ export class IncludeProcessor {
     return this.fileIncludeReasons.get(path) ?? [];
   }
 
-  addReason(path: string, reason: FileIncludeReason): void {
+  /** Adds an include reason of the file at `path`; returns the file's reasons. */
+  addReason(path: string, reason: FileIncludeReason): FileIncludeReason[] {
     const reasons = this.fileIncludeReasons.get(path);
-    if (reasons === undefined) this.fileIncludeReasons.set(path, [reason]);
-    else reasons.push(reason);
+    if (reasons === undefined) {
+      const added = [reason];
+      this.fileIncludeReasons.set(path, added);
+      return added;
+    }
+    reasons.push(reason);
+    return reasons;
   }
 
   addProcessingDiagnostic(diagnostic: ProcessingDiagnostic): void {

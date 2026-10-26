@@ -158,6 +158,7 @@ import { checkTypeNameIsReserved } from './checker-classes.js';
 import { getDeclaredTypeOfSymbol } from './checker-declared-types.js';
 import { isValidSpreadType } from './checker-destructuring.js';
 import { createPromiseType } from './checker-iteration.js';
+import { getInstantiationExpressionType } from './checker-calls.js';
 import { symbolToString, typeToString } from './type-printer.js';
 import { checkTypeAssignableToAndOptionallyElaborate } from './checker-expressions.js';
 import { grammarErrorOnNode } from './checker-operators.js';
@@ -2214,8 +2215,8 @@ function getIdentifierChain(node: Node): Identifier[] {
 function resolveImportSymbolType(c: Checker, node: Node, symbol: Symbol, meaning: SymbolFlags): Type {
   const resolvedSymbol = resolveSymbol(c, symbol)!;
   c.resolvedSymbols.set(node.id, resolvedSymbol);
-  // The alias itself caches the type of a value.
-  if (meaning === SymbolFlags.Value) return getTypeOfSymbol(c, symbol);
+  // A value's type comes from the alias, which caches it, instantiated with the node's type arguments.
+  if (meaning === SymbolFlags.Value) return getInstantiationExpressionType(c, getTypeOfSymbol(c, symbol), node);
   return getTypeReferenceType(c, node, resolvedSymbol);
 }
 
