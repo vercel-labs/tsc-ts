@@ -155,6 +155,87 @@ const scenarios = {
       { args: [], edit: { 'a.ts': 'import { make } from "dep";\nexport const x = make();\n// edit\n' } },
     ],
   },
+  // A JSON module's signature is its version, so fixing it rechecks its importers.
+  'JSON module errors cleared after fixing the JSON file': {
+    files: {
+      'tsconfig.json':
+        '{"compilerOptions":{"strict":true,"noEmit":true,"incremental":true,"resolveJsonModule":true,' +
+        '"esModuleInterop":true}}',
+      'data.json': '{ "title": "hello" }',
+      'check.ts':
+        'import type data from "./data.json";\n\ntype Shape = { title: string };\ntype Covers<T extends Shape> = T;\n\n' +
+        'export type Check = Covers<typeof data>;\n',
+    },
+    steps: [
+      { args: [] },
+      { args: [], edit: { 'data.json': '{}' } },
+      { args: [], edit: { 'data.json': '{ "title": "fixed" }' } },
+    ],
+  },
+  // Deleting a global declaration file with another file rechecks every file, also when the other file
+  // (exports.d.ts) comes first.
+  'mixed file deletion with add and change': {
+    files: {
+      'tsconfig.json': '{"compilerOptions":{"incremental":true,"noEmit":true,"types":[]}}',
+      'consumer.ts': 'declare const value: RemovedGlobal; value.property;',
+      'global.d.ts': 'interface RemovedGlobal { property: string; }',
+      'exports.d.ts': 'export interface ModuleOnly { property: string; }',
+      'changed.ts': 'export const changed = 1;',
+    },
+    steps: [
+      { args: [] },
+      {
+        args: [],
+        edit: {
+          'global.d.ts': null,
+          'exports.d.ts': null,
+          'changed.ts': 'export const changed = 2;',
+          'added.ts': 'export const added = 1;',
+        },
+      },
+      { args: [] },
+      { args: [], edit: { 'global.d.ts': 'interface RemovedGlobal { property: number; }' } },
+      { args: [], edit: { 'added.ts': null } },
+      { args: [] },
+    ],
+  },
+  // A global declaration file that becomes a module changes the global scope: its user, which does not
+  // import it, is checked again.
+  'global declaration file that becomes a module': {
+    files: {
+      'tsconfig.json': '{"compilerOptions":{"incremental":true,"noEmit":true,"types":[]}}',
+      'consumer.ts': 'declare const value: Shared; value.property;\n',
+      'global.d.ts': 'interface Shared { property: string; }\n',
+    },
+    steps: [
+      { args: [] },
+      { args: [], edit: { 'global.d.ts': 'export interface Shared { property: string; }\n' } },
+      { args: [] },
+      { args: [], edit: { 'global.d.ts': 'interface Shared { property: string; }\n' } },
+    ],
+  },
+  // Pending changes of deleted files leave the build info.
+  'unchecked deleted paths with no emit': {
+    files: {
+      'tsconfig.json':
+        '{"compilerOptions":{"incremental":true,"noCheck":true,"noEmit":true,"composite":true,"types":[]}}',
+      'stable.ts': 'export const stable = 1;',
+    },
+    steps: [
+      { args: [] },
+      { args: [], edit: { 'first.ts': 'export const first = 1;', 'second.ts': 'export const second = 1;' } },
+      { args: [], edit: { 'first.ts': null, 'second.ts': null } },
+      { args: [] },
+      {
+        args: [],
+        edit: {
+          'tsconfig.json':
+            '{"compilerOptions":{"incremental":true,"noCheck":false,"noEmit":false,"composite":true,"types":[]}}',
+        },
+      },
+      { args: [] },
+    ],
+  },
   'upstream errors, --stopBuildOnErrors, solutions and missing references': {
     files: {
       'tsconfig.json': '{"files":[],"references":[{"path":"./b"},{"path":"./c"}]}',

@@ -21,6 +21,7 @@ import {
   isIncremental,
   shouldPreserveConstEnums,
   type CompilerOptions,
+  type PluginImport,
 } from './options.js';
 import { getDirectoryPath, getNormalizedAbsolutePath, getRelativePathFromFile } from './path.js';
 
@@ -45,6 +46,8 @@ const hiddenOptions = new Set([
   'init',
   'listFilesOnly',
   'listEmittedFiles',
+  // TypeScript 7.1's generated serializer has no `listFiles`.
+  'listFiles',
   'project',
   'build',
   'version',
@@ -85,7 +88,12 @@ export function showConfig(input: ShowConfigInput, configFileName: string): stri
     if (option === undefined || hiddenOptions.has(option.name)) continue;
     if (option.category === Diagnostics.Command_line_Options || option.category === Diagnostics.Output_Formatting)
       continue;
-    const json = name === 'paths' ? pathsJson(input.options.paths) : optionJson(option, input.options, paths);
+    const json =
+      name === 'paths'
+        ? pathsJson(input.options.paths)
+        : name === 'plugins'
+          ? pluginsJson(input.options.plugins)
+          : optionJson(option, input.options, paths);
     if (json !== undefined) shown.set(option.name, json);
   }
 
@@ -226,6 +234,15 @@ function jsonArray(items: readonly string[], level: number): string {
   if (items.length === 0) return '[]';
   const inner = indent(level + 1);
   return '[\n' + inner + items.map((item) => JSON.stringify(item)).join(',\n' + inner) + '\n' + indent(level) + ']';
+}
+
+function pluginsJson(plugins: readonly PluginImport[] | undefined): string | undefined {
+  if (plugins === undefined) return undefined;
+  if (plugins.length === 0) return '[]';
+  const items = plugins.map(
+    (plugin) => indent(3) + '{\n' + indent(4) + '"name": ' + JSON.stringify(plugin.name) + '\n' + indent(3) + '}',
+  );
+  return '[\n' + items.join(',\n') + '\n' + indent(2) + ']';
 }
 
 function pathsJson(paths: ReadonlyMap<string, readonly string[] | undefined> | undefined): string | undefined {

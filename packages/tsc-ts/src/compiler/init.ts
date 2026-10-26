@@ -2,12 +2,7 @@
  * The tsconfig.json written by `tsc --init`.
  */
 import { Diagnostics, localizeMessage, type DiagnosticMessage, type Locale } from './diagnostics.js';
-import {
-  compilerOptionsByName,
-  sameEnumValue,
-  watchOptionsByName,
-  type OptionDeclaration,
-} from './option-declarations.js';
+import { compilerOptionsByName, sameEnumValue, type OptionDeclaration } from './option-declarations.js';
 import { JsxEmit, ModuleDetectionKind, ModuleKind, ScriptTarget, type OptionValue } from './options.js';
 
 const enum Commented {
@@ -124,7 +119,7 @@ class ConfigWriter {
 }
 
 function formatValue(name: string, value: OptionValue): string {
-  const option = compilerOptionsByName.get(name) ?? watchOptionsByName.get(name);
+  const option = compilerOptionsByName.get(name);
   if (value === null) return 'null';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'number' || typeof value === 'string') return formatScalar(value, option);

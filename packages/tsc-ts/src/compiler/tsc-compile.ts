@@ -568,7 +568,7 @@ export function reportEmitAndErrors(
   if (program.options.listFilesOnly !== true) {
     const emitStart = performance.now();
     emitResult = program.emit(writer);
-    program.times.emitTime = performance.now() - emitStart;
+    program.times.emitTime += performance.now() - emitStart;
   }
   for (const diagnostic of emitResult.diagnostics) diagnostics.push(diagnostic);
   const all = sortAndDeduplicateDiagnostics(diagnostics);

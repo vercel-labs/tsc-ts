@@ -8,7 +8,6 @@ import {
   buildOptionDeclarations,
   optionDeclarations,
   optionsForBuild,
-  optionsForWatch,
   sameEnumValue,
   type OptionDeclaration,
 } from './option-declarations.js';
@@ -16,10 +15,17 @@ import type { System } from './tsc-cli.js';
 
 export const version = '7.1.0-beta';
 
-/** Whether output gets colors: `NO_COLOR` and `FORCE_COLOR` override the TTY check. */
+/**
+ * Whether output gets colors. As in Node, a set `FORCE_COLOR` decides: on when empty, `1`, `2`, `3` or `true`, off
+ * otherwise. Then `NO_COLOR` or `TERM=dumb` turn colors off, else they follow the TTY check.
+ */
 export function defaultIsPretty(sys: System): boolean {
+  if (sys.hasEnvironmentVariable('FORCE_COLOR')) {
+    const forceColor = sys.getEnvironmentVariable('FORCE_COLOR');
+    return forceColor === '' || forceColor === '1' || forceColor === '2' || forceColor === '3' || forceColor === 'true';
+  }
   if (sys.getEnvironmentVariable('NO_COLOR') !== '') return false;
-  if (sys.getEnvironmentVariable('FORCE_COLOR') !== '') return true;
+  if (sys.getEnvironmentVariable('TERM') === 'dumb') return false;
   return sys.writeOutputIsTTY;
 }
 
@@ -261,16 +267,6 @@ function printAllHelp(writer: HelpWriter, options: readonly OptionDeclaration[])
     true,
     undefined,
     learnMore(writer),
-  );
-  out += sectionOutput(
-    writer,
-    writer.text(Diagnostics.WATCH_OPTIONS),
-    optionsForWatch,
-    false,
-    writer.text(
-      Diagnostics.Including_watch_w_will_start_watching_the_current_project_for_the_file_changes_Once_set_you_can_config_watch_mode_with_Colon,
-    ),
-    undefined,
   );
   out += sectionOutput(
     writer,

@@ -9,10 +9,7 @@ import {
   ModuleKind,
   ModuleResolutionKind,
   NewLineKind,
-  PollingKind,
   ScriptTarget,
-  WatchDirectoryKind,
-  WatchFileKind,
 } from './options.js';
 import { Diagnostics, type DiagnosticMessage } from './diagnostics.js';
 
@@ -257,29 +254,6 @@ export const moduleDetectionValues: EnumValues = new Map<string, number | string
   ['force', ModuleDetectionKind.Force],
 ]);
 
-export const watchFileValues: EnumValues = new Map<string, number | string>([
-  ['fixedpollinginterval', WatchFileKind.FixedPollingInterval],
-  ['prioritypollinginterval', WatchFileKind.PriorityPollingInterval],
-  ['dynamicprioritypolling', WatchFileKind.DynamicPriorityPolling],
-  ['fixedchunksizepolling', WatchFileKind.FixedChunkSizePolling],
-  ['usefsevents', WatchFileKind.UseFsEvents],
-  ['usefseventsonparentdirectory', WatchFileKind.UseFsEventsOnParentDirectory],
-]);
-
-export const watchDirectoryValues: EnumValues = new Map<string, number | string>([
-  ['usefsevents', WatchDirectoryKind.UseFsEvents],
-  ['fixedpollinginterval', WatchDirectoryKind.FixedPollingInterval],
-  ['dynamicprioritypolling', WatchDirectoryKind.DynamicPriorityPolling],
-  ['fixedchunksizepolling', WatchDirectoryKind.FixedChunkSizePolling],
-]);
-
-export const fallbackPollingValues: EnumValues = new Map<string, number | string>([
-  ['fixedinterval', PollingKind.FixedInterval],
-  ['priorityinterval', PollingKind.PriorityInterval],
-  ['dynamicpriority', PollingKind.DynamicPriority],
-  ['fixedchunksize', PollingKind.FixedChunkSize],
-]);
-
 /** `--build`, `-b`. Only valid as the first argument. */
 export const buildOption: OptionDeclaration = {
   name: 'build',
@@ -515,6 +489,15 @@ export const commonOptionsWithBuild: readonly OptionDeclaration[] = [
     description: Diagnostics.Set_the_number_of_checkers_per_project,
     defaultValueMessage: Diagnostics.X_4_unless_singleThreaded_is_passed,
     minValue: 1,
+  },
+  {
+    // Content mappers aren't supported; the option is accepted and has no effect.
+    name: 'runExternalCode',
+    kind: 'boolean',
+    isCommandLineOnly: true,
+    category: Diagnostics.Command_line_Options,
+    description: Diagnostics.Allow_loading_external_content_mapper_plugins_that_execute_code_during_compilation,
+    defaultValueDescription: false,
   },
 ];
 
@@ -1436,75 +1419,6 @@ export const optionsForBuild: readonly OptionDeclaration[] = [
   },
 ];
 
-/** Watch options, accepted on the command line and in `watchOptions`. */
-export const optionsForWatch: readonly OptionDeclaration[] = [
-  {
-    name: 'watchInterval',
-    kind: 'number',
-    category: Diagnostics.Watch_and_Build_Modes,
-  },
-  {
-    name: 'watchFile',
-    kind: 'enum',
-    values: watchFileValues,
-    category: Diagnostics.Watch_and_Build_Modes,
-    description: Diagnostics.Specify_how_the_TypeScript_watch_mode_works,
-    defaultValueDescription: WatchFileKind.UseFsEvents,
-  },
-  {
-    name: 'watchDirectory',
-    kind: 'enum',
-    values: watchDirectoryValues,
-    category: Diagnostics.Watch_and_Build_Modes,
-    description:
-      Diagnostics.Specify_how_directories_are_watched_on_systems_that_lack_recursive_file_watching_functionality,
-    defaultValueDescription: WatchDirectoryKind.UseFsEvents,
-  },
-  {
-    name: 'fallbackPolling',
-    kind: 'enum',
-    values: fallbackPollingValues,
-    category: Diagnostics.Watch_and_Build_Modes,
-    description:
-      Diagnostics.Specify_what_approach_the_watcher_should_use_if_the_system_runs_out_of_native_file_watchers,
-    defaultValueDescription: PollingKind.PriorityInterval,
-  },
-  {
-    name: 'synchronousWatchDirectory',
-    kind: 'boolean',
-    category: Diagnostics.Watch_and_Build_Modes,
-    description:
-      Diagnostics.Synchronously_call_callbacks_and_update_the_state_of_directory_watchers_on_platforms_that_don_t_support_recursive_watching_natively,
-    defaultValueDescription: false,
-  },
-  {
-    name: 'excludeDirectories',
-    kind: 'list',
-    element: {
-      name: 'excludeDirectory',
-      kind: 'string',
-      isFilePath: true,
-      extraValidation: 'spec',
-    },
-    category: Diagnostics.Watch_and_Build_Modes,
-    description: Diagnostics.Remove_a_list_of_directories_from_the_watch_process,
-    allowConfigDirTemplateSubstitution: true,
-  },
-  {
-    name: 'excludeFiles',
-    kind: 'list',
-    element: {
-      name: 'excludeFile',
-      kind: 'string',
-      isFilePath: true,
-      extraValidation: 'spec',
-    },
-    category: Diagnostics.Watch_and_Build_Modes,
-    description: Diagnostics.Remove_a_list_of_files_from_the_watch_mode_s_processing,
-    allowConfigDirTemplateSubstitution: true,
-  },
-];
-
 /** Keys of `typeAcquisition` in tsconfig.json. */
 export const typeAcquisitionDeclarations: readonly OptionDeclaration[] = [
   {
@@ -1557,6 +1471,13 @@ export class OptionNameMap {
     return this.byName.get(name.toLowerCase());
   }
 
+  /** The declared names, for spelling suggestions. */
+  names(): string[] {
+    const names: string[] = [];
+    for (const declaration of this.byName.values()) names.push(declaration.name);
+    return names;
+  }
+
   /** Looks up `name`, or with `allowShort` the option it abbreviates. */
   find(name: string, allowShort: boolean): OptionDeclaration | undefined {
     const lower = name.toLowerCase();
@@ -1567,4 +1488,3 @@ export class OptionNameMap {
 
 export const compilerOptionsByName = new OptionNameMap(optionDeclarations);
 export const buildOptionsByName = new OptionNameMap(buildOptionDeclarations);
-export const watchOptionsByName = new OptionNameMap(optionsForWatch);
