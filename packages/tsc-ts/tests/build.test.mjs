@@ -375,6 +375,20 @@ const scenarios = {
       { args: ['--checkers', '3', '--listEmittedFiles'] },
     ],
   },
+  // Missing global types that checking a file finds stay with the file, and a rebuild that doesn't check it
+  // again reports them from the build info. In native builds the first step checks on two checker threads.
+  'missing global types of an incremental program on checker threads': {
+    files: {
+      'tsconfig.json': '{"compilerOptions":{"incremental":true,"lib":["es5"],"target":"es2017","types":[]}}',
+      'generators.ts': 'export async function* values() { yield 1; }\nexport function* keys() { yield 1; }\n',
+      'other.ts': 'export const other = 1;\n',
+    },
+    steps: [
+      { args: ['--checkers', '2'] },
+      { args: ['--checkers', '2'], edit: { 'other.ts': 'export const other = 2;\n' } },
+      { args: ['--checkers', '2'] },
+    ],
+  },
   // In native builds the second step checks and emits the files the change affects on two checker threads.
   'incremental rebuild of affected files on checker threads': {
     files: {

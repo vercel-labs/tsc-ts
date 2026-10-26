@@ -1700,8 +1700,9 @@ export function checkFromQueue(
     }
   }
   mark(`checked ${done.length} files, ${unitsDone.length} ranges`);
-  // The main thread reports its own global diagnostics (CheckedProgram.getGlobalDiagnostics).
-  const globals = onMainThread ? [] : checked.getGlobalDiagnostics().slice();
+  // On the main thread, those from before checking are the program's own (`ownGlobalDiagnostics`), and
+  // CheckedProgram.getGlobalDiagnostics deduplicates them with these.
+  const globals = (onMainThread ? checked.checker.getGlobalDiagnostics() : checked.getGlobalDiagnostics()).slice();
   let stats: number[] = [];
   if (process.env.TSC_TS_CHECKERS_TRACE !== undefined) {
     const cpu = process.threadCpuUsage();
@@ -2062,6 +2063,9 @@ export function startParallelCheck(
   const emittedHere =
     !mainChecks && emitKinds === undefined ? emitUncheckedFiles(checked, order, emits) : new Map<number, EmitResult>();
   if (mainChecks) {
+    // The program reports the global diagnostics this checker has before checking files as found before
+    // checking; those it finds checking them come with the threads' (`record`).
+    checked.ownGlobalDiagnostics = checked.checker.getGlobalDiagnostics().slice();
     const own = checkFromQueue(
       checked,
       0,
