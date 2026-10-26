@@ -260,10 +260,11 @@ export function errorAndMaybeSuggestAwait(
   message: DiagnosticMessage,
   args: string[],
 ): Diagnostic {
-  const diagnostic = createDiagnosticForNode(location, message, args);
+  // The related information goes on the reported diagnostic after it is added, as tsgo attaches it,
+  // so a later equal report compares unequal to it and is kept.
+  const diagnostic = c.error(location, message, ...args);
   if (maybeMissingAwait)
     diagnostic.addRelatedInfo(createDiagnosticForNode(location, Diagnostics.Did_you_forget_to_use_await, []));
-  c.addDiagnostic(diagnostic);
   return diagnostic;
 }
 

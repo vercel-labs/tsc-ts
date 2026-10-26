@@ -172,6 +172,7 @@ import {
   type Symbol,
   SymbolFlags,
   type SymbolTable,
+  copyDeclarations,
 } from './symbol.js';
 
 // ---- Resolution
@@ -930,6 +931,7 @@ function getTypeWithSyntheticDefaultImportType(
   let result = type;
   if (canHaveSyntheticDefault(c, file, originalSymbol, false, moduleSpecifier)) {
     const anonymousSymbol = c.newSymbol(SymbolFlags.TypeLiteral, InternalSymbolName.Type);
+    copyDeclarations(anonymousSymbol, originalSymbol);
     const defaultContainingObject = createDefaultPropertyWrapperForModule(c, symbol, originalSymbol, anonymousSymbol);
     c.symbolTypes.set(getSymbolId(anonymousSymbol), defaultContainingObject);
     result = isValidSpreadType(c, type)
@@ -954,6 +956,10 @@ function createDefaultPropertyWrapperForModule(
   links.aliasTarget = resolveSymbol(c, symbol);
   const members: SymbolTable = new Map<string, Symbol>();
   members.set(InternalSymbolName.Default, defaultSymbol);
+  if (anonymousSymbol === undefined && originalSymbol !== undefined) {
+    anonymousSymbol = c.newSymbol(SymbolFlags.ObjectLiteral, InternalSymbolName.Object);
+    copyDeclarations(anonymousSymbol, originalSymbol);
+  }
   return createAnonymousType(c, anonymousSymbol, members, [], [], []);
 }
 

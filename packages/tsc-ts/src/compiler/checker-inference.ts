@@ -50,6 +50,7 @@ import {
   newTypeMapper,
   SimpleTypeMapper,
   emptyTypes,
+  getNonDistributedTypeParameter,
 } from './checker-types.js';
 import {
   UnionReduction,
@@ -88,6 +89,7 @@ import {
   someType,
   tupleTargetOf,
   typesOf,
+  compareTypes,
 } from './checker-type-factory.js';
 import {
   getDeclaredTypeOfClassOrInterface,
@@ -124,6 +126,7 @@ import {
   isNoInferType,
   isTypeMatchedByTemplateLiteralType,
   shouldDeferIndexType,
+  type TemplateTypeComparer,
 } from './checker-type-operators.js';
 import {
   getApparentType,
@@ -211,6 +214,8 @@ export const enum InferenceFlags {
   AnyDefault = 1 << 1,
   /** A generic function was skipped during inference. */
   SkippedGenericFunction = 1 << 2,
+  /** Inferences other than pure return type inferences are not filtered by their constraints. */
+  NoConstraintChecks = 1 << 3,
 }
 
 export const enum InferencePriority {
@@ -247,14 +252,12 @@ const enum ExpandingFlags {
 // Shared empty candidate lists: an InferenceInfo gets its own on its first candidate, as tsgo's nil
 // slices do. Never changed.
 const noCandidates: Type[] = [];
-const noCandidateDepths: number[] = [];
 
 /** Inferences for one type parameter. */
 export class InferenceInfo {
   readonly typeParameter: Type;
-  /** Covariant candidates, in decreasing depth order. */
+  /** Covariant candidates. */
   candidates: Type[] = noCandidates;
-  candidateDepths: number[] = noCandidateDepths;
   contraCandidates: Type[] = noCandidates;
   inferredType: Type | undefined = undefined;
   priority: InferencePriority = InferencePriority.MaxValue;
@@ -269,10 +272,7 @@ export class InferenceInfo {
 
   clone(): InferenceInfo {
     const info = new InferenceInfo(this.typeParameter);
-    if (this.candidates.length !== 0) {
-      info.candidates = this.candidates.slice();
-      info.candidateDepths = this.candidateDepths.slice();
-    }
+    if (this.candidates.length !== 0) info.candidates = this.candidates.slice();
     if (this.contraCandidates.length !== 0) info.contraCandidates = this.contraCandidates.slice();
     info.inferredType = this.inferredType;
     info.priority = this.priority;
@@ -539,7 +539,6 @@ class InferenceState {
   readonly sourceStack: Type[] = [];
   readonly targetStack: Type[] = [];
   stackDepth = 0;
-  depth = 0;
 
   constructor(
     c: Checker,
@@ -594,7 +593,7 @@ class InferenceState {
     if ((target.flags & TypeFlags.Union) !== 0) {
       const sourceTypes = (source.flags & TypeFlags.Union) !== 0 ? typesOf(source) : [source];
       // Infer between identically matching constituents, then closely matching ones, removing them.
-      const temp = this.inferFromMatchingTypes(sourceTypes, distributedTypes(target), MatchKind.TypeOrBaseIdentical);
+      const temp = this.inferFromMatchingTypes(sourceTypes, typesOf(target), MatchKind.TypeOrBaseIdentical);
       const matched = this.inferFromMatchingTypes(temp.sources, temp.targets, MatchKind.CloselyMatched);
       if (matched.targets.length === 0) return;
       target = getUnionType(c, matched.targets);
@@ -706,7 +705,6 @@ class InferenceState {
       if (candidate === c.blockedStringType) return;
       if (this.priority < inference.priority) {
         inference.candidates = noCandidates;
-        inference.candidateDepths = noCandidateDepths;
         inference.contraCandidates = noCandidates;
         inference.topLevel = true;
         inference.priority = this.priority;
@@ -719,29 +717,10 @@ class InferenceState {
             inference.contraCandidates.push(candidate);
             clearCachedInferences(this.inferences);
           }
-        } else {
-          let index = inference.candidates.indexOf(candidate);
-          if (index < 0 || inference.candidateDepths[index] < this.depth) {
-            if (index >= 0) {
-              inference.candidates.splice(index, 1);
-              inference.candidateDepths.splice(index, 1);
-            }
-            if (inference.candidates === noCandidates) {
-              inference.candidates = [];
-              inference.candidateDepths = [];
-            }
-            // Keep candidates with the highest depth first.
-            index = 0;
-            while (index < inference.candidateDepths.length && inference.candidateDepths[index] >= this.depth) index++;
-            if (index === inference.candidates.length) {
-              inference.candidates.push(candidate);
-              inference.candidateDepths.push(this.depth);
-            } else {
-              inference.candidates.splice(index, 0, candidate);
-              inference.candidateDepths.splice(index, 0, this.depth);
-            }
-            clearCachedInferences(this.inferences);
-          }
+        } else if (!inference.candidates.includes(candidate)) {
+          if (inference.candidates === noCandidates) inference.candidates = [];
+          inference.candidates.push(candidate);
+          clearCachedInferences(this.inferences);
         }
       }
       if (
@@ -774,14 +753,12 @@ class InferenceState {
   }
 
   inferFromTypeArguments(sourceTypes: Type[], targetTypes: Type[], variances: VarianceFlags[]): void {
-    this.depth++;
     const count = Math.min(sourceTypes.length, targetTypes.length);
     for (let i = 0; i < count; i++) {
       if (i < variances.length && (variances[i] & VarianceFlags.VarianceMask) === VarianceFlags.Contravariant)
         this.inferFromContravariantTypes(sourceTypes[i]!, targetTypes[i]!);
       else this.inferFromTypes(sourceTypes[i]!, targetTypes[i]!);
     }
-    this.depth--;
   }
 
   inferWithPriority(source: Type, target: Type, newPriority: InferencePriority): void {
@@ -875,10 +852,19 @@ class InferenceState {
     for (const t of targets)
       for (const s of sources)
         if (typesMatch(c, s, t, kind)) {
-          this.inferFromTypes(s, t);
+          if (kind !== MatchKind.CloselyMatched) this.inferFromTypes(s, t);
           if (!matchedSources.includes(s)) matchedSources.push(s);
           if (!matchedTargets.includes(t)) matchedTargets.push(t);
         }
+    if (kind === MatchKind.CloselyMatched) {
+      // Infer to closely matched targets in decreasing depth of generic instantiations: an inference
+      // from a more deeply nested type argument has had more layers of instantiation stripped away. For
+      // example, from `string[] | string[][]` to `T[] | T[][]`, relating `string[][]` to `T[][]` infers
+      // `string`, a better inference than the `string[]` that relating `string[][]` to `T[]` infers.
+      matchedTargets.sort((t1, t2) => compareTypesAndDepth(c, t1, t2));
+      for (const t of matchedTargets)
+        for (const s of matchedSources) if (typesMatch(c, s, t, kind)) this.inferFromTypes(s, t);
+    }
     return new MatchedTypes(
       matchedSources.length !== 0 ? sources.filter((t) => !matchedSources.includes(t)) : sources,
       matchedTargets.length !== 0 ? targets.filter((t) => !matchedTargets.includes(t)) : targets,
@@ -962,10 +948,17 @@ class InferenceState {
     const c = this.c;
     if ((source.flags & TypeFlags.Conditional) !== 0) {
       const s = source as ConditionalType;
-      this.inferFromTypes(s.checkType, target.checkType);
-      this.inferFromTypes(s.extendsType, target.extendsType);
-      this.inferFromTypes(getTrueTypeFromConditionalType(c, s), getTrueTypeFromConditionalType(c, target));
-      this.inferFromTypes(getFalseTypeFromConditionalType(c, s), getFalseTypeFromConditionalType(c, target));
+      // A source's distributed type parameters infer as the type parameters they were made from.
+      this.inferFromTypes(getNonDistributedTypeParameter(s.checkType), target.checkType);
+      this.inferFromTypes(getNonDistributedTypeParameter(s.extendsType), target.extendsType);
+      this.inferFromTypes(
+        getNonDistributedTypeParameter(getTrueTypeFromConditionalType(c, s)),
+        getTrueTypeFromConditionalType(c, target),
+      );
+      this.inferFromTypes(
+        getNonDistributedTypeParameter(getFalseTypeFromConditionalType(c, s)),
+        getFalseTypeFromConditionalType(c, target),
+      );
     } else {
       const savePriority = this.priority;
       this.priority |= this.contravariant ? InferencePriority.ContravariantConditional : 0;
@@ -1308,9 +1301,43 @@ class InferenceState {
 // ---- Helpers
 
 function getInferenceInfoForType(inferences: InferenceInfo[], t: Type): InferenceInfo | undefined {
-  if ((t.flags & TypeFlags.TypeVariable) !== 0)
-    for (const inference of inferences) if (t === inference.typeParameter) return inference;
+  if ((t.flags & TypeFlags.TypeVariable) !== 0) {
+    const typeVariable = getNonDistributedTypeParameter(t);
+    for (const inference of inferences) if (typeVariable === inference.typeParameter) return inference;
+  }
   return undefined;
+}
+
+/** Orders types by decreasing depth, then by the regular type ordering. */
+function compareTypesAndDepth(c: Checker, t1: Type, t2: Type): number {
+  const d1 = getTypeDepth(c, t1, 3);
+  const d2 = getTypeDepth(c, t2, 3);
+  if (d1 !== d2) return d2 - d1;
+  return compareTypes(c, t1, t2);
+}
+
+/**
+ * The depth of a type, up to `maxDepth`: one plus the largest type argument depth for generic aliased
+ * types and type references, the largest constituent depth for unions and intersections, and zero
+ * otherwise. The maximum keeps circular types from recursing forever.
+ */
+function getTypeDepth(c: Checker, t: Type, maxDepth: number): number {
+  if (maxDepth !== 0) {
+    if (t.alias !== undefined && t.alias.typeArguments.length !== 0)
+      return getTypeListDepth(c, t.alias.typeArguments, maxDepth - 1) + 1;
+    if ((t.objectFlags & ObjectFlags.Reference) !== 0) {
+      const typeArguments = getTypeArguments(c, t);
+      if (typeArguments.length !== 0) return getTypeListDepth(c, typeArguments, maxDepth - 1) + 1;
+    }
+    if ((t.flags & TypeFlags.UnionOrIntersection) !== 0) return getTypeListDepth(c, typesOf(t), maxDepth);
+  }
+  return 0;
+}
+
+function getTypeListDepth(c: Checker, types: readonly Type[], maxDepth: number): number {
+  let depth = 0;
+  for (const t of types) depth = Math.max(depth, getTypeDepth(c, t, maxDepth));
+  return depth;
 }
 
 function distributedTypes(t: Type): Type[] {
@@ -1559,7 +1586,8 @@ export function isConstTypeVariable(c: Checker, t: Type | undefined, depth: numb
 export function isMutableArrayLikeType(c: Checker, t: Type): boolean {
   return (
     isMutableArrayOrTuple(c, t) ||
-    ((t.flags & (TypeFlags.Any | TypeFlags.Nullable)) === 0 && isTypeAssignableTo(c, t, c.anyArrayType))
+    ((t.flags & (TypeFlags.Any | TypeFlags.Nullable | TypeFlags.Never)) === 0 &&
+      isTypeAssignableTo(c, t, c.anyArrayType))
   );
 }
 
@@ -1727,10 +1755,15 @@ export function isUnmatchedTemplateLiteralKey(source: Type, target: TemplateLite
 }
 
 /** The types matched by `target`'s placeholders in `source`, or undefined if it doesn't match. */
+/**
+ * The types that `source` gives the placeholders of `target`. A placeholder of a source template with the same
+ * texts keeps its type where `compareTypes` (assignability by default) relates their base constraints.
+ */
 export function inferTypesFromTemplateLiteralType(
   c: Checker,
   source: Type,
   target: TemplateLiteralType,
+  compareTypes?: TemplateTypeComparer,
 ): Type[] | undefined {
   if ((source.flags & TypeFlags.StringLiteral) !== 0) {
     // Most string literals fail the start and end text test; apply it before building the
@@ -1744,11 +1777,13 @@ export function inferTypesFromTemplateLiteralType(
       const result: Type[] = [];
       for (let i = 0; i < s.types.length; i++) {
         const t = s.types[i]!;
-        result.push(
-          isTypeAssignableTo(c, getBaseConstraintOrType(c, t), getBaseConstraintOrType(c, target.types[i]!))
-            ? t
-            : getStringLikeTypeForType(c, t),
-        );
+        const sourceConstraint = getBaseConstraintOrType(c, t);
+        const targetConstraint = getBaseConstraintOrType(c, target.types[i]!);
+        const related =
+          compareTypes !== undefined
+            ? compareTypes(sourceConstraint, targetConstraint)
+            : isTypeAssignableTo(c, sourceConstraint, targetConstraint);
+        result.push(related ? t : getStringLikeTypeForType(c, t));
       }
       return result;
     }
@@ -2208,7 +2243,12 @@ export function getInferredType(c: Checker, context: InferenceContext, index: nu
   const constraint = getConstraintOfTypeParameter(c, inference.typeParameter);
   if (constraint !== undefined) {
     const instantiatedConstraint = instantiateType(c, constraint, context.nonFixingMapper);
-    if (inferredType !== undefined) {
+    // A pure return type inference is still filtered in a recursive call resolution: its result can become
+    // the type of the enclosing declaration.
+    if (
+      inferredType !== undefined &&
+      ((context.flags & InferenceFlags.NoConstraintChecks) === 0 || inference.priority === InferencePriority.ReturnType)
+    ) {
       const constraintWithThis = getTypeWithThisArgument(c, instantiatedConstraint, inferredType, false);
       if (context.compareTypes.compare(inferredType, constraintWithThis, false) === Ternary.False) {
         // A pure return type inference may still succeed without the constituents the constraint rejects.
