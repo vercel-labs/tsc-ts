@@ -5170,8 +5170,9 @@ export class Parser extends ScannerErrorReporter {
     if (this.token() === SyntaxKind.EqualsToken) {
       if (this.scanJsxAttributeValue() === SyntaxKind.StringLiteral) return this.parseLiteralExpression(false);
       if (this.token() === SyntaxKind.OpenBraceToken) return this.parseJsxExpression(true);
+      // An attribute value is a single element: sibling-element recovery must not wrap it in a binary expression.
       if (this.token() === SyntaxKind.LessThanToken)
-        return this.parseJsxElementOrSelfClosingElementOrFragment(true, -1, undefined, false);
+        return this.parseJsxElementOrSelfClosingElementOrFragment(true, -1, undefined, true);
       this.parseErrorAtCurrentToken(Diagnostics.X_or_JSX_element_expected);
     }
     return undefined;

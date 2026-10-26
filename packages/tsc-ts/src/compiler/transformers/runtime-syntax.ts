@@ -56,6 +56,7 @@ import {
 import type { EmitResolver } from './emit-resolver.js';
 import { ConstantKind, type Evaluation } from './reference-resolver.js';
 import { type TypeScriptFacts } from './subtree-facts.js';
+import { nodeIsDecorated } from './decorator-utilities.js';
 import { Transformer } from './transformer.js';
 import {
   getInnermostModuleDeclaration,
@@ -65,6 +66,7 @@ import {
   isInstantiatedModule,
   isParameterPropertyDeclaration,
   isSameNode,
+  modifierFlagsOf,
 } from './utilities.js';
 
 const typeScriptModifiers =
@@ -577,7 +579,10 @@ export class RuntimeSyntax extends Transformer {
     let name = visitedName instanceof Identifier ? (visitedName as Identifier) : undefined;
     if (
       name === undefined &&
-      (exported || childIsDecorated(this.options.experimentalDecorators === true, node.members))
+      (exported ||
+        childIsDecorated(this.options.experimentalDecorators === true, node.members) ||
+        ((modifierFlagsOf(node) & exportDefault) !== exportDefault &&
+          nodeIsDecorated(this.options.experimentalDecorators === true, node, undefined, undefined)))
     )
       name = this.factory.createGeneratedNameForNode(node, 0, '', '');
     const updated: Node = this.factory.updateClassDeclaration(

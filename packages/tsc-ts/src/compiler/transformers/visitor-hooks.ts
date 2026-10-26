@@ -144,11 +144,16 @@ export abstract class VisitorHooks {
     if (declarations.length === 0) return updated;
     const factory = this.factory;
     if (updated === undefined) return factory.createBlock(declarations, true);
-    if (!(updated instanceof Block))
-      return factory.createBlock(
-        this.context.mergeEnvironment([factory.createReturnStatement(updated)], declarations),
-        false,
+    if (!(updated instanceof Block)) {
+      // The return statement takes the expression's range, so its comments are emitted once, before `return`.
+      this.context.addEmitFlags(updated, EmitFlags.NoComments);
+      const block = this.context.convertToFunctionBlock(updated, false);
+      return factory.updateBlock(
+        block,
+        this.context.mergeEnvironmentList(block.statements, declarations),
+        block.multiLine,
       );
+    }
     return factory.updateBlock(
       updated,
       this.context.mergeEnvironmentList(updated.statements, declarations),

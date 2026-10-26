@@ -28,7 +28,6 @@ import {
   getParameters,
   ArrayLiteralExpression,
   SpreadElement,
-  ReturnStatement,
   AwaitExpression,
   QualifiedName,
   Token,
@@ -721,7 +720,8 @@ export class AsyncFunctions extends Transformer {
     } else {
       result = createAwaiterHelper(factory, hasLexicalThis, argumentsExpression, innerParameters, asyncBody);
       if (captureLexicalArguments && this.argumentsUsed) {
-        const block = this.convertToFunctionBlock(result);
+        const block = context.convertToFunctionBlock(result, true);
+        if (!(result instanceof Block)) context.setOriginal(block.statements.nodes[0]!, result);
         result = factory.updateBlock(
           block,
           context.mergeEnvironmentList(block.statements, [this.createCaptureArgumentsStatement()]),
@@ -759,21 +759,6 @@ export class AsyncFunctions extends Transformer {
     block.statements.end = body.end;
     block.pos = body.pos;
     block.end = body.end;
-    return block;
-  }
-
-  private convertToFunctionBlock(node: Node): Block {
-    if (node instanceof Block) return node as Block;
-    const factory = this.factory;
-    const statement = factory.created(new ReturnStatement(node));
-    statement.pos = node.pos;
-    statement.end = node.end;
-    this.context.setOriginal(statement, node);
-    const block = factory.createBlock([statement], true);
-    block.statements.pos = node.pos;
-    block.statements.end = node.end;
-    block.pos = node.pos;
-    block.end = node.end;
     return block;
   }
 

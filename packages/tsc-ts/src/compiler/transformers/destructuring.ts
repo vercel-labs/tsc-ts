@@ -674,9 +674,9 @@ function convertToArrayElement(visitor: VisitorHooks, element: BindingElement): 
   const factory = visitor.factory;
   const name = element.name;
   if (name === undefined) return converted(visitor, factory.created(new OmittedExpression()), element);
-  if (element.dotDotDotToken !== undefined)
-    return converted(visitor, factory.created(new SpreadElement(name)), element);
   const target = convertBindingNameToTarget(visitor, name);
+  if (element.dotDotDotToken !== undefined)
+    return converted(visitor, factory.created(new SpreadElement(target)), element);
   if (element.initializer === undefined) return target;
   return converted(visitor, factory.createAssignment(target, element.initializer), element);
 }
