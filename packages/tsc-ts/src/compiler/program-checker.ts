@@ -403,11 +403,11 @@ export class CheckedProgram {
     return sortAndDeduplicateDiagnostics([...own, ...parallel]);
   }
 
-  /** Whether `file`'s bind and check diagnostics are reported. */
-  skipTypeChecking(file: SourceFile): boolean {
+  /** Whether `file`'s bind and check diagnostics are skipped; `ignoreNoCheck` leaves `noCheck` out. */
+  skipTypeChecking(file: SourceFile, ignoreNoCheck = false): boolean {
     const options = this.program.options;
     return (
-      options.noCheck === true ||
+      (!ignoreNoCheck && options.noCheck === true) ||
       (options.skipLibCheck === true && file.isDeclarationFile) ||
       (options.skipDefaultLibCheck === true && this.program.isSourceFileDefaultLibrary(file.path)) ||
       this.program.getProjectReferenceFromSource(file.path) !== undefined ||

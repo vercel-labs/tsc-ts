@@ -139,6 +139,28 @@ export function isRootedDiskPath(path: string): boolean {
   return getEncodedRootLength(path) > 0;
 }
 
+/**
+ * Whether Windows may resolve `path` over the network: a UNC path (`//server/share`), a Win32 device path
+ * (`//?/…`, `//./…`) or an NT object path (`/??/…`), with either separator. Device and object paths count even
+ * for local volumes, since their `UNC` and `GLOBALROOT` forms reach the network redirector. Accessing one can
+ * make Windows authenticate to an arbitrary host, so such paths are never accessed on any platform.
+ */
+export function isNetworkPath(path: string): boolean {
+  if (path.length < 2 || !isAnyDirectorySeparator(path.charCodeAt(0))) return false;
+  if (isAnyDirectorySeparator(path.charCodeAt(1))) return true;
+  return (
+    path.length >= 3 &&
+    path.charCodeAt(1) === 0x3f &&
+    path.charCodeAt(2) === 0x3f &&
+    (path.length === 3 || isAnyDirectorySeparator(path.charCodeAt(3)))
+  );
+}
+
+/** Whether a path written in a config or on the command line names a network location once resolved. */
+export function isNetworkPathValue(value: string, basePath: string): boolean {
+  return isNetworkPath(getNormalizedAbsolutePath(value, basePath));
+}
+
 export function pathIsAbsolute(path: string): boolean {
   return getEncodedRootLength(path) !== 0;
 }
@@ -370,8 +392,6 @@ function isNonDotDotPrefix(normalized: string, rootLength: number): boolean {
 /** Removes `.`, `..` and duplicate separators, keeping a trailing separator. */
 export function normalizePath(path: string): string {
   path = normalizeSlashes(path);
-  const simple = simpleNormalizePath(path);
-  if (simple !== undefined) return simple;
   const normalized = getNormalizedAbsolutePath(path, '');
   return normalized !== '' && hasTrailingDirectorySeparator(path)
     ? ensureTrailingDirectorySeparator(normalized)

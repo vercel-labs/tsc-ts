@@ -42,7 +42,7 @@ import {
   takePreparedFile,
 } from './parallel-parse.js';
 import type { PackageJsonLookup } from './package-json.js';
-import { parseSourceFile } from './parser.js';
+import { parseSourceFile, getScriptKindFromFileName } from './parser.js';
 import { mark } from './timeline.js';
 import {
   combinePaths,
@@ -59,6 +59,7 @@ import {
   supportedTSExtensionsWithJsonFlat,
   toFileNameLowerCase,
   toPath,
+  isNetworkPath,
 } from './path.js';
 import {
   getDefaultLibFileName,
@@ -141,7 +142,10 @@ export class CompilerHost extends ModuleResolutionHost {
     if (prepared !== undefined) return prepared;
     const text = this.fs.readFile(fileName);
     if (text === undefined) return undefined;
-    return parseSourceFile(fileName, text, new ParseOptions(path, ScriptKind.Unknown, externalModuleIndicatorOptions));
+    // A file without a known extension (with allowNonTsExtensions) parses as TypeScript.
+    const kind = getScriptKindFromFileName(fileName);
+    const scriptKind = kind === ScriptKind.Unknown ? ScriptKind.TS : kind;
+    return parseSourceFile(fileName, text, new ParseOptions(path, scriptKind, externalModuleIndicatorOptions));
   }
 
   /** The config of a referenced project, or `undefined` if it can't be read. */
@@ -247,6 +251,8 @@ class ParseTask {
   subTasks: ParseTask[] | undefined = undefined;
   loaded = false;
   startedSubTasks = false;
+  /** A root file name that resolved to no supported file: the task only carries its processing diagnostic. */
+  failedLookup = false;
   metadata: SourceFileMetadata = libFileMetadata;
   resolutionsInFile: ModeAwareCache<ResolvedModule> | undefined = undefined;
   resolutionsTrace: MessageWithArgs[] | undefined = undefined;
@@ -932,6 +938,7 @@ export class FileLoader {
       return;
     }
     const task = new ParseTask(absolute, undefined, reason, false, false, false, undefined);
+    task.failedLookup = true;
     task.addProcessingDiagnostic(
       ProcessingDiagnostic.explainingFileInclude('', reason, resolved.message, resolved.args),
     );
@@ -958,6 +965,8 @@ export class FileLoader {
   ): string | ReferenceDiagnostic {
     const allowNonTsExtensions = this.options.allowNonTsExtensions === true;
     const diagnosticFileName = normalizeSlashes(referenceText);
+    if (isNetworkPath(fileName))
+      return new ReferenceDiagnostic(Diagnostics.Network_path_0_is_not_supported, [diagnosticFileName]);
     const fs = this.host.fs;
     if (hasExtension(fileName)) {
       const canonicalFileName = getCanonicalFileName(fileName, fs.useCaseSensitiveFileNames);
@@ -1154,6 +1163,7 @@ export class FileLoader {
       this.loadAutomaticTypeDirectives(task);
       return;
     }
+    if (task.failedLookup) return;
     const redirect = this.mapper.getParseFileRedirect(task.path);
     if (redirect !== '') {
       const redirected = new ParseTask(

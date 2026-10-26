@@ -88,29 +88,6 @@ export enum NewLineKind {
   LF = 2,
 }
 
-export enum WatchFileKind {
-  FixedPollingInterval = 1,
-  PriorityPollingInterval = 2,
-  DynamicPriorityPolling = 3,
-  FixedChunkSizePolling = 4,
-  UseFsEvents = 5,
-  UseFsEventsOnParentDirectory = 6,
-}
-
-export enum WatchDirectoryKind {
-  UseFsEvents = 1,
-  FixedPollingInterval = 2,
-  DynamicPriorityPolling = 3,
-  FixedChunkSizePolling = 4,
-}
-
-export enum PollingKind {
-  FixedInterval = 1,
-  PriorityInterval = 2,
-  DynamicPriority = 3,
-  FixedChunkSize = 4,
-}
-
 /**
  * Compiler options, in tsgo's field order (which `--showConfig` follows).
  *
@@ -185,6 +162,8 @@ export interface CompilerOptions {
   outDir?: string;
   /** Substitutions are `undefined` where the config gave a non-array. */
   paths?: Map<string, string[] | undefined>;
+  /** Read only for `--showConfig`; plugins are not loaded. */
+  plugins?: PluginImport[];
   preserveConstEnums?: boolean;
   preserveSymlinks?: boolean;
   project?: string;
@@ -250,16 +229,6 @@ export interface CompilerOptions {
   checkers?: number;
 }
 
-export interface WatchOptions {
-  watchInterval?: number;
-  watchFile?: WatchFileKind;
-  watchDirectory?: WatchDirectoryKind;
-  fallbackPolling?: PollingKind;
-  synchronousWatchDirectory?: boolean;
-  excludeDirectories?: string[];
-  excludeFiles?: string[];
-}
-
 export interface BuildOptions {
   dry?: boolean;
   force?: boolean;
@@ -285,6 +254,11 @@ export type OptionValue = boolean | number | string | string[] | null;
 
 /** A compiler option value as stored in `CompilerOptions`, except `paths`. */
 export type CompilerOptionValue = boolean | number | string | string[];
+
+/** An entry of `plugins`: its `name`, or `''` when it has no string name. */
+export class PluginImport {
+  constructor(readonly name: string) {}
+}
 
 /** Compiler option names in field order. */
 export const compilerOptionNames: readonly string[] = [
@@ -355,6 +329,7 @@ export const compilerOptionNames: readonly string[] = [
   'noUncheckedSideEffectImports',
   'outDir',
   'paths',
+  'plugins',
   'preserveConstEnums',
   'preserveSymlinks',
   'project',
@@ -1002,6 +977,7 @@ export function mergeCompilerOptions(
   );
   target.outDir = merged(source.outDir, target.outDir, nulls, 'outDir');
   target.paths = merged(source.paths, target.paths, nulls, 'paths');
+  target.plugins = merged(source.plugins, target.plugins, nulls, 'plugins');
   target.preserveConstEnums = merged(source.preserveConstEnums, target.preserveConstEnums, nulls, 'preserveConstEnums');
   target.preserveSymlinks = merged(source.preserveSymlinks, target.preserveSymlinks, nulls, 'preserveSymlinks');
   target.project = merged(source.project, target.project, nulls, 'project');
@@ -1420,32 +1396,6 @@ export function getCompilerOption(options: CompilerOptions, name: string): Compi
       return options.checkers;
   }
   return undefined;
-}
-
-export function setWatchOption(options: WatchOptions, name: string, value: OptionValue): void {
-  switch (name) {
-    case 'watchInterval':
-      options.watchInterval = numberValue(value);
-      break;
-    case 'watchFile':
-      if (value !== null) options.watchFile = numberValue(value);
-      break;
-    case 'watchDirectory':
-      if (value !== null) options.watchDirectory = numberValue(value);
-      break;
-    case 'fallbackPolling':
-      if (value !== null) options.fallbackPolling = numberValue(value);
-      break;
-    case 'synchronousWatchDirectory':
-      options.synchronousWatchDirectory = value === null ? undefined : value === true;
-      break;
-    case 'excludeDirectories':
-      options.excludeDirectories = stringList(value);
-      break;
-    case 'excludeFiles':
-      options.excludeFiles = stringList(value);
-      break;
-  }
 }
 
 export function setBuildOption(options: BuildOptions, name: string, value: OptionValue): void {

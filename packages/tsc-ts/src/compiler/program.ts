@@ -85,6 +85,7 @@ import {
   pathIsRelative,
   toFileNameLowerCase,
   toPath,
+  isNetworkPathValue,
 } from './path.js';
 import {
   getDefaultResolutionModeForFile,
@@ -919,6 +920,8 @@ export class Program implements OutputPathsHost {
               Diagnostics.Non_relative_paths_are_not_allowed_Did_you_forget_a_leading_Slash,
               [],
             );
+          } else if (isNetworkPathValue(substitution, options.pathsBasePath ?? this.currentDirectory)) {
+            this.pathsValueDiagnostic(key, i, Diagnostics.Network_path_0_is_not_supported, [substitution]);
           }
         }
       }

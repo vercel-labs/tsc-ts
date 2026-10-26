@@ -1,7 +1,7 @@
 // Emits JavaScript and declarations for source files: runs the transforms, prints, and writes
 // the output, source map and `//# sourceMappingURL` comment.
 import { ScriptKind, type SourceFile } from './ast.js';
-import { compareDiagnostics, type Diagnostic } from './diagnostics.js';
+import { compareDiagnostics, equalDiagnostics, type Diagnostic } from './diagnostics.js';
 import { type CompilerOptions, JsxEmit, NewLineKind, getEmitScriptTarget, getIsolatedModules } from './options.js';
 import { LanguageVariant } from './types.js';
 import { type OutputPathsHost, getOutputPathsFor } from './output-paths.js';
@@ -214,9 +214,30 @@ function emitDeclarationFile(
     emitSourceMaps,
     false,
     result,
-    // Sorted, as tsgo's emitter diagnostics are; the order is part of the file's signature in build info.
-    diagnostics.length > 1 ? diagnostics.toSorted(compareDiagnostics) : diagnostics,
+    emitterDiagnostics(diagnostics),
   );
+}
+
+/**
+ * Declaration diagnostics as tsgo's emitter collects them: sorted, without repeats of an equal
+ * diagnostic. They are part of the file's signature in build info.
+ */
+function emitterDiagnostics(diagnostics: readonly Diagnostic[]): readonly Diagnostic[] {
+  if (diagnostics.length < 2) return diagnostics;
+  const sorted = diagnostics.toSorted(compareDiagnostics);
+  const result: Diagnostic[] = [];
+  for (const diagnostic of sorted) {
+    // Equal diagnostics compare as 0, so a repeat is among the last ones kept that compare as 0.
+    let repeated = false;
+    for (let i = result.length - 1; i >= 0 && compareDiagnostics(result[i], diagnostic) === 0; i--) {
+      if (equalDiagnostics(result[i], diagnostic)) {
+        repeated = true;
+        break;
+      }
+    }
+    if (!repeated) result.push(diagnostic);
+  }
+  return result;
 }
 
 function getScriptTransformers(host: EmitHost, context: EmitContext, file: SourceFile): Transformer[] {

@@ -108,7 +108,7 @@ function skipReason(option, value) {
 function optionCases() {
   const cases = [];
   const seen = new Set();
-  for (const option of [...decls.optionDeclarations, ...decls.optionsForWatch]) {
+  for (const option of decls.optionDeclarations) {
     const key = option.name + (option.shortName ?? '');
     if (seen.has(key)) continue;
     seen.add(key);
@@ -134,8 +134,23 @@ function optionCases() {
       if (i === 0) cases.push({ args: [flag], skip: skipReason(option, '') });
     });
   }
+  // TypeScript 7.1 removed the watch options: they are unknown options, with and without --build.
+  for (const name of removedWatchOptions) {
+    cases.push({ args: ['--watch', '--' + name] }, { args: ['--showConfig', '--' + name, '1', 'a.ts'] });
+    cases.push({ args: ['-b', '--watch', '--' + name] });
+  }
   return cases;
 }
+
+const removedWatchOptions = [
+  'watchInterval',
+  'watchFile',
+  'watchDirectory',
+  'fallbackPolling',
+  'synchronousWatchDirectory',
+  'excludeDirectories',
+  'excludeFiles',
+];
 
 /** @returns {Case[]} */
 function buildCases() {
@@ -143,10 +158,18 @@ function buildCases() {
   const modes = ['-b', '--b', '-build', '--build', '-B', '--BUILD', '-Build'];
   for (const mode of modes) cases.push({ args: [mode, '--help'] }, { args: [mode, '-h'] }, { args: [mode, '-?'] });
   cases.push({ args: ['-b'], seam: true }, { args: ['--build', 'p1', 'p2'], seam: true });
-  for (const option of [...decls.buildOptionDeclarations, ...decls.optionsForWatch]) {
+  for (const option of decls.buildOptionDeclarations) {
     if (option.name === 'locale' || option.name === 'pprofDir') continue;
     for (const flag of spellings(option)) {
-      for (const value of valuesFor(option).slice(0, 6)) cases.push({ args: ['-b', flag, value, '--help'] });
+      for (const value of valuesFor(option).slice(0, 6)) {
+        // tsgo 7.1 panics on a relative profile or trace path with --build.
+        const relativeProfile =
+          (option.name === 'generateCpuProfile' || option.name === 'generateTrace') &&
+          value !== '' &&
+          !value.startsWith('/');
+        const skip = relativeProfile ? 'tsgo panics on a relative profile path with --build' : undefined;
+        cases.push({ args: ['-b', flag, value, '--help'], skip });
+      }
       cases.push({ args: ['-b', '--help', flag] });
     }
   }
@@ -273,6 +296,7 @@ function miscCases() {
     'nested.txt': '@basic.txt --showConfig x.ts\n',
     'bad.txt': '--foo --target bogus\n',
     'end.txt': '--strict',
+    'self.txt': '@self.txt --showConfig x.ts\n',
   };
   const files = { ...responseFiles, 'dir/x': '' };
   cases.push(
@@ -289,7 +313,8 @@ function miscCases() {
     { args: ['@'], files },
     { args: ['--showConfig', 'x.ts', '@basic.txt', '@basic.txt'], files },
     { args: ['-b', '@basic.txt', '--help'], files },
-    { args: ['@end.txt', '--showConfig', 'x.ts'], files, skip: 'tsgo panics on a response file ending in an argument' },
+    { args: ['@end.txt', '--showConfig', 'x.ts'], files },
+    { args: ['@self.txt'], files },
   );
 
   // --init
@@ -316,7 +341,7 @@ function miscCases() {
     { args: ['--init'], files: { 'tsconfig.json': '{}' } },
     { args: ['--init', '--pretty'], files: { 'tsconfig.json': '{}' } },
     { args: ['--init', '--target', 'null'], skip: 'tsgo panics writing a null enum' },
-    { args: ['--init', '--watchFile', 'usefsevents'], skip: 'tsgo panics writing a watch option' },
+    { args: ['--init', '--watchFile', 'usefsevents'] },
   );
 
   // A tsconfig.json in the working directory.

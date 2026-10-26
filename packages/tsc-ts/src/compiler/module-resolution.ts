@@ -715,8 +715,9 @@ class ResolutionState {
             this.trace(Diagnostics.Directory_0_does_not_exist_skipping_all_lookups_in_it, typeRoot);
           continue;
         }
-        if (fromConfig) {
-          // Configured type roots resolve as files or directories, like modules.
+        // Configured type roots resolve as files or directories, like modules; a name ending in a separator
+        // only as a directory.
+        if (fromConfig && !hasTrailingDirectorySeparator(candidate)) {
           const fromFile = this.loadModuleFromFile(Extensions.Declaration, candidate);
           if (fromFile !== undefined) {
             this.setPackageIdFromNodeModulesPath(fromFile);
@@ -781,10 +782,12 @@ class ResolutionState {
           this.trace(Diagnostics.Directory_0_does_not_exist_skipping_all_lookups_in_it, typeRoot);
         continue;
       }
-      const fromFile = this.loadModuleFromFile(Extensions.Declaration, candidate);
-      if (fromFile !== undefined) {
-        this.setPackageIdFromNodeModulesPath(fromFile);
-        return fromFile;
+      if (!hasTrailingDirectorySeparator(candidate)) {
+        const fromFile = this.loadModuleFromFile(Extensions.Declaration, candidate);
+        if (fromFile !== undefined) {
+          this.setPackageIdFromNodeModulesPath(fromFile);
+          return fromFile;
+        }
       }
       const fromDirectory = this.loadNodeModuleFromDirectory(Extensions.Declaration, candidate, true);
       if (fromDirectory !== undefined) return fromDirectory;

@@ -38,6 +38,7 @@ import { ModuleResolutionHost, resolveConfig } from './module-resolution.js';
 import {
   compilerOptionsByName,
   OptionNameMap,
+  optionsForCompiler,
   typeAcquisitionDeclarations,
   type OptionDeclaration,
 } from './option-declarations.js';
@@ -45,6 +46,7 @@ import {
   getAllowJS,
   getResolveJsonModule,
   mergeCompilerOptions,
+  PluginImport,
   setCompilerOption,
   setTypeAcquisitionOption,
   type CompilerOptions,
@@ -72,6 +74,7 @@ import {
   getPathFromPathComponents,
   hasJSFileExtension,
   isDeclarationFileName,
+  isNetworkPathValue,
   isRootedDiskPath,
   normalizePath,
   normalizeSlashes,
@@ -452,6 +455,33 @@ export function findPropertyAssignment(
   return undefined;
 }
 
+/**
+ * A diagnostic at property `propertyName` of the `index`th project reference: at its value, else at the
+ * reference, else a compiler diagnostic. As in tsgo, `index` counts the references the JSON value kept.
+ */
+function diagnosticAtProjectReferenceProperty(
+  file: SourceFile | undefined,
+  index: number,
+  propertyName: string,
+  message: DiagnosticMessage,
+  ...args: string[]
+): Diagnostic {
+  let node: Node | undefined;
+  const root = getTsConfigObjectLiteral(file);
+  if (root !== undefined)
+    for (const property of root.properties.nodes) {
+      if (!(property instanceof PropertyAssignment) || propertyNameText(property.name) !== 'references') continue;
+      const initializer = (property as PropertyAssignment).initializer;
+      if (!(initializer instanceof ArrayLiteralExpression)) continue;
+      const elements = initializer.elements.nodes;
+      if (index >= elements.length || !(elements[index] instanceof ObjectLiteralExpression)) continue;
+      const element = elements[index] as ObjectLiteralExpression;
+      node = findPropertyAssignment(element, propertyName)?.initializer ?? element;
+      break;
+    }
+  return diagnosticAtNode(file, node, message, ...args);
+}
+
 /** The string literal `value` in the array of the root property `key`. */
 export function findTsConfigArrayElement(
   file: SourceFile | undefined,
@@ -490,8 +520,17 @@ export function propertyNameText(name: Node): string | undefined {
 
 // ---- Spec validation
 
-/** Rejects specs ending in `**` (for `include`) and `..` after a `**`. */
-export function specToDiagnostic(spec: string, disallowTrailingRecursion: boolean): DiagnosticMessage | undefined {
+/**
+ * Rejects specs that resolve to a network root (`basePath` given), specs ending in `**` (for `include`) and `..`
+ * after a `**`. `?` is a wildcard in specs, so only UNC and device roots name a network path there.
+ */
+export function specToDiagnostic(
+  spec: string,
+  disallowTrailingRecursion: boolean,
+  basePath?: string,
+): DiagnosticMessage | undefined {
+  if (basePath !== undefined && getNormalizedAbsolutePath(spec, basePath).startsWith('//'))
+    return Diagnostics.Network_path_0_is_not_supported;
   if (disallowTrailingRecursion) {
     const trimmed = spec.endsWith('/') ? spec.slice(0, -1) : spec;
     if (trimmed === '**' || trimmed.endsWith('/**')) {
@@ -509,6 +548,7 @@ export function specToDiagnostic(spec: string, disallowTrailingRecursion: boolea
 function validateSpecs(
   specs: readonly JsonValue[],
   disallowTrailingRecursion: boolean,
+  basePath: string,
   file: SourceFile,
   key: string,
   errors: Diagnostic[],
@@ -516,7 +556,7 @@ function validateSpecs(
   const result: string[] = [];
   for (const spec of specs) {
     if (typeof spec !== 'string') continue;
-    const message = specToDiagnostic(spec, disallowTrailingRecursion);
+    const message = specToDiagnostic(spec, disallowTrailingRecursion, basePath);
     if (message === undefined) result.push(spec);
     else errors.push(diagnosticAtNode(file, findTsConfigArrayElement(file, key, spec), message, spec));
   }
@@ -763,6 +803,8 @@ class ConfigFileConverter {
   readonly options: CompilerOptions;
   readonly typeAcquisition: TypeAcquisition = {};
   extendedConfigPaths: string[] | undefined = undefined;
+  /** Names of compiler options written at the root instead of in `compilerOptions`. */
+  readonly rootCompilerOptions: Node[] = [];
 
   constructor(
     private readonly parser: ConfigParser,
@@ -797,7 +839,9 @@ class ConfigFileConverter {
         }
       }
       const name = getBaseFileName(this.file.fileName) === 'jsconfig.json' ? 'jsconfig.json' : 'tsconfig.json';
-      this.errors.push(createCompilerDiagnostic(Diagnostics.The_root_value_of_a_0_file_must_be_an_object, name));
+      this.errors.push(
+        diagnosticAtNode(this.file, root, Diagnostics.The_root_value_of_a_0_file_must_be_an_object, name),
+      );
       return new JsonObject();
     }
     return this.convertObject(root, rootDeclaration);
@@ -932,10 +976,16 @@ class ConfigFileConverter {
           this.file,
           this.errors,
         );
-      } else if (option === undefined && key === 'excludes') {
-        this.errors.push(
-          diagnosticAtNode(this.file, property.name, Diagnostics.Unknown_option_excludes_Did_you_mean_exclude),
-        );
+      } else if (option === undefined) {
+        if (key === 'excludes')
+          this.errors.push(
+            diagnosticAtNode(this.file, property.name, Diagnostics.Unknown_option_excludes_Did_you_mean_exclude),
+          );
+        for (const compilerOption of optionsForCompiler)
+          if (compilerOption.name === key) {
+            this.rootCompilerOptions.push(property.name);
+            break;
+          }
       }
     }
   }
@@ -947,6 +997,14 @@ function setCompilerOptionFromJson(options: CompilerOptions, option: OptionDecla
     const paths = new Map<string, string[] | undefined>();
     for (const [key, substitutions] of value.entries) paths.set(key, stringItems(substitutions));
     options.paths = paths;
+    return;
+  }
+  if (option.name === 'plugins') {
+    if (!(value instanceof JsonArray)) return;
+    options.plugins = value.items.map((item) => {
+      const name = item instanceof JsonObject ? item.entries.get('name') : undefined;
+      return new PluginImport(typeof name === 'string' ? name : '');
+    });
     return;
   }
   setCompilerOption(options, option.name, toOptionValue(option, value));
@@ -1063,20 +1121,41 @@ export class ConfigParser {
     let validatedIncludeBeforeSubstitution: string[] = [];
     let validatedInclude: string[] = [];
     if (include.items !== undefined) {
-      validatedIncludeBeforeSubstitution = validateSpecs(include.items, true, file.sourceFile, 'include', errors);
+      validatedIncludeBeforeSubstitution = validateSpecs(
+        include.items,
+        true,
+        basePathForFileNames,
+        file.sourceFile,
+        'include',
+        errors,
+      );
       validatedInclude =
         substituteConfigDirInList(validatedIncludeBeforeSubstitution, basePathForFileNames) ??
         validatedIncludeBeforeSubstitution;
     }
     let validatedExclude: string[] = [];
     if (exclude.items !== undefined) {
-      validatedExclude = validateSpecs(exclude.items, false, file.sourceFile, 'exclude', errors);
+      validatedExclude = validateSpecs(exclude.items, false, basePathForFileNames, file.sourceFile, 'exclude', errors);
       validatedExclude = substituteConfigDirInList(validatedExclude, basePathForFileNames) ?? validatedExclude;
     }
     let validatedFilesBeforeSubstitution: string[] = [];
     let validatedFiles: string[] = [];
     if (files.items !== undefined) {
-      for (const spec of files.items) if (typeof spec === 'string') validatedFilesBeforeSubstitution.push(spec);
+      for (const spec of files.items) {
+        if (typeof spec !== 'string') continue;
+        if (isNetworkPathValue(spec, basePathForFileNames)) {
+          errors.push(
+            diagnosticAtNode(
+              file.sourceFile,
+              findTsConfigArrayElement(file.sourceFile, 'files', spec),
+              Diagnostics.Network_path_0_is_not_supported,
+              spec,
+            ),
+          );
+          continue;
+        }
+        validatedFilesBeforeSubstitution.push(spec);
+      }
       validatedFiles =
         substituteConfigDirInList(validatedFilesBeforeSubstitution, basePathForFileNames) ??
         validatedFilesBeforeSubstitution;
@@ -1118,11 +1197,60 @@ export class ConfigParser {
 
     const projectReferences: ProjectReference[] = [];
     if (references.items !== undefined) {
-      for (const reference of references.items) {
+      const items = references.items;
+      for (let index = 0; index < items.length; index++) {
+        const reference = items[index];
         if (!(reference instanceof JsonObject)) continue;
         const path = reference.entries.get('path');
+        if (typeof path !== 'string') {
+          errors.push(
+            diagnosticAtProjectReferenceProperty(
+              file.sourceFile,
+              index,
+              'path',
+              Diagnostics.Compiler_option_0_requires_a_value_of_type_1,
+              'reference.path',
+              'string',
+            ),
+          );
+          continue;
+        }
+        if (path === '') {
+          errors.push(
+            diagnosticAtProjectReferenceProperty(
+              file.sourceFile,
+              index,
+              'path',
+              Diagnostics.Compiler_option_0_cannot_be_given_an_empty_string,
+              'reference.path',
+            ),
+          );
+          continue;
+        }
+        if (isNetworkPathValue(path, basePathForFileNames)) {
+          errors.push(
+            diagnosticAtProjectReferenceProperty(
+              file.sourceFile,
+              index,
+              'path',
+              Diagnostics.Network_path_0_is_not_supported,
+              path,
+            ),
+          );
+          continue;
+        }
         const circular = reference.entries.get('circular');
-        if (typeof path !== 'string' || path === '') continue;
+        if (circular !== undefined && typeof circular !== 'boolean')
+          errors.push(
+            diagnosticAtProjectReferenceProperty(
+              file.sourceFile,
+              index,
+              'circular',
+              Diagnostics.Compiler_option_0_requires_a_value_of_type_1,
+              'reference.circular',
+              'boolean',
+            ),
+          );
         projectReferences.push(
           new ProjectReference(getNormalizedAbsolutePath(path, basePathForFileNames), path, circular === true),
         );
@@ -1159,6 +1287,17 @@ export class ConfigParser {
 
     const converter = new ConfigFileConverter(this, file.sourceFile, basePath, configFileName, errors);
     const raw = converter.convertRoot();
+    // A compiler option at the root is reported once, unless there's a `compilerOptions` too.
+    const rootOption = converter.rootCompilerOptions.length > 0 ? converter.rootCompilerOptions[0] : undefined;
+    if (rootOption !== undefined && raw instanceof JsonObject && !raw.entries.has('compilerOptions'))
+      errors.push(
+        diagnosticAtNode(
+          file.sourceFile,
+          rootOption,
+          Diagnostics.X_0_should_be_set_inside_the_compilerOptions_object_of_the_config_json_file,
+          propertyNameText(rootOption) ?? '',
+        ),
+      );
     const own = new OwnConfig(raw, converter.options, converter.typeAcquisition, converter.extendedConfigPaths);
     const ownOptions = converter.options;
     // `paths` may be inherited, so remember which directory it is relative to.
@@ -1303,6 +1442,10 @@ export class ConfigParser {
     }
     const validated = validateOptionValue(option, value, valueExpression, file, errors);
     if (validated === null || option.isFilePath !== true || typeof validated !== 'string') return validated;
+    if (isNetworkPathValue(validated, basePath)) {
+      errors.push(diagnosticAtNode(file, valueExpression, Diagnostics.Network_path_0_is_not_supported, validated));
+      return null;
+    }
     let path = normalizeSlashes(validated);
     if (!startsWithConfigDirTemplate(path)) path = getNormalizedAbsolutePath(path, basePath);
     return path === '' ? '.' : path;
@@ -1375,6 +1518,10 @@ export class ConfigParser {
     errors: Diagnostic[],
   ): string {
     extendedConfig = normalizeSlashes(extendedConfig);
+    if (isNetworkPathValue(extendedConfig, basePath)) {
+      errors.push(diagnosticAtNode(file, valueExpression, Diagnostics.Network_path_0_is_not_supported, extendedConfig));
+      return '';
+    }
     if (isRootedDiskPath(extendedConfig) || extendedConfig.startsWith('./') || extendedConfig.startsWith('../')) {
       let path = getNormalizedAbsolutePath(extendedConfig, basePath);
       if (!this.fs.fileExists(path) && !path.endsWith('.json')) {
@@ -1415,9 +1562,10 @@ export class ConfigParser {
     const wildcardJsonFiles = new Map<string, string>();
     const supportedExtensions = getSupportedExtensions(options);
     const extensionsWithJson = getSupportedExtensionsWithJsonIfResolveJsonModule(options);
-    // Keys of literal files are the specs as written, as in tsgo.
+    // Literal files are keyed by path, so `a.ts` and `./a.ts` are one file, also when `include` matches it.
     for (const fileName of specs.validatedFilesSpec) {
-      literalFiles.set(getCanonicalFileName(fileName, cs), getNormalizedAbsolutePath(fileName, basePath));
+      const file = getNormalizedAbsolutePath(fileName, basePath);
+      literalFiles.set(getCanonicalFileName(file, cs), file);
     }
     if (onRootFile !== undefined) for (const fileName of literalFiles.values()) onRootFile(fileName);
 
