@@ -596,7 +596,7 @@ class Decoder {
   createWithChildren(kind: SyntaxKind, common: number): Node {
     switch (kind) {
       case SyntaxKind.QualifiedName:
-        return new QualifiedName(this.required(0), this.requiredIdentifier(1));
+        return new QualifiedName(this.required(0), this.required(1));
       case SyntaxKind.ComputedPropertyName:
         return new ComputedPropertyName(this.required(0));
       case SyntaxKind.Decorator:
