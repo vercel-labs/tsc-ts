@@ -4,6 +4,31 @@
 
 <!-- release:start -->
 
+## 0.0.10
+
+### Highlights
+
+- **Faster builds with less memory:** compared with 0.0.9, full builds of VS Code at `--checkers 1` are 1.66x faster with `-p` (41.3 s to 24.5 s) and with `-b` (42.7 s to 25.7 s), and peak RSS drops from 4.18 GB to 3.28 GB. Every check, emit and `-b` build of the nine benchmark projects is faster at `--checkers 1` and 16 and uses less peak memory. Output is the same, including every emitted file.
+- **Emit on threads at `--checkers 1`:** threads emit JavaScript, and a declaration thread emits declarations, while the main thread checks. This applies to `-p` builds, to incremental programs without build info, and to `-b` projects that emit every file. Files with decorator metadata are emitted on the emit threads with type serialization answers recorded by the checker. Outputs, `.tsbuildinfo` files and diagnostics are the same as with one thread.
+- **Declaration thread at 2 to 8 checkers:** with declarations on, the checker threads emit JavaScript and the declaration thread emits declarations while the program is checked, so 2 to 8 checkers take 5 to 7% less wall time. It runs only with a CPU to spare, and 16 checkers run as before.
+- **Faster checking:** tsc-ts is now built with scriptc 0.4.5 and a profile collected with it on the current sources. Hot checker paths also skip work whose result is already known: identity checks of types that may simplify compare their normal forms first, and one-property object literals get no name table. Compared with 0.0.9, check-only builds are 7 to 10% faster at `--checkers 1` on four of the nine benchmark projects and at least 10% faster on the other five, and at least 10% faster on seven of them at `--checkers 16`. Output is the same.
+- **Shorter work around checker threads:** the main thread plans the check from the imports the loader recorded, and sorts diagnostics by file rank. Checker threads send their diagnostics already formatted. A Sentry check at `--checkers 16` takes 1.8% less wall time. Parse threads publish each file right after binding it, and chunks of files for parse threads are bounded by their text.
+- **Faster emit:** the printer skips comment lookups in source ranges that hold no comment, and returns an identifier's text without slicing the source when the two are equal. Output files are written before their directory is created. VS Code's full build at `--checkers 16` takes 2% less wall time, with 11% less emit CPU.
+- **API:**
+  - `tsc-ts --api --listen <path>` on Linux and macOS serves the API to one client at a time on a Unix socket (mode 0600) and keeps parsed files between clients. Parsed files' encodings are also kept between clients.
+  - The server exits after `--idle-exit` seconds without a client (default 60), or when its memory grows past `TSC_TS_LISTEN_MEMORY` megabytes or 2.5 times its size after the first client.
+  - `--default-libraries-from-disk` reads the default library files from the server's library directory instead of through `--callbacks`.
+
+### Behavior changes
+
+- `--checkers` counts only the checkers that check. The declaration thread is added to them where it runs.
+
+### Fixes
+
+- With checker threads, global diagnostics found while emitting declarations, such as TS2589 from serializing a type, are no longer reported, as with one checker. Global diagnostics found while checking files are still reported.
+
+<!-- release:end -->
+
 ## 0.0.9
 
 ### Highlights
@@ -12,8 +37,6 @@
 - **Less memory:** speculative parses check tokens instead of building nodes they discard, and parse and loader tasks create their lists on first use. Peak RSS on VS Code is about 120 MB lower with `--checkers 1`, with wall time unchanged.
 - **Faster symbol lookups:** the checker probes its merged-symbol map only for symbols that were merged, about 1% faster on VS Code with `--checkers 1`.
 - **API:** nine methods answer a batch of locations, signatures, types or symbols in one request, and `getDiagnosticsOfCheckedFiles` checks only the listed files and answers their diagnostics and the global ones.
-
-<!-- release:end -->
 
 ## 0.0.8
 
