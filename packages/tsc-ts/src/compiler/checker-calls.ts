@@ -43,6 +43,7 @@ import {
   isOptionalChain,
   isOutermostOptionalChain,
   isDottedName,
+  isFunctionExpressionOrArrowFunction,
 } from './binder-utilities.js';
 import { Diagnostic, type DiagnosticMessage, Diagnostics, chainDiagnostic } from './diagnostics.js';
 import { resolveInstanceofExpression } from './checker-operators.js';
@@ -1733,20 +1734,22 @@ function withHeadMessage(diagnostic: Diagnostic, headMessage: DiagnosticMessage 
   return headMessage !== undefined ? chainDiagnostic(diagnostic, headMessage) : diagnostic;
 }
 
-/** Whether `node` calls the `resolve` parameter of a function passed to `new Promise`. */
+/** Whether `node` calls the `resolve` parameter of an executor passed to the global `new Promise`. */
 function isPromiseResolveArityError(c: Checker, node: Node): boolean {
   if (node.kind !== SyntaxKind.CallExpression) return false;
   const callee = getExpression(node)!;
   if (callee.kind !== SyntaxKind.Identifier) return false;
   const symbol = resolveName(c, callee, getText(callee), SymbolFlags.Value, undefined, false, false);
-  const decl = symbol?.valueDeclaration;
-  if (decl === undefined || decl.kind !== SyntaxKind.Parameter) return false;
-  const func = decl.parent!;
-  if (func.kind !== SyntaxKind.FunctionExpression && func.kind !== SyntaxKind.ArrowFunction) return false;
-  const newExpression = func.parent!;
-  if (newExpression.kind !== SyntaxKind.NewExpression) return false;
-  const constructor = getExpression(newExpression)!;
-  if (constructor.kind !== SyntaxKind.Identifier) return false;
+  const declaration = symbol?.valueDeclaration;
+  if (
+    declaration === undefined ||
+    declaration.kind !== SyntaxKind.Parameter ||
+    !isFunctionExpressionOrArrowFunction(declaration.parent!) ||
+    declaration.parent!.parent?.kind !== SyntaxKind.NewExpression
+  )
+    return false;
+  const constructor = getExpression(declaration.parent!.parent!);
+  if (constructor === undefined || constructor.kind !== SyntaxKind.Identifier) return false;
   const globalPromiseSymbol = getGlobalValueSymbol(c, 'Promise', false);
   return globalPromiseSymbol !== undefined && getResolvedSymbol(c, constructor) === globalPromiseSymbol;
 }
@@ -1793,7 +1796,7 @@ function getArgumentArityError(
     : minCount < maxCount
       ? minCount + '-' + maxCount
       : String(minCount);
-  // Calling the `resolve` of a `new Promise` without arguments: Promise<void> needs saying so.
+  // `resolve()` without an argument, where `resolve` is the parameter of a `new Promise` executor.
   const isVoidPromiseError =
     !hasRestParameter && parameterRange === '1' && args.length === 0 && isPromiseResolveArityError(c, node);
   const errorNode = getErrorNodeForCallNode(node);

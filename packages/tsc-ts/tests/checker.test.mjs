@@ -593,6 +593,36 @@ const cases = [
       "/input.ts 2322 1373 5 Type '(value: string) => string[]' is not assignable to type '<T>(value: T) => T[]'.",
     ],
   },
+  {
+    name: 'calling the resolve of a new Promise without an argument',
+    source: [
+      'const a = new Promise<number>((resolve) => resolve());',
+      'const b = new Promise<void>((resolve) => resolve());',
+      'const c = new Promise<number>(function (resolve) { resolve(); });',
+      'declare function f(cb: (x: number) => void): void;',
+      'f((x) => {});',
+      'const resolve = (x: number) => {};',
+      'resolve();',
+    ],
+    expected: [
+      "/input.ts 2794 43 7 Expected 1 arguments, but got 0. Did you forget to include 'void' in your type argument to 'Promise'?",
+      "/input.ts 2794 159 7 Expected 1 arguments, but got 0. Did you forget to include 'void' in your type argument to 'Promise'?",
+      '/input.ts 2554 274 7 Expected 1 arguments, but got 0.',
+    ],
+  },
+  {
+    name: 'calling the resolve of a new Promise without an argument in JavaScript',
+    source: [
+      '// @allowJs: true',
+      '// @checkJs: true',
+      '// @filename: main.js',
+      'new Promise((resolve) => resolve());',
+      'new Promise((resolve) => { resolve(1); });',
+    ],
+    expected: [
+      "/input.js 2810 83 7 Expected 1 argument, but got 0. 'new Promise()' needs a JSDoc hint to produce a 'resolve' that can be called without arguments.",
+    ],
+  },
 ];
 
 test(
