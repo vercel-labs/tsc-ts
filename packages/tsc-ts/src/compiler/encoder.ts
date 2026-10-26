@@ -1,7 +1,7 @@
-// Encodes a source file in TypeScript 7's binary AST format (protocol version 5), the
+// Encodes a source file in TypeScript 7.1's binary AST format (protocol version 9), the
 // `getSourceFile` payload of the API.
 //
-// Layout: a 44-byte header, string offsets (UTF-8 start/end pairs), string data (the
+// Layout: a 64-byte header, string offsets (UTF-8 start/end pairs), string data (the
 // UTF-8 file text, then strings that aren't slices of it), extended node data,
 // msgpack structured data, and 28-byte node records in visit order. Node positions are
 // UTF-16 offsets.
@@ -197,10 +197,10 @@ import { SyntaxKind } from './syntax-kind.js';
 import { hash128 } from './xxh3.js';
 import { utf8Offsets } from './character-codes.js';
 
-export const protocolVersion = 5;
+export const protocolVersion = 9;
 
 const nodeSize = 28;
-const headerSize = 44;
+const headerSize = 64;
 const nodeListKind = 0xffffffff;
 const noStructuredData = 0xffffffff;
 
@@ -209,6 +209,11 @@ const dataTypeString = 1 << 30;
 const dataTypeExtended = 2 << 30;
 
 const utf8Encoder = new TextEncoder();
+
+/** A node list record's last word: 1 when the list ends with a comma. */
+function trailingComma(list: NodeList): number {
+  return list.hasTrailingComma() ? 1 : 0;
+}
 
 /** A growable little-endian byte buffer. */
 class ByteWriter {
@@ -1261,7 +1266,8 @@ function childrenPropertyMask(node: Node): number {
       return node instanceof ModuleDeclaration
         ? (hasModifiers((node as ModuleDeclaration).modifiers) ? 1 : 0) |
             ((node as ModuleDeclaration).name !== undefined ? 2 : 0) |
-            ((node as ModuleDeclaration).body !== undefined ? 4 : 0)
+            ((node as ModuleDeclaration).attributes !== undefined ? 4 : 0) |
+            ((node as ModuleDeclaration).body !== undefined ? 8 : 0)
         : 0;
     case SyntaxKind.ImportEqualsDeclaration:
       return node instanceof ImportEqualsDeclaration
@@ -1381,6 +1387,7 @@ function commonData(node: Node): number {
       if (!(node instanceof ImportClause)) return 0;
       if ((node as ImportClause).phaseModifier === SyntaxKind.TypeKeyword) return 1 << 24;
       if ((node as ImportClause).phaseModifier === SyntaxKind.DeferKeyword) return 2 << 24;
+      if ((node as ImportClause).phaseModifier === SyntaxKind.SourceKeyword) return 3 << 24;
       return 0;
     case SyntaxKind.ImportSpecifier:
       return node instanceof ImportSpecifier ? bit((node as ImportSpecifier).isTypeOnly) << 24 : 0;
@@ -1577,7 +1584,7 @@ class Encoder extends NodeVisitor {
     this.linkSibling(index);
     const positions = this.positions;
     if (positions === undefined)
-      this.nodes.push(nodeListKind, list.pos, list.end, this.parentIndex, list.nodes.length, 0);
+      this.nodes.push(nodeListKind, list.pos, list.end, this.parentIndex, list.nodes.length, trailingComma(list));
     else
       this.nodes.push(
         nodeListKind,
@@ -1585,7 +1592,7 @@ class Encoder extends NodeVisitor {
         positions.of(list.end),
         this.parentIndex,
         list.nodes.length,
-        0,
+        trailingComma(list),
       );
     const saveParent = this.parentIndex;
     this.prevIndex = 0;
@@ -1659,6 +1666,8 @@ class Encoder extends NodeVisitor {
     out.u32(offsetExtended);
     out.u32(offsetStructured);
     out.u32(offsetNodes);
+    // Source file ID and lease ID (u64 each) and binder data offset: 0, none.
+    for (let i = 0; i < 5; i++) out.u32(0);
     out.append(strings.offsets.view());
     out.append(fileText);
     out.append(strings.others.view());
@@ -1787,7 +1796,8 @@ class Encoder extends NodeVisitor {
       );
       out.u32((node as TemplateTail).templateFlags);
     } else if (node instanceof SourceFile) {
-      out.u32(strings.addFileText((node as SourceFile).pos, (node as SourceFile).end));
+      const text = strings.addFileText((node as SourceFile).pos, (node as SourceFile).end);
+      out.u32(text);
       out.u32(strings.add((node as SourceFile).fileName, SyntaxKind.Unknown, 0, 0));
       out.u32(strings.add((node as SourceFile).path, SyntaxKind.Unknown, 0, 0));
       out.u32((node as SourceFile).languageVariant);
@@ -1801,6 +1811,11 @@ class Encoder extends NodeVisitor {
       out.u32(noStructuredData);
       out.u32(noStructuredData);
       out.u32(0);
+      // The original text is the text, and the content mapper fields (span map, supplemental
+      // file names, canonical file name, mapper, virtual file name, diagnostic directives) are
+      // empty: tsc-ts maps no file contents.
+      out.u32(text);
+      for (let i = 0; i < 6; i++) out.u32(noStructuredData);
     } else throw new Error(`no extended data for kind ${node.kind}`);
     return offset;
   }
