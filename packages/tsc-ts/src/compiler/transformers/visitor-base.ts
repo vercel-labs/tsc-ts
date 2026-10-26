@@ -1186,6 +1186,7 @@ export abstract class VisitorBase extends VisitorHooks {
             this.visitModifiers(node.modifiers),
             node.keyword,
             required(this.visitNode(node.name), node.name),
+            this.visitNode(node.attributes) as TypeLiteralNode | undefined,
             this.visitNode(node.body),
           );
         break;
@@ -1340,7 +1341,7 @@ export abstract class VisitorBase extends VisitorHooks {
           return this.factory.updateQualifiedName(
             node,
             required(this.visitNode(node.left), node.left),
-            asIdentifier(this.visitNode(node.right), node.right),
+            required(this.visitNode(node.right), node.right),
           );
         break;
       case SyntaxKind.RestType:

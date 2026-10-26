@@ -44,7 +44,6 @@ import {
   GetAccessorDeclaration,
   HeritageClause,
   Identifier,
-  ImportAttributes,
   ImportClause,
   ImportDeclaration,
   ImportEqualsDeclaration,
@@ -102,6 +101,7 @@ import {
   isDeclarationNode,
 } from '../ast.js';
 import {
+  getHeritageClauseElementName,
   isAmbientModule,
   isAnyImportOrReExport,
   isFunctionLike,
@@ -676,6 +676,19 @@ export class DeclarationTransformer extends Transformer {
       case SyntaxKind.TypeQuery:
         this.checkEntityNameVisibility((input as TypeQueryNode).exprName, this.enclosingDeclaration);
         return this.visitEachChild(input);
+      case SyntaxKind.QualifiedName: {
+        // `typeof this.#x`: the private member isn't in the declaration output.
+        const right = (input as QualifiedName).right;
+        if (right.kind === SyntaxKind.PrivateIdentifier)
+          this.tracker.addDiagnostic(
+            createDiagnosticForNode(
+              input,
+              Diagnostics.Declaration_emit_elides_private_members_but_0_refers_to_a_private_member_Write_an_explicit_type_here,
+              [getText(right)],
+            ),
+          );
+        return this.visitEachChild(input);
+      }
       case SyntaxKind.TupleType: {
         const result = this.visitEachChild(input);
         if (isOriginalNodeSingleLine(this.context, input)) this.context.addEmitFlags(result, EmitFlags.SingleLine);
@@ -778,10 +791,13 @@ export class DeclarationTransformer extends Transformer {
     const types = clause.types.nodes;
     const retained: Node[] = [];
     for (const type of types) {
-      const expression = (type as ExpressionWithTypeArguments).expression;
+      const name = getHeritageClauseElementName(type);
       if (
-        isEntityNameExpression(expression, false) ||
-        (clause.token === SyntaxKind.ExtendsKeyword && expression.kind === SyntaxKind.NullKeyword)
+        name.kind === SyntaxKind.QualifiedName ||
+        isEntityNameExpression(name, false) ||
+        (clause.token === SyntaxKind.ExtendsKeyword &&
+          type.kind === SyntaxKind.ExpressionWithTypeArguments &&
+          name.kind === SyntaxKind.NullKeyword)
       )
         retained.push(type);
     }
@@ -1104,7 +1120,7 @@ export class DeclarationTransformer extends Transformer {
         input.isTypeOnly,
         input.exportClause,
         this.rewriteModuleSpecifier(input, input.moduleSpecifier),
-        this.tryGetResolutionModeOverride(input.attributes),
+        input.attributes,
       );
     }
     if (input instanceof ExportAssignment)
@@ -1270,11 +1286,6 @@ export class DeclarationTransformer extends Transformer {
     return input;
   }
 
-  private tryGetResolutionModeOverride(node: ImportAttributes | undefined): ImportAttributes | undefined {
-    if (node === undefined) return undefined;
-    return this.resolver.getResolutionModeOverride(node) !== undefined ? node : undefined;
-  }
-
   /** The replacement statements for a direct child of a source file or module block. */
   private transformTopLevelDeclaration(input: Node): Node | undefined {
     if (input === undefined) return undefined;
@@ -1420,6 +1431,7 @@ export class DeclarationTransformer extends Transformer {
     const saveNeedsDeclare = this.needsDeclare;
     this.needsDeclare = false;
     const body = input.body;
+    const attributes = this.visitNode(input.attributes) as TypeLiteralNode | undefined;
     let keyword = input.keyword;
     if (keyword !== SyntaxKind.GlobalKeyword && !(input.name instanceof StringLiteral))
       keyword = SyntaxKind.NamespaceKeyword;
@@ -1445,7 +1457,7 @@ export class DeclarationTransformer extends Transformer {
       this.needsDeclare = saveNeedsDeclare;
       this.needsScopeFixMarker = oldNeedsScopeFix;
       this.resultHasScopeMarker = oldHasScopeFix;
-      return this.factory.updateModuleDeclaration(input, modifiers, keyword, input.name, updatedBody);
+      return this.factory.updateModuleDeclaration(input, modifiers, keyword, input.name, attributes, updatedBody);
     }
     if (body !== undefined) {
       // A nested `namespace a.b` is transformed now: it needs no visibility painting.
@@ -1454,10 +1466,10 @@ export class DeclarationTransformer extends Transformer {
       const inner = this.lateStatementReplacements.get(original);
       this.lateStatementReplacements.delete(original);
       this.needsDeclare = saveNeedsDeclare;
-      return this.factory.updateModuleDeclaration(input, modifiers, keyword, input.name, inner);
+      return this.factory.updateModuleDeclaration(input, modifiers, keyword, input.name, attributes, inner);
     }
     this.needsDeclare = saveNeedsDeclare;
-    return this.factory.updateModuleDeclaration(input, modifiers, keyword, input.name, undefined);
+    return this.factory.updateModuleDeclaration(input, modifiers, keyword, input.name, attributes, undefined);
   }
 
   private stripExportModifiersOfList(list: NodeList): NodeList {
@@ -1525,7 +1537,7 @@ export class DeclarationTransformer extends Transformer {
       return factory.updateTypeAliasDeclaration(node, modifiers, node.name, node.typeParameters, node.type);
     if (node instanceof EnumDeclaration) return factory.updateEnumDeclaration(node, modifiers, node.name, node.members);
     if (node instanceof ModuleDeclaration)
-      return factory.updateModuleDeclaration(node, modifiers, node.keyword, node.name, node.body);
+      return factory.updateModuleDeclaration(node, modifiers, node.keyword, node.name, node.attributes, node.body);
     if (node instanceof ImportDeclaration)
       return factory.updateImportDeclaration(node, modifiers, node.importClause, node.moduleSpecifier, node.attributes);
     if (node instanceof ExportDeclaration)
@@ -2373,7 +2385,7 @@ export class DeclarationTransformer extends Transformer {
       return false;
     this.seenProperties.add(key);
     const heritage = getHeritageClauses(classNode);
-    if (heritage !== undefined && heritage.nodes.length > 0 && !isClassExtendingNull(heritage)) {
+    if (heritage !== undefined && heritage.nodes.length > 0 && !isClassExtendingNull(classNode)) {
       // A base class may provide the member; that needs types.
       this.tracker.reportInferenceFallback(classNode);
       if (this.resolver.isThisPropertyAssignmentDeclarationRedundant(node)) return false;
@@ -2696,7 +2708,7 @@ export class DeclarationTransformer extends Transformer {
       declaration.modifiers,
       clause,
       this.rewriteModuleSpecifier(declaration, declaration.moduleSpecifier)!,
-      this.tryGetResolutionModeOverride(declaration.attributes),
+      declaration.attributes,
     );
   }
 
@@ -3091,10 +3103,15 @@ function isNonContextualKeyword(kind: SyntaxKind): boolean {
   );
 }
 
-function isClassExtendingNull(heritage: NodeList): boolean {
-  if (heritage.nodes.length !== 1) return false;
-  for (const type of (heritage.nodes[0] as HeritageClause).types.nodes)
-    if (getExpression(type)!.kind === SyntaxKind.NullKeyword) return true;
+/** Whether a class's `extends` clause names exactly `null`. */
+function isClassExtendingNull(node: Node): boolean {
+  const heritage = getHeritageClauses(node);
+  if (heritage === undefined) return false;
+  for (const clause of heritage.nodes) {
+    if ((clause as HeritageClause).token !== SyntaxKind.ExtendsKeyword) continue;
+    const types = (clause as HeritageClause).types.nodes;
+    return types.length === 1 && getExpression(types[0]!)?.kind === SyntaxKind.NullKeyword;
+  }
   return false;
 }
 

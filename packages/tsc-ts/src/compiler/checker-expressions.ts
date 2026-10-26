@@ -1259,10 +1259,31 @@ export function getPropertyNameOfObjectLiteralElement(c: Checker, element: Node)
   return undefined;
 }
 
+/** Whether `node` is the object literal of the `with` property of an `import()` call's options argument. */
+function isInlineImportAttributes(node: Node): boolean {
+  const property = node.parent!;
+  if (
+    node.kind !== SyntaxKind.ObjectLiteralExpression ||
+    property.kind !== SyntaxKind.PropertyAssignment ||
+    getInitializer(property) !== node
+  )
+    return false;
+  const name = getName(property)!;
+  if ((name.kind !== SyntaxKind.Identifier && !isStringLiteralLike(name)) || getText(name) !== 'with') return false;
+  const options = property.parent!;
+  if (options.kind !== SyntaxKind.ObjectLiteralExpression) return false;
+  let importCall: Node | undefined = options;
+  while (importCall !== undefined && !isImportCall(importCall)) importCall = importCall.parent;
+  if (importCall === undefined) return false;
+  const args = (importCall as CallExpression).arguments.nodes;
+  return args.length > 1 && skipParentheses(args[1]!) === options;
+}
+
 /** Whether `node` is in an `as const` context, where literals keep their types. */
 export function isConstContext(c: Checker, node: Node): boolean {
   const parent = node.parent;
   if (parent === undefined) return false;
+  if (isInlineImportAttributes(node)) return true;
   // Literals contextually typed by a `const` type parameter are in a const context.
   if (isValidConstAssertionArgument(c, node) && isConstTypeVariable(c, getContextualType(c, node), 0)) return true;
   switch (parent.kind) {
@@ -1479,7 +1500,7 @@ export function entityNameToString(node: Node): string {
     }
     case SyntaxKind.QualifiedName: {
       const q = node as QualifiedName;
-      return entityNameToString(q.left) + '.' + q.right.text;
+      return entityNameToString(q.left) + '.' + getText(q.right);
     }
   }
   return getText(node);

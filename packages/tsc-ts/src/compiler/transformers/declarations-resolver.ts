@@ -3,7 +3,6 @@
 // binder, and the checker answers them with types.
 import type { ImportDeclaration, ModifierFlags, Node, SourceFile, FileReference } from '../ast.js';
 import type { EmitContext } from '../printer/emit-context.js';
-import type { ModuleKind } from '../options.js';
 import type { Symbol, SymbolFlags } from '../symbol.js';
 import { EmitResolver } from './emit-resolver.js';
 
@@ -180,8 +179,6 @@ export abstract class DeclarationEmitResolver extends EmitResolver {
   abstract isExpandoFunctionDeclaration(node: Node): boolean;
   /** Types: the declarations of properties assigned to a function. */
   abstract getExpandoPropertyDeclarations(node: Node): Node[];
-  /** The `resolution-mode` of import attributes, or undefined. */
-  abstract getResolutionModeOverride(node: Node): ModuleKind | undefined;
   /** The program file a `/// <reference path>` names. */
   abstract getSourceFileFromReference(file: SourceFile, reference: FileReference): SourceFile | undefined;
 

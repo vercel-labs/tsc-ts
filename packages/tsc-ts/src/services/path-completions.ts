@@ -1,8 +1,11 @@
 // Completions for module specifiers and triple-slash references, like tsgo's path completions.
-import { getText, type Node, type SourceFile } from '../compiler/ast.js';
+import { getName, getText, type Node, type SourceFile } from '../compiler/ast.js';
 import { getTokenAtPosition } from '../compiler/astnav.js';
 import type { Checker } from '../compiler/checker.js';
-import { getMergedSymbol } from '../compiler/checker-symbols.js';
+import { getMergedSymbol, isAmbientModuleSymbolName } from '../compiler/checker-symbols.js';
+import { isGlobalScopeAugmentation } from '../compiler/ast-utilities.js';
+import { SyntaxKind } from '../compiler/syntax-kind.js';
+import { isExternalModuleAugmentation } from './utilities.js';
 import {
   comparePatternKeys,
   getConditions,
@@ -55,7 +58,7 @@ import {
 } from '../compiler/module-specifiers.js';
 import { ProgramModuleSpecifierHost } from '../compiler/program-checker.js';
 import { getLeadingCommentRanges } from '../compiler/scanner.js';
-import type { Symbol } from '../compiler/symbol.js';
+import { getDeclarations, type Symbol } from '../compiler/symbol.js';
 import { flattenExtensions, getSupportedExtensions } from '../compiler/tsconfig.js';
 import { readDirectory } from '../compiler/vfs-match.js';
 import { isInComment, isStringLiteralLike } from './completion-utilities.js';
@@ -152,7 +155,7 @@ class PathCompletions {
     const extensions: string[] = [];
     if (this.c !== undefined)
       for (const module of getAmbientModules(this.c)) {
-        const name = stripQuotes(module.name);
+        const name = getAmbientModuleName(module);
         if (!name.startsWith('*.') || name.includes('/')) continue;
         extensions.push(name.substring(1));
       }
@@ -867,18 +870,41 @@ function stripQuotes(name: string): string {
   return name;
 }
 
+/** The ambient modules among the globals, then the pattern ambient modules not among them. */
 function getAmbientModules(c: Checker): Symbol[] {
   const result: Symbol[] = [];
+  const seen = new Set<Symbol>();
   for (const [name, symbol] of c.globals)
-    if (name.length >= 2 && name.charCodeAt(0) === 0x22 && name.charCodeAt(name.length - 1) === 0x22)
-      result.push(getMergedSymbol(c, symbol));
+    if (isAmbientModuleSymbolName(name)) {
+      const merged = getMergedSymbol(c, symbol);
+      result.push(merged);
+      seen.add(merged);
+    }
+  for (const pattern of c.patternAmbientModules) {
+    const merged = getMergedSymbol(c, pattern.symbol);
+    if (!seen.has(merged)) {
+      result.push(merged);
+      seen.add(merged);
+    }
+  }
   return result;
+}
+
+/** The name an ambient module is declared with; a pattern module with import attributes has another symbol name. */
+function getAmbientModuleName(symbol: Symbol): string {
+  for (const declaration of getDeclarations(symbol)) {
+    if (isExternalModuleAugmentation(declaration) || isGlobalScopeAugmentation(declaration)) continue;
+    const name = declaration.kind === SyntaxKind.ModuleDeclaration ? getName(declaration) : undefined;
+    if (name !== undefined && name.kind === SyntaxKind.StringLiteral) return getText(name);
+    break;
+  }
+  return stripQuotes(symbol.name);
 }
 
 function getAmbientModuleCompletions(c: Checker, fragment: string, fragmentDirectory: string): string[] {
   const names: string[] = [];
   for (const symbol of getAmbientModules(c)) {
-    const moduleName = stripQuotes(symbol.name);
+    const moduleName = getAmbientModuleName(symbol);
     if (moduleName.startsWith(fragment) && !moduleName.includes('*')) names.push(moduleName);
   }
   if (fragmentDirectory === '') return names;

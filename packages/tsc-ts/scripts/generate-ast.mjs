@@ -70,10 +70,6 @@ const classTypes = new Set([
   'ExpressionWithTypeArguments',
   'TypeLiteralNode',
 ]);
-// Members typed narrower than the schema types them, until the parser creates the other kinds there.
-// A qualified name's right side is a private identifier only in a type query (`typeof this.#x`),
-// which the parser does not parse yet.
-const memberTypes = new Map([['QualifiedName.Right', 'Identifier']]);
 const tokenTypes = new Set([
   'AssertsKeyword',
   'AsteriskToken',
@@ -268,7 +264,7 @@ function nodeClasses() {
           child = 'raw';
         }
       } else {
-        type = memberTypes.get(`${name}.${m.name}`) ?? tsType(field.type);
+        type = tsType(field.type);
         const t = typeName(field.type);
         if (!scalarTypes.has(t) && !t.startsWith('SyntaxKind.')) child = 'node';
       }

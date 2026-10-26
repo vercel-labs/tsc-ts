@@ -7,6 +7,7 @@ import {
   ExternalModuleReference,
   Identifier,
   ImportClause,
+  ImportDeclaration,
   ImportEqualsDeclaration,
   ImportTypeNode,
   JsxNamespacedName,
@@ -19,6 +20,7 @@ import {
   PartiallyEmittedExpression,
   PropertyAccessExpression,
   StringLiteral,
+  TypeReferenceNode,
   getExpression,
   getIsTypeOnly,
   getModuleSpecifier,
@@ -452,14 +454,46 @@ export function isImportMeta(node: Node): boolean {
   );
 }
 
-/** `import(…)` or `import.defer(…)`. */
+/** `import(…)`, `import.defer(…)` or `import.source(…)`. */
 export function isImportCall(node: Node): boolean {
   if (!(node instanceof CallExpression)) return false;
   const e = (node as CallExpression).expression;
-  if (e.kind === SyntaxKind.ImportKeyword) return true;
-  if (!(e instanceof MetaProperty)) return false;
-  const meta = e as MetaProperty;
-  return meta.keywordToken === SyntaxKind.ImportKeyword && meta.name.text === 'defer';
+  return e.kind === SyntaxKind.ImportKeyword || isImportPhaseMetaProperty(e);
+}
+
+/** `import.defer` or `import.source`. */
+export function isImportPhaseMetaProperty(node: Node): boolean {
+  return isImportMetaPropertyNamed(node, 'defer') || isImportMetaPropertyNamed(node, 'source');
+}
+
+export function isImportDeferMetaProperty(node: Node): boolean {
+  return isImportMetaPropertyNamed(node, 'defer');
+}
+
+export function isImportSourceMetaProperty(node: Node): boolean {
+  return isImportMetaPropertyNamed(node, 'source');
+}
+
+function isImportMetaPropertyNamed(node: Node, name: string): boolean {
+  return (
+    node instanceof MetaProperty &&
+    (node as MetaProperty).keywordToken === SyntaxKind.ImportKeyword &&
+    (node as MetaProperty).name.text === name
+  );
+}
+
+/** `import source x from "m"` or `import.source("m")`. */
+export function isSourcePhaseImport(node: Node): boolean {
+  if (node instanceof ImportDeclaration) {
+    const clause = (node as ImportDeclaration).importClause;
+    return clause !== undefined && (clause as ImportClause).phaseModifier === SyntaxKind.SourceKeyword;
+  }
+  return isSourcePhaseImportCall(node);
+}
+
+/** `import.source(…)`. */
+export function isSourcePhaseImportCall(node: Node): boolean {
+  return node instanceof CallExpression && isImportSourceMetaProperty((node as CallExpression).expression);
 }
 
 /** `require(x)` with one argument, a string literal if `requireStringLiteralLikeArgument`. */
@@ -549,7 +583,8 @@ export function isTypeDeclaration(node: Node): boolean {
     case SyntaxKind.EnumDeclaration:
       return true;
     case SyntaxKind.ImportClause:
-      return isTypeOnly(node);
+      // `import type { a } from "m"` declares no type of its own.
+      return isTypeOnly(node) && (node as ImportClause).name !== undefined;
     case SyntaxKind.ImportSpecifier:
     case SyntaxKind.ExportSpecifier:
       return isTypeOnly(node.parent!.parent!);
@@ -582,4 +617,24 @@ export function getEffectiveCheckNode(argument: Node): Node {
     else if (node.kind === SyntaxKind.SatisfiesExpression) node = getExpression(node)!;
     else return node;
   }
+}
+
+/** The entity name of a heritage clause element: a type reference's type name, or an
+ * `ExpressionWithTypeArguments`'s expression. */
+export function getHeritageClauseElementName(node: Node): Node {
+  if (node.kind === SyntaxKind.TypeReference) return (node as TypeReferenceNode).typeName;
+  return getExpression(node)!;
+}
+
+/** Whether a name, or the rightmost name of a qualified name, is the type name of a type reference in a
+ * heritage clause. */
+export function isNameOfHeritageClauseTypeReference(nodeIn: Node): boolean {
+  let node = nodeIn;
+  while (node.parent!.kind === SyntaxKind.QualifiedName) node = node.parent!;
+  const parent = node.parent!;
+  return (
+    parent.kind === SyntaxKind.TypeReference &&
+    (parent as TypeReferenceNode).typeName === node &&
+    parent.parent?.kind === SyntaxKind.HeritageClause
+  );
 }

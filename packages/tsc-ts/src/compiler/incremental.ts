@@ -41,6 +41,7 @@ import {
   modeMismatchDetails,
   moduleNotFoundDetails,
   resolveExternalModuleName,
+  getImportAttributesTypeForModuleSpecifier,
 } from './checker-modules.js';
 import { getSymbolAtLocation } from './checker-services.js';
 import { resolveAlias } from './checker-symbols.js';
@@ -1231,7 +1232,17 @@ function addOwnReferencedFiles(checked: CheckedProgram, file: SourceFile, refere
   // call that does not initialize a variable (`exports.a = require("./a").a`), so its build info leaves out that
   // module and its incremental builds keep outputs that depend on it.
   for (const importName of file.imports) {
-    addReferencedFilesFromSymbol(file, referenced, resolveExternalModuleName(checker, importName, importName, true));
+    addReferencedFilesFromSymbol(
+      file,
+      referenced,
+      resolveExternalModuleName(
+        checker,
+        importName,
+        importName,
+        true,
+        getImportAttributesTypeForModuleSpecifier(checker, importName),
+      ),
+    );
   }
   const sourceFileDirectory = getDirectoryPath(file.fileName);
   for (const reference of file.referencedFiles) {

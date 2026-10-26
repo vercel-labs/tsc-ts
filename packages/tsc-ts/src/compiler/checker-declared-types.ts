@@ -20,6 +20,7 @@ import {
   getHeritageClauses,
 } from './ast.js';
 import { getSourceFileOfNode, isEnumConst, isObjectLiteralMethod } from './binder-utilities.js';
+import { getHeritageClauseElementName } from './ast-utilities.js';
 import { Diagnostics } from './diagnostics.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { type Checker, createDiagnosticForNode } from './checker.js';
@@ -158,9 +159,9 @@ function isThislessInterface(c: Checker, symbol: Symbol): boolean {
     if (declaration.kind !== SyntaxKind.InterfaceDeclaration) continue;
     if ((declaration.flags & NodeFlags.ContainsThis) !== 0) return false;
     for (const node of getExtendsHeritageClauseElements(declaration)) {
-      const expression = getExpression(node)!;
-      if (isEntityNameExpression(expression)) {
-        const baseSymbol = resolveEntityName(c, expression, SymbolFlags.Type, true, false, undefined);
+      const name = getHeritageClauseElementName(node);
+      if (name.kind === SyntaxKind.QualifiedName || isEntityNameExpression(name)) {
+        const baseSymbol = resolveEntityName(c, name, SymbolFlags.Type, true, false, undefined);
         if (
           baseSymbol === undefined ||
           (baseSymbol.flags & SymbolFlags.Interface) === 0 ||

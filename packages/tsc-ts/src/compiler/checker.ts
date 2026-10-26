@@ -29,6 +29,7 @@
 // | checker-elaboration.ts          | reporting relation errors at the failing subexpression  |
 // | checker-grammar.ts              | grammar checks                                          |
 // | checker-flow.ts                 | control flow narrowing                                  |
+import type { ModuleSpecifierResult } from './node-builder-names.js';
 import type { DeferredCollisionCheck } from './checker-generated-code.js';
 import type { EmitHelperFileLinks } from './checker-emit-helpers.js';
 import { sideOf } from './side-state.js';
@@ -420,7 +421,7 @@ export class Checker implements TypeChecking {
    */
   modulesMerged = false;
   /** Module specifiers of `import("…")` types, by module symbol id, importing file path and resolution mode. */
-  readonly moduleSpecifiers = new Map<string, string>();
+  readonly moduleSpecifiers = new Map<string, ModuleSpecifierResult>();
   /** Specifier generation for hosts without a program. */
   fallbackModuleSpecifierHost: ModuleSpecifierHost | undefined = undefined;
 
@@ -766,6 +767,9 @@ export class Checker implements TypeChecking {
   readonly ambientModuleSymbols: Symbol[] = [];
   readonly patternAmbientModules: PatternAmbientModule[] = [];
   readonly patternAmbientModuleAugmentations = new Map<string, Symbol>();
+  /** The pattern module each entry of `patternAmbientModuleAugmentations` augments. */
+  readonly patternAmbientModuleAugmentationTargets = new Map<string, Symbol>();
+  readonly moduleImportAttributesTypes = new Map<Symbol, Type>();
 
   readonly inferenceCaches = new InferenceCaches();
   /** The type resolution stack: the first `resolutionDepth` entries are live, later slots are reused. */
@@ -1216,6 +1220,8 @@ export function disposeChecker(c: Checker): void {
   c.flowNodePostSuper.clear();
   c.primitiveTypeAliasSuggestions.clear();
   c.patternAmbientModuleAugmentations.clear();
+  c.patternAmbientModuleAugmentationTargets.clear();
+  c.moduleImportAttributesTypes.clear();
   c.sharedFlowTypes.length = 0;
   c.relationComparers = [];
 }

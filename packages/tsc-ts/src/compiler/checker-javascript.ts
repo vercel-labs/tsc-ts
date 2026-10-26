@@ -406,7 +406,7 @@ export function isCommonJSRequire(c: Checker, node: Node): boolean {
 
 /** The type of the module a `require("m")` call names. */
 export function resolveExternalModuleTypeByLiteral(c: Checker, name: Node): Type {
-  const moduleSymbol = resolveExternalModuleName(c, name, name, false);
+  const moduleSymbol = resolveExternalModuleName(c, name, name, false, undefined);
   if (moduleSymbol !== undefined) {
     const resolved = resolveExternalModuleSymbol(c, moduleSymbol, false);
     if (resolved !== undefined) return getTypeOfSymbol(c, resolved);

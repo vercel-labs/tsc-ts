@@ -527,11 +527,11 @@ export class PrivateIdentifier extends Node {
 
 export class QualifiedName extends Node {
   left: EntityName;
-  right: Identifier;
+  right: MemberName;
   // Set by the binder.
   flowNode: FlowNode | undefined;
 
-  constructor(left: EntityName, right: Identifier) {
+  constructor(left: EntityName, right: MemberName) {
     super(SyntaxKind.QualifiedName);
     this.left = left;
     this.right = right;
@@ -553,7 +553,7 @@ export class QualifiedName extends Node {
   }
 
   copy(): QualifiedName {
-    const node = new QualifiedName(this.left.deepClone(), this.right.copy());
+    const node = new QualifiedName(this.left.deepClone(), this.right.deepClone());
     node.flags = this.flags;
     node.pos = this.pos;
     node.end = this.end;

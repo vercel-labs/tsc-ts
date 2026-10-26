@@ -9,7 +9,7 @@ import {
 } from './character-codes.js';
 import { Diagnostics } from './diagnostic-messages.js';
 import type { DiagnosticMessage } from './diagnostics.js';
-import type { Scanner } from './scanner.js';
+import { IdentifierVariant, type Scanner } from './scanner.js';
 import { getSpellingSuggestion } from './spelling.js';
 import { ScriptTarget } from './types.js';
 import {
@@ -243,12 +243,23 @@ class RegularExpressionChecker {
 
   // Disjunction ::= Alternative ('|' Alternative)*
   private scanDisjunction(isInGroup: boolean): void {
+    // The names any alternative defines. One alternative matches, so in a group they join the
+    // enclosing alternative's scope: `(?:(?<a>x))(?<a>z)` defines `a` twice.
+    let disjunctionNames: Set<string> | undefined;
     for (;;) {
       this.namedCapturingGroups.push(new Set<string>());
       this.scanAlternative(isInGroup);
-      this.namedCapturingGroups.pop();
-      if (this.char() !== CharacterCodes.bar) return;
+      const alternativeNames = this.namedCapturingGroups.pop()!;
+      if (alternativeNames.size > 0) {
+        if (disjunctionNames === undefined) disjunctionNames = new Set<string>();
+        for (const name of alternativeNames) disjunctionNames.add(name);
+      }
+      if (this.char() !== CharacterCodes.bar) break;
       this.scanner.pos = (this.scanner.pos + 1) | 0;
+    }
+    if (isInGroup && disjunctionNames !== undefined && this.namedCapturingGroups.length > 0) {
+      const parentScope = this.namedCapturingGroups[this.namedCapturingGroups.length - 1]!;
+      for (const name of disjunctionNames) parentScope.add(name);
     }
   }
 
@@ -317,6 +328,14 @@ class RegularExpressionChecker {
                     noArgs,
                   );
               }
+              // Modifier characters make this `(?flags:` rather than a plain `(?:` group.
+              if (this.scanner.pos !== flagsStart && this.scanner.languageVersion() < ScriptTarget.ES2025)
+                this.error(
+                  Diagnostics.Regular_expression_pattern_modifiers_are_only_available_when_targeting_0_or_later,
+                  flagsStart,
+                  this.scanner.pos - flagsStart,
+                  ['es2025'],
+                );
               this.scanExpectedChar(CharacterCodes.colon);
               isPreviousTermQuantifiable = true;
             }
@@ -443,10 +462,8 @@ class RegularExpressionChecker {
           size,
           noArgs,
         );
-      else {
-        currentFlags |= flag;
-        this.scanner.checkRegularExpressionFlagAvailability(flag, this.scanner.pos, size);
-      }
+      // Modifiers need ES2025, later than any flag they can toggle, and the group reports that.
+      else currentFlags |= flag;
       this.scanner.pos = (this.scanner.pos + size) | 0;
     }
     return currentFlags;
@@ -545,9 +562,8 @@ class RegularExpressionChecker {
   private scanGroupName(isReference: boolean): void {
     const scanner = this.scanner;
     scanner.tokenStart = this.scanner.pos | 0;
-    scanner.scanIdentifier(0);
     const start = scanner.tokenStart;
-    if (this.scanner.pos === start) {
+    if (!scanner.scanIdentifier(0, IdentifierVariant.RegExpGroupName)) {
       this.error(Diagnostics.Expected_a_capturing_group_name, this.scanner.pos, 0, noArgs);
       return;
     }
@@ -562,6 +578,20 @@ class RegularExpressionChecker {
         noArgs,
       );
     } else {
+      // An earlier definition is in a mutually exclusive alternative. Below ES2018 the group is
+      // reported already.
+      const languageVersion = this.scanner.languageVersion();
+      if (
+        this.groupSpecifiers.has(name) &&
+        languageVersion >= ScriptTarget.ES2018 &&
+        languageVersion < ScriptTarget.ES2025
+      )
+        this.error(
+          Diagnostics.Duplicate_named_capturing_groups_are_only_available_when_targeting_0_or_later,
+          start,
+          this.scanner.pos - start,
+          ['es2025'],
+        );
       if (this.namedCapturingGroups.length > 0)
         this.namedCapturingGroups[this.namedCapturingGroups.length - 1]!.add(name);
       this.groupSpecifiers.add(name);
@@ -667,9 +697,6 @@ class RegularExpressionChecker {
           this.mayContainStrings = !isCharacterComplement && expressionMayContainStrings;
           return this.mayContainStrings;
         }
-        this.error(Diagnostics.Unexpected_0_Did_you_mean_to_escape_it_with_backslash, this.scanner.pos, 1, [
-          String.fromCharCode(ch),
-        ]);
         break;
       default:
         if (isCharacterComplement && this.mayContainStrings)
@@ -730,29 +757,26 @@ class RegularExpressionChecker {
         } else if (operand >= 0 && secondOperand >= 0 && operand > secondOperand) {
           this.error(Diagnostics.Range_out_of_order_in_character_class, start, this.scanner.pos - start, noArgs);
         }
-      } else if (ch === CharacterCodes.ampersand) {
+      } else if (
+        ch === CharacterCodes.ampersand &&
+        this.scanner.pos + 1 < this.end &&
+        this.charAt(this.scanner.pos + 1) === CharacterCodes.ampersand
+      ) {
         start = this.scanner.pos;
-        this.scanner.pos = (this.scanner.pos + 1) | 0;
+        this.scanner.pos = (this.scanner.pos + 2) | 0;
+        this.error(
+          Diagnostics.Operators_must_not_be_mixed_within_a_character_class_Wrap_it_in_a_nested_class_instead,
+          this.scanner.pos - 2,
+          2,
+          noArgs,
+        );
         if (this.char() === CharacterCodes.ampersand) {
-          this.scanner.pos = (this.scanner.pos + 1) | 0;
-          this.error(
-            Diagnostics.Operators_must_not_be_mixed_within_a_character_class_Wrap_it_in_a_nested_class_instead,
-            this.scanner.pos - 2,
-            2,
-            noArgs,
-          );
-          if (this.char() === CharacterCodes.ampersand) {
-            this.error(Diagnostics.Unexpected_0_Did_you_mean_to_escape_it_with_backslash, this.scanner.pos, 1, [
-              String.fromCharCode(ch),
-            ]);
-            this.scanner.pos = (this.scanner.pos + 1) | 0;
-          }
-        } else {
-          this.error(Diagnostics.Unexpected_0_Did_you_mean_to_escape_it_with_backslash, this.scanner.pos - 1, 1, [
+          this.error(Diagnostics.Unexpected_0_Did_you_mean_to_escape_it_with_backslash, this.scanner.pos, 1, [
             String.fromCharCode(ch),
           ]);
+          this.scanner.pos = (this.scanner.pos + 1) | 0;
         }
-        operand = this.scanner.pos - start === 1 ? CharacterCodes.ampersand : ClassValue.String;
+        operand = ClassValue.String;
         continue;
       }
       if (this.isClassContentExit(this.char())) break;
@@ -768,6 +792,15 @@ class RegularExpressionChecker {
         operand = ClassValue.String;
       } else {
         operand = this.scanClassSetOperand();
+        // Each operand of a negated union must match single characters.
+        if (isCharacterComplement && this.mayContainStrings)
+          this.error(
+            Diagnostics.Anything_that_would_possibly_match_more_than_a_single_character_is_invalid_inside_a_negated_character_class,
+            start,
+            this.scanner.pos - start,
+            noArgs,
+          );
+        expressionMayContainStrings = expressionMayContainStrings || this.mayContainStrings;
       }
     }
     this.mayContainStrings = !isCharacterComplement && expressionMayContainStrings;

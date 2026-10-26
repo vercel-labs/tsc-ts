@@ -38,6 +38,15 @@ test('nodes survive encoding and decoding', { skip }, async () => {
     'export type Shape = {\n    kind: "circle";\n    radius: number;\n} | readonly [\n    x: number,\n    y?: string,\n    ...rest: boolean[]\n];',
   );
 
+  // The right side of a qualified name in a type query can be a private name.
+  const privateName = parseSourceFile('/b.ts', 'class C {\n    #x = 1;\n    y: typeof this.#x;\n}');
+  const classNode = privateName.statements.nodes[0];
+  assert.deepEqual(encodeNode(decodeNodes(encodeNode(classNode))), encodeNode(classNode));
+  assert.equal(
+    printNode(decodeNodes(encodeNode(classNode)), false, false, false),
+    'class C {\n    #x = 1;\n    y: typeof this.#x;\n}',
+  );
+
   assert.throws(() => decodeNodes(new Uint8Array(4)), /too short/);
   const corrupt = encodeNode(file.statements.nodes[1]);
   corrupt[3] = 0;

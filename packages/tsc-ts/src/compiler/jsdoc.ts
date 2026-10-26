@@ -46,6 +46,7 @@ import {
   getTagName,
   getType,
   type EntityName,
+  getText,
 } from './ast.js';
 import { isReservedWord, tokenIsIdentifierOrKeyword } from './ast-utilities.js';
 import { CharacterCodes, isWhiteSpaceLike } from './character-codes.js';
@@ -1271,7 +1272,7 @@ function textsEqual(a: Node, b: Node): boolean {
     if (
       a instanceof QualifiedName &&
       b instanceof QualifiedName &&
-      (a as QualifiedName).right.text === (b as QualifiedName).right.text
+      getText((a as QualifiedName).right) === getText((b as QualifiedName).right)
     ) {
       a = (a as QualifiedName).left;
       b = (b as QualifiedName).left;

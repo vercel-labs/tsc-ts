@@ -36,6 +36,7 @@ import {
   type ShorthandPropertyAssignment,
   type SourceFile,
   type TypeParameterDeclaration,
+  type ImportAttributes as ImportAttributesNode,
 } from './ast.js';
 import {
   compareNodePositions,
@@ -44,9 +45,11 @@ import {
   isFunctionLike,
   isImportCall,
   isLiteralImportTypeNode,
+  isNameOfHeritageClauseTypeReference,
   isStringLiteralLike,
   isTypeDeclaration,
   nodeIsMissing,
+  isImportPhaseMetaProperty,
 } from './ast-utilities.js';
 import {
   getNameOfDeclaration,
@@ -93,6 +96,8 @@ import {
   getTargetOfAliasDeclaration,
   resolveExternalModuleName,
   resolveJSDocMemberName,
+  checkImportAttributesExpression,
+  getImportAttributesTypeForModuleSpecifier,
 } from './checker-modules.js';
 import { getSymbolHasInstanceMethodOfObjectType } from './checker-operators.js';
 import { getSymbolForPrivateIdentifierExpression } from './checker-property-access.js';
@@ -217,7 +222,13 @@ export function getSymbolAtLocationWorker(c: Checker, node: Node, ignoreErrors: 
           isLiteralImportTypeNode(grandParent) &&
           (grandParent as ImportTypeNode).argument === parent)
       )
-        return resolveExternalModuleName(c, node, node, ignoreErrors);
+        return resolveExternalModuleName(
+          c,
+          node,
+          node,
+          ignoreErrors,
+          getImportAttributesTypeForModuleSpecifier(c, node),
+        );
       if (
         parent.kind === SyntaxKind.CallExpression &&
         isBindableObjectDefinePropertyCall(parent) &&
@@ -243,7 +254,7 @@ export function getSymbolAtLocationWorker(c: Checker, node: Node, ignoreErrors: 
     case SyntaxKind.ExportKeyword:
       return parent.kind === SyntaxKind.ExportAssignment ? getSymbol(parent) : undefined;
     case SyntaxKind.ImportKeyword:
-      if (parent.kind === SyntaxKind.MetaProperty && (parent as MetaProperty).name.text === 'defer') return undefined;
+      if (isImportPhaseMetaProperty(parent)) return undefined;
       return parent.kind === SyntaxKind.MetaProperty ? checkMetaPropertyKeyword(c).symbol : undefined;
     case SyntaxKind.NewKeyword:
       return parent.kind === SyntaxKind.MetaProperty ? checkMetaPropertyKeyword(c).symbol : undefined;
@@ -312,10 +323,13 @@ function getSymbolOfNameOrPropertyAccessExpression(c: Checker, nameIn: Node): Sy
     }
   }
   while (isRightSideOfQualifiedNameOrPropertyAccess(name)) name = name.parent!;
-  if (isInNameOfExpressionWithTypeArguments(name)) {
+  if (isInNameOfExpressionWithTypeArgumentsOrHeritageTypeReference(name)) {
     let meaning: SymbolFlags;
-    if (name.parent!.kind === SyntaxKind.ExpressionWithTypeArguments) {
-      // `extends Bar<T>` in an interface is a type, `foo<T>` a value, and a class `extends` both.
+    if (
+      name.parent!.kind === SyntaxKind.ExpressionWithTypeArguments ||
+      name.parent!.kind === SyntaxKind.TypeReference
+    ) {
+      // A heritage element name is a type, `foo<T>` a value, and a class `extends` both.
       meaning = isPartOfTypeNode(name) ? SymbolFlags.Type : SymbolFlags.Value;
       if (isExpressionWithTypeArgumentsInClassExtendsClause(name.parent!)) meaning |= SymbolFlags.Value;
     } else meaning = SymbolFlags.Namespace;
@@ -377,6 +391,7 @@ function getSymbolOfNameOrPropertyAccessExpression(c: Checker, nameIn: Node): Sy
     const meaning = name.parent!.kind === SyntaxKind.TypeReference ? SymbolFlags.Type : SymbolFlags.Namespace;
     const symbol = resolveEntityName(c, name, meaning, true, true, undefined);
     if (symbol !== undefined && symbol !== c.unknownSymbol) return symbol;
+    if (isNameOfHeritageClauseTypeReference(name)) return undefined;
     return getUnresolvedSymbolForEntityName(c, name);
   }
   if (name.parent!.kind === SyntaxKind.TypePredicate)
@@ -440,7 +455,7 @@ export function getTypeOfNode(c: Checker, node: Node): Type {
   if (node.kind === SyntaxKind.SourceFile && !isExternalOrCommonJSModule(node as SourceFile)) return c.errorType;
   // Semantic questions inside `with` blocks have no answer.
   if ((node.flags & NodeFlags.InWithStatement) !== 0) return c.errorType;
-  const heritage = getClassOfHeritageExpression(node);
+  const heritage = getClassOfHeritageElement(node);
   const classType =
     heritage !== undefined ? getDeclaredTypeOfClassOrInterface(c, getSymbolOfDeclaration(c, heritage)!) : undefined;
   if (isPartOfTypeNode(node)) {
@@ -484,7 +499,8 @@ export function getTypeOfNode(c: Checker, node: Node): Type {
     (parent as MetaProperty).keywordToken === node.kind
   )
     return checkMetaPropertyKeyword(c);
-  if (node.kind === SyntaxKind.ImportAttributes) return getCachedGlobalType(c, 'ImportAttributes', 0, true);
+  if (node.kind === SyntaxKind.ImportAttributes)
+    return checkImportAttributesExpression(c, node as ImportAttributesNode);
   return c.errorType;
 }
 
@@ -803,10 +819,11 @@ function isImportTypeQualifierPart(nodeIn: Node): Node | undefined {
   return undefined;
 }
 
-function isInNameOfExpressionWithTypeArguments(nodeIn: Node): boolean {
+function isInNameOfExpressionWithTypeArgumentsOrHeritageTypeReference(nodeIn: Node): boolean {
   let node = nodeIn;
-  while (node.parent!.kind === SyntaxKind.PropertyAccessExpression) node = node.parent!;
-  return node.parent!.kind === SyntaxKind.ExpressionWithTypeArguments;
+  while (node.parent!.kind === SyntaxKind.PropertyAccessExpression || node.parent!.kind === SyntaxKind.QualifiedName)
+    node = node.parent!;
+  return node.parent!.kind === SyntaxKind.ExpressionWithTypeArguments || isNameOfHeritageClauseTypeReference(node);
 }
 
 export function isRightSideOfQualifiedNameOrPropertyAccess(node: Node): boolean {
@@ -851,7 +868,13 @@ export function isJSDocNameReferenceContext(node: Node): boolean {
 
 /** The class of an expression with type arguments in its heritage clause. */
 function getClassOfHeritageExpression(node: Node): Node | undefined {
-  if (node.kind !== SyntaxKind.ExpressionWithTypeArguments) return undefined;
+  return node.kind === SyntaxKind.ExpressionWithTypeArguments ? getClassOfHeritageElement(node) : undefined;
+}
+
+/** The class of a heritage clause element: an expression with type arguments, or a type reference in
+ * `implements`. */
+function getClassOfHeritageElement(node: Node): Node | undefined {
+  if (node.kind !== SyntaxKind.ExpressionWithTypeArguments && node.kind !== SyntaxKind.TypeReference) return undefined;
   const parent = node.parent!;
   return parent.kind === SyntaxKind.HeritageClause && isClassLike(parent.parent!) ? parent.parent : undefined;
 }

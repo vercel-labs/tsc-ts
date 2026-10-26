@@ -17,6 +17,7 @@ import {
   getType,
   getTypeParameters,
   getTypeArguments,
+  type ExpressionWithTypeArguments,
 } from './ast.js';
 import {
   findConstructorDeclaration,
@@ -33,6 +34,7 @@ import { type Diagnostic, type DiagnosticMessage, Diagnostics, chainDiagnostic }
 import { getUseDefineForClassFields } from './options.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { type Checker, createDiagnosticForNode } from './checker.js';
+import { checkJSDocAugmentsTagMatchesExtends } from './checker-jsdoc.js';
 import {
   type IndexInfo,
   type InterfaceType,
@@ -144,12 +146,15 @@ export function checkClassHeritage(c: Checker, node: Node): void {
   }
   checkMembersForOverrideModifier(c, node, classType, typeWithThis, staticType);
   for (const typeRefNode of getImplementsHeritageClauseElements(node)) {
-    const expr = getExpression(typeRefNode)!;
-    if (!isEntityNameExpression(expr) || isOptionalChain(expr))
-      c.error(
-        expr,
-        Diagnostics.A_class_can_only_implement_an_identifier_Slashqualified_name_with_optional_type_arguments,
-      );
+    // The parser makes an entity name element a type reference; anything else stays an expression.
+    if (typeRefNode.kind === SyntaxKind.ExpressionWithTypeArguments) {
+      const expr = getExpression(typeRefNode)!;
+      if (!isEntityNameExpression(expr) || isOptionalChain(expr))
+        c.error(
+          expr,
+          Diagnostics.A_class_can_only_implement_an_identifier_Slashqualified_name_with_optional_type_arguments,
+        );
+    }
     const t = getReducedType(c, getTypeFromTypeNode(c, typeRefNode));
     if (isErrorType(c, t)) continue;
     if (!isValidBaseType(c, t)) {
@@ -181,8 +186,9 @@ function checkBaseClass(
   baseType: Type,
 ): void {
   const baseConstructorType = getBaseConstructorTypeOfClass(c, classType);
-  const staticBaseType = getApparentType(c, baseConstructorType);
   const baseTypeNode = getExtendsHeritageClauseElement(node)!;
+  checkJSDocAugmentsTagMatchesExtends(c, node, baseTypeNode as ExpressionWithTypeArguments, baseType);
+  const staticBaseType = getApparentType(c, baseConstructorType);
   checkBaseTypeAccessibility(c, staticBaseType, baseTypeNode);
   const typeArgumentNodes = getTypeArguments(baseTypeNode);
   if (typeArgumentNodes !== undefined && typeArgumentNodes.nodes.length !== 0) {
@@ -795,6 +801,7 @@ export function checkInterfaceHeritage(c: Checker, node: Node): void {
   }
   checkObjectTypeForDuplicateDeclarations(c, node, false);
   for (const element of getExtendsHeritageClauseElements(node)) {
+    if (element.kind !== SyntaxKind.ExpressionWithTypeArguments) continue;
     const expr = getExpression(element)!;
     if (!isEntityNameExpression(expr) || isOptionalChain(expr))
       c.error(
