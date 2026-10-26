@@ -94,6 +94,7 @@ import {
 import {
   checkExportAssignment,
   checkExportDeclaration,
+  checkImportAttributes,
   checkImportDeclaration,
   checkImportEqualsDeclaration,
   resolveJSDocMemberName,
@@ -448,6 +449,7 @@ function checkTypeNodeWorker(c: Checker, node: Node): void {
       const type = getTypeFromTypeNode(c, node);
       checkTypeArgumentConstraintsOfReference(c, node, type);
       checkDeprecatedTypeReference(c, node, type);
+      if (node.kind === SyntaxKind.ImportType) checkImportAttributes(c, node);
       break;
     }
     case SyntaxKind.IndexedAccessType:

@@ -27,6 +27,15 @@ export function firstDifference(expected, actual) {
  * nodes left are renumbered in the order the output first references them, as both drivers
  * number them, and the ones only those identifiers referenced are dropped.
  */
+/**
+ * The symbol name of a pattern ambient module with import attributes ends in a node id that keeps it unique
+ * (`"*.ext"pattern@<id>`): tsgo numbers nodes on first use, tsc-ts when it creates them, so the ids differ. The
+ * names are internal; compare them without the id.
+ */
+export function withoutPatternModuleIds(text) {
+  return text.replace(/"pattern@\d+/g, '"pattern@');
+}
+
 export function withoutPlainIdentifierFlows(expected, actual) {
   const actualLines = actual.split('\n');
   const at = actualLines.findIndex((line) => line.startsWith('plain-identifiers '));
@@ -70,7 +79,10 @@ export function withoutPlainIdentifierFlows(expected, actual) {
 export async function compareBinding(command, path, flags) {
   const [expected, actual] = await Promise.all([run([bindOracle, path, ...flags]), run([...command, path, ...flags])]);
   const ok = expected.code === 0 && actual.code === 0;
-  const outputs = withoutPlainIdentifierFlows(expected.stdout.toString(), actual.stdout.toString());
+  const outputs = withoutPlainIdentifierFlows(
+    withoutPatternModuleIds(expected.stdout.toString()),
+    withoutPatternModuleIds(actual.stdout.toString()),
+  );
   const difference = ok ? firstDifference(outputs.expected, outputs.actual) : undefined;
   if (ok && difference === undefined) return { match: true };
   const named = flags.includes('--named') ? ['--named'] : [];

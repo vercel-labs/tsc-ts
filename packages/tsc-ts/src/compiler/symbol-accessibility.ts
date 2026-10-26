@@ -39,7 +39,11 @@ import { type Checker, ExternalModuleContainerIndex, SymbolAccessibilityCaches, 
 import { getEffectiveDeclarationFlags } from './checker-declarations.js';
 import { getDeclaredTypeOfSymbol } from './checker-declared-types.js';
 import { checkExpressionCached } from './checker-expressions.js';
-import { resolveExternalModuleName, resolveExternalModuleSymbol } from './checker-modules.js';
+import {
+  getImportAttributesTypeForModuleSpecifier,
+  resolveExternalModuleName,
+  resolveExternalModuleSymbol,
+} from './checker-modules.js';
 import {
   getExportsOfSymbol,
   getMergedSymbol,
@@ -351,7 +355,13 @@ function getAlternativeContainingModules(c: Checker, symbol: Symbol, enclosingDe
     for (const importRef of containingFile.imports) {
       // Synthesized specifiers can't be resolved.
       if ((importRef.flags & NodeFlags.Synthesized) !== 0) continue;
-      const resolvedModule = resolveExternalModuleName(c, enclosingDeclaration, importRef, true);
+      const resolvedModule = resolveExternalModuleName(
+        c,
+        enclosingDeclaration,
+        importRef,
+        true,
+        getImportAttributesTypeForModuleSpecifier(c, importRef),
+      );
       if (resolvedModule === undefined) continue;
       if (getAliasForSymbolInContainer(c, resolvedModule, symbol) === undefined) continue;
       results.push(resolvedModule);

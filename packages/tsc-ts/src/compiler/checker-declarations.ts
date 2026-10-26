@@ -13,6 +13,7 @@ import {
   type NodeList,
   NodeVisitor,
   type TypeAliasDeclaration,
+  type TypeLiteralNode,
   type TypeParameterDeclaration,
   type VariableDeclarationList,
   type VariableStatement,
@@ -814,6 +815,14 @@ export function checkEnumDeclaration(c: Checker, node: Node): void {
   }
 }
 
+/** An ambient module's import attributes type must be assignable to the global `ImportAttributes`. */
+function checkImportAttributesType(c: Checker, attributes: TypeLiteralNode): void {
+  checkSourceElement(c, attributes);
+  const importAttributesType = getCachedGlobalType(c, 'ImportAttributes', 0, true);
+  if (importAttributesType !== c.emptyObjectType)
+    checkTypeAssignableTo(c, getTypeFromTypeNode(c, attributes), importAttributesType, attributes, undefined);
+}
+
 /** Whether erasableSyntaxOnly applies at `node`: it is set, and `node` is in a TypeScript file. */
 export function shouldCheckErasableSyntax(c: Checker, node: Node): boolean {
   return c.compilerOptions.erasableSyntaxOnly === true && !isInJSFile(node);
@@ -830,6 +839,8 @@ export function checkModuleDeclaration(c: Checker, node: Node): void {
       module.name,
       Diagnostics.Augmentations_for_the_global_scope_should_have_declare_modifier_unless_they_appear_in_already_ambient_context,
     );
+  const attributes = module.attributes;
+  if (attributes !== undefined) checkImportAttributesType(c, attributes);
   const contextMessage = isAmbientModule(node)
     ? Diagnostics.An_ambient_module_declaration_is_only_allowed_at_the_top_level_in_a_file
     : Diagnostics.A_namespace_declaration_is_only_allowed_at_the_top_level_of_a_namespace_or_module;
@@ -888,6 +899,8 @@ export function checkModuleDeclaration(c: Checker, node: Node): void {
   }
   if (!isAmbientModule(node)) return;
   if (isModuleAugmentationExternal(node)) {
+    if (attributes !== undefined)
+      c.error(attributes, Diagnostics.Import_attributes_are_not_allowed_on_a_module_augmentation);
     // Check an augmentation's body only when it merged with its target.
     const checkBody = isGlobalAugmentation || (symbol !== undefined && (symbol.flags & SymbolFlags.Transient) !== 0);
     if (checkBody && body !== undefined && body.kind === SyntaxKind.ModuleBlock)

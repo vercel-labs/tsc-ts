@@ -287,7 +287,7 @@ function entityNameToString(node: Node): string {
       return entityNameToString(access.expression) + '.' + entityNameToString(access.name);
     }
     case SyntaxKind.QualifiedName:
-      return entityNameToString((node as QualifiedName).left) + '.' + (node as QualifiedName).right.text;
+      return entityNameToString((node as QualifiedName).left) + '.' + getText((node as QualifiedName).right);
     case SyntaxKind.JsxNamespacedName:
       return jsxNameText(node);
   }
@@ -457,6 +457,7 @@ export function getJsxNamespaceContainerForImplicitImport(c: Checker, location: 
     Diagnostics.This_JSX_tag_requires_the_module_path_0_to_exist_but_none_could_be_found_Make_sure_you_have_types_for_the_appropriate_package_installed,
     location,
     false,
+    undefined,
   );
   const resolved = mod !== undefined && mod !== c.unknownSymbol ? resolveSymbol(c, mod) : undefined;
   const result = resolved !== undefined ? getMergedSymbol(c, resolved) : undefined;

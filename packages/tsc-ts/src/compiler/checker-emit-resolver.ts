@@ -92,7 +92,7 @@ import {
 } from './node-builder-pseudo.js';
 import { symbolToExpression } from './node-builder-names.js';
 import { tryReuseExistingNode } from './node-builder-reuse.js';
-import type { CompilerOptions, ModuleKind } from './options.js';
+import type { CompilerOptions } from './options.js';
 import type { EmitContext } from './printer/emit-context.js';
 import { isTypeIdenticalTo } from './relations.js';
 import {
@@ -360,10 +360,6 @@ export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {
     const symbol = getSymbolOfDeclaration(c, node);
     if (symbol === undefined) return [];
     return getPropertiesOfType(c, getTypeOfSymbol(c, symbol));
-  }
-
-  getResolutionModeOverride(node: Node): ModuleKind | undefined {
-    return this.syntactic.getResolutionModeOverride(node);
   }
 
   getSourceFileFromReference(file: SourceFile, reference: FileReference): SourceFile | undefined {

@@ -174,6 +174,7 @@ function resolveHelpersModule(c: Checker, file: SourceFile, errorNode: Node): Sy
         Diagnostics.This_syntax_requires_an_imported_helper_but_module_0_cannot_be_found,
         errorNode,
         false,
+        undefined,
       ) ?? c.unknownSymbol;
   return links.helpersModule;
 }

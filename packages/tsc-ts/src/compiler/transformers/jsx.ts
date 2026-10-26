@@ -30,6 +30,7 @@ import {
   ArrayLiteralExpression,
   VariableDeclaration,
   getTagName,
+  getText,
 } from '../ast.js';
 import { isExternalOrCommonJSModule } from '../binder-utilities.js';
 import { isLineBreak, isWhiteSpaceSingleLine } from '../character-codes.js';
@@ -545,7 +546,7 @@ export class JsxTransformer extends Transformer {
   private expressionFromEntityName(entity: Node, parent: Node): Node {
     if (entity instanceof QualifiedName) {
       const left = this.expressionFromEntityName(entity.left, parent);
-      return this.factory.createPropertyAccessExpression(left, this.factory.createIdentifier(entity.right.text));
+      return this.factory.createPropertyAccessExpression(left, this.factory.createIdentifier(getText(entity.right)));
     }
     return this.createReactNamespace((entity as Identifier).text, parent);
   }

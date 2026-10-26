@@ -98,6 +98,7 @@ const textToKeyword: Map<string, SyntaxKind> = new Map<string, SyntaxKind>([
   ['return', SyntaxKind.ReturnKeyword],
   ['satisfies', SyntaxKind.SatisfiesKeyword],
   ['set', SyntaxKind.SetKeyword],
+  ['source', SyntaxKind.SourceKeyword],
   ['static', SyntaxKind.StaticKeyword],
   ['string', SyntaxKind.StringKeyword],
   ['super', SyntaxKind.SuperKeyword],
@@ -1316,15 +1317,10 @@ export class Scanner {
         case CharacterCodes.at:
           this.pos = (this.pos + 1) | 0;
           return (this.token = SyntaxKind.AtToken);
-        case CharacterCodes.backslash: {
-          const codePoint = this.peekUnicodeEscape();
-          if (codePoint >= 0 && isIdentifierStart(codePoint)) {
-            const head = String.fromCodePoint(this.scanUnicodeEscape(true));
-            this.setValue(head + this.scanIdentifierParts());
+        case CharacterCodes.backslash:
+          if (this.scanIdentifier(0, IdentifierVariant.Standard))
             return (this.token = getIdentifierToken(this.tokenValue));
-          }
           return this.scanInvalidCharacter();
-        }
         case CharacterCodes.hash:
           if ((chars[this.pos + 1] | 0) === CharacterCodes.exclamation) {
             if (this.pos === 0) {
@@ -1332,27 +1328,17 @@ export class Scanner {
               continue;
             }
             this.errorAt(Diagnostics.X_can_only_be_used_at_the_start_of_a_file, this.pos, 2, noArgs);
-            this.pos = (this.pos + 1) | 0;
+            this.pos = (this.pos + 2) | 0;
             return (this.token = SyntaxKind.Unknown);
           }
-          if ((chars[this.pos + 1] | 0) === CharacterCodes.backslash) {
-            this.pos = (this.pos + 1) | 0;
-            const codePoint = this.peekUnicodeEscape();
-            if (codePoint >= 0 && isIdentifierStart(codePoint)) {
-              const head = '#' + String.fromCodePoint(this.scanUnicodeEscape(true));
-              this.setValue(head + this.scanIdentifierParts());
-              return (this.token = SyntaxKind.PrivateIdentifier);
-            }
-            this.pos = (this.pos - 1) | 0;
-          }
-          if (!this.scanIdentifier(1)) {
+          if (!this.scanIdentifier(1, IdentifierVariant.Standard)) {
             this.errorAt(Diagnostics.Invalid_character, this.pos - 1, 1, noArgs);
             this.setValue('#');
           }
           return (this.token = SyntaxKind.PrivateIdentifier);
         default: {
           if (ch < 0) return (this.token = SyntaxKind.EndOfFile);
-          if (this.scanIdentifier(0)) return (this.token = this.identifierKind());
+          if (this.scanIdentifier(0, IdentifierVariant.Standard)) return (this.token = this.identifierKind());
           const codePoint = this.codePoint();
           if (codePoint === CharacterCodes.replacementCharacter) {
             this.errorAt(Diagnostics.File_appears_to_be_binary, 0, 0, noArgs);
@@ -1534,14 +1520,36 @@ export class Scanner {
     this.commentDirectives.push(new CommentDirective(start, end, kind));
   }
 
-  /** @internal Scans an identifier after `prefixLength` units; sets the token value. */
-  scanIdentifier(prefixLength: number): boolean {
+  /**
+   * @internal Scans an identifier after `prefixLength` units; sets the token value. `variant`
+   * decides the identifier parts: JSX and JSDoc names also take `-`, and regular expression group
+   * names take a surrogate pair written as two `\u` escapes.
+   */
+  scanIdentifier(prefixLength: number, variant: IdentifierVariant): boolean {
     const text = this.text;
     const chars = this.chars;
     const start = this.pos;
     this.pos = (this.pos + prefixLength) | 0;
+    const identifierStart = this.pos;
     let ch = this.char();
-    if (isASCIILetter(ch) || ch === CharacterCodes._ || ch === CharacterCodes.$) {
+    if (variant === IdentifierVariant.JSX) {
+      if (isASCIILetter(ch) || ch === CharacterCodes._ || ch === CharacterCodes.$) {
+        // ASCII names, as the general loop below scans them.
+        let pos = (this.pos + 1) | 0;
+        const end = this.end;
+        while (pos < end) {
+          const c = chars[pos] | 0;
+          if (!isASCIIIdentifierPart(c) && c !== CharacterCodes.minus) break;
+          pos = (pos + 1) | 0;
+        }
+        const next = pos < end ? chars[pos] | 0 : CharacterCodes.EOF;
+        if (next <= CharacterCodes.maxAsciiCharacter && next !== CharacterCodes.backslash) {
+          this.pos = pos;
+          this.setValueSlice(start, pos);
+          return true;
+        }
+      }
+    } else if (isASCIILetter(ch) || ch === CharacterCodes._ || ch === CharacterCodes.$) {
       // Fast path for ASCII identifiers, which also hashes the units for interning.
       let pos = (this.pos + 1) | 0;
       const end = this.end;
@@ -1563,33 +1571,47 @@ export class Scanner {
         this.hashEnd = pos;
         return true;
       }
-      this.pos = (start + prefixLength) | 0;
     }
+    this.pos = identifierStart;
+    const languageVariant = variant === IdentifierVariant.JSX ? LanguageVariant.JSX : LanguageVariant.Standard;
     ch = this.codePoint();
-    if (!isIdentifierStart(ch)) return false;
-    do {
-      this.pos = (this.pos + charSize(ch)) | 0;
-      ch = this.codePoint();
-    } while (isIdentifierPart(ch));
-    if (ch === CharacterCodes.backslash) this.setValue(text.substring(start, this.pos) + this.scanIdentifierParts());
-    else this.setValueSlice(start, this.pos);
-    return true;
+    if (isIdentifierStart(ch)) {
+      do {
+        this.pos = (this.pos + charSize(ch)) | 0;
+        ch = this.codePoint();
+      } while (isIdentifierPart(ch, languageVariant));
+      if (ch === CharacterCodes.backslash)
+        this.setValue(text.substring(start, this.pos) + this.scanIdentifierParts(variant));
+      else this.setValueSlice(start, this.pos);
+      return true;
+    }
+    if (ch === CharacterCodes.backslash) {
+      const escaped = this.scanIdentifierEscape(true, variant);
+      if (escaped >= 0) {
+        const head = text.substring(start, identifierStart) + String.fromCodePoint(escaped);
+        this.setValue(head + this.scanIdentifierParts(variant));
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Scans identifier parts including `\u` escapes and returns their cooked text. */
-  private scanIdentifierParts(): string {
+  private scanIdentifierParts(variant: IdentifierVariant): string {
+    const languageVariant = variant === IdentifierVariant.JSX ? LanguageVariant.JSX : LanguageVariant.Standard;
     let result = '';
     let start = this.pos;
     for (;;) {
       const ch = this.codePoint();
-      if (isIdentifierPart(ch)) {
+      if (isIdentifierPart(ch, languageVariant)) {
         this.pos = (this.pos + charSize(ch)) | 0;
         continue;
       }
       if (ch === CharacterCodes.backslash) {
-        const escaped = this.peekUnicodeEscape();
-        if (escaped >= 0 && isIdentifierPart(escaped)) {
-          result += this.text.substring(start, this.pos) + String.fromCodePoint(this.scanUnicodeEscape(true));
+        const escapeStart = this.pos;
+        const escaped = this.scanIdentifierEscape(false, variant);
+        if (escaped >= 0) {
+          result += this.text.substring(start, escapeStart) + String.fromCodePoint(escaped);
           start = this.pos;
           continue;
         }
@@ -1597,6 +1619,39 @@ export class Scanner {
       break;
     }
     return start === this.pos ? result : result + this.text.substring(start, this.pos);
+  }
+
+  /**
+   * At `\`: scans a `\u` escape of an identifier start (`isStart`) or part and returns its code point,
+   * or returns -1 and leaves the scanner unchanged.
+   */
+  private scanIdentifierEscape(isStart: boolean, variant: IdentifierVariant): number {
+    const languageVariant = variant === IdentifierVariant.JSX ? LanguageVariant.JSX : LanguageVariant.Standard;
+    const escaped = this.peekUnicodeEscape();
+    if (escaped >= 0 && (isStart ? isIdentifierStart(escaped) : isIdentifierPart(escaped, languageVariant)))
+      return this.scanUnicodeEscape(true);
+    // Group names in regular expressions, in Unicode mode or not, take `\u` HexLeadSurrogate `\u`
+    // HexTrailSurrogate as part of RegExpIdentifierName (tc39/ecma262#1869), but not the braced form.
+    if (
+      variant === IdentifierVariant.RegExpGroupName &&
+      this.peek(2) !== CharacterCodes.openBrace &&
+      escaped >= 0xd800 &&
+      escaped <= 0xdbff
+    ) {
+      const pos = this.pos;
+      const flags = this.tokenFlags;
+      this.scanUnicodeEscape(false);
+      if (this.peek(2) !== CharacterCodes.openBrace) {
+        const low = this.scanLowSurrogateEscape();
+        if (low >= 0) {
+          const codePoint = (escaped - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000;
+          if (isStart ? isIdentifierStart(codePoint) : isIdentifierPart(codePoint, languageVariant)) return codePoint;
+        }
+      }
+      this.pos = pos | 0;
+      this.tokenFlags = flags;
+    }
+    return -1;
   }
 
   private scanInvalidCharacter(): SyntaxKind {
@@ -2080,7 +2135,7 @@ export class Scanner {
     }
     if (isIdentifierStart(this.codePoint())) {
       const idStart = this.pos;
-      const id = this.scanIdentifierParts();
+      const id = this.scanIdentifierParts(IdentifierVariant.Standard);
       if (result !== SyntaxKind.BigIntLiteral && id.length === 1 && this.chars[idStart] === CharacterCodes.n) {
         if ((this.tokenFlags & TokenFlags.Scientific) !== 0) {
           this.errorAt(Diagnostics.A_bigint_literal_cannot_use_exponential_notation, start, this.pos - start, noArgs);
@@ -2472,17 +2527,8 @@ export class Scanner {
   /** Extends an identifier or keyword with `-` and further parts, as JSX names allow. */
   scanJsxIdentifier(): SyntaxKind {
     if (!tokenIsIdentifierOrKeyword(this.token)) return this.token;
-    let value = this.getTokenValue();
-    while (this.pos < this.end) {
-      if (this.char() === CharacterCodes.minus) {
-        value += '-';
-        this.pos = (this.pos + 1) | 0;
-        continue;
-      }
-      const pos = this.pos;
-      value += this.scanIdentifierParts();
-      if (this.pos === pos) break;
-    }
+    // An identifier or keyword is scanned: append a following `-` and the rest of the name.
+    const value = this.getTokenValue() + this.scanIdentifierParts(IdentifierVariant.JSX);
     this.setValue(value);
     return (this.token = getIdentifierToken(value));
   }
@@ -2556,7 +2602,6 @@ export class Scanner {
   scanJSDocToken(): SyntaxKind {
     this.fullStartPos = this.pos | 0;
     this.tokenFlags = TokenFlags.None;
-    const text = this.text;
     const chars = this.chars;
     if (this.pos >= this.end) return (this.token = SyntaxKind.EndOfFile);
     this.tokenStart = this.pos | 0;
@@ -2605,37 +2650,22 @@ export class Scanner {
         return (this.token = SyntaxKind.BacktickToken);
       case CharacterCodes.hash:
         return (this.token = SyntaxKind.HashToken);
-      case CharacterCodes.backslash: {
-        this.pos = (this.pos - 1) | 0;
-        const codePoint = this.peekUnicodeEscape();
-        if (codePoint >= 0 && isIdentifierStart(codePoint)) {
-          const head = String.fromCodePoint(this.scanUnicodeEscape(true));
-          this.setValue(head + this.scanIdentifierParts());
-          return (this.token = getIdentifierToken(this.tokenValue));
-        }
-        this.pos = (this.pos + 1) | 0;
-        return (this.token = SyntaxKind.Unknown);
-      }
     }
-    if (!isIdentifierStart(ch)) return (this.token = SyntaxKind.Unknown);
-    let last = ch;
-    while (this.pos < this.end) {
-      const unit = this.chars[this.pos] | 0;
-      if (unit < 0x80) {
-        last = unit;
-        if (!isASCIIIdentifierPart(unit) && unit !== CharacterCodes.minus) break;
-        this.pos = (this.pos + 1) | 0;
-        continue;
-      }
-      last = this.codePointAt(this.pos, this.end);
-      if (!isIdentifierPart(last) && last !== CharacterCodes.minus) break;
-      this.pos = (this.pos + charSize(last)) | 0;
-    }
-    if (last === CharacterCodes.backslash)
-      this.setValue(text.substring(this.tokenStart, this.pos) + this.scanIdentifierParts());
-    else this.setValueSlice(this.tokenStart, this.pos);
-    return (this.token = this.identifierKind());
+    // JSDoc names take `-`, as JSX names do.
+    this.pos = this.tokenStart;
+    if (this.scanIdentifier(0, IdentifierVariant.JSX)) return (this.token = this.identifierKind());
+    this.pos = (this.tokenStart + charSize(ch)) | 0;
+    return (this.token = SyntaxKind.Unknown);
   }
+}
+
+/** Which characters an identifier scan takes after its start. */
+export const enum IdentifierVariant {
+  Standard,
+  /** JSX and JSDoc names, which take `-`. */
+  JSX,
+  /** Regular expression group names, which take a surrogate pair written as two `\u` escapes. */
+  RegExpGroupName,
 }
 
 const mergeConflictMarkerLength = 7;

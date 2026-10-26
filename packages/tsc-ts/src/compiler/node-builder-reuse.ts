@@ -700,11 +700,11 @@ function getModuleSpecifierOverride(b: NodeBuilder, parent: ImportTypeNode, lite
       ? lookupSymbolChain(b, nodeSymbol, meaning, true)[0]
       : undefined;
   if (parentSymbol !== undefined && isExternalModuleSymbol(parentSymbol))
-    name = getSpecifierForModuleSymbol(b, parentSymbol, mode);
+    name = getSpecifierForModuleSymbol(b, parentSymbol, mode).specifier;
   else {
     const targetFile = getExternalModuleFileFromDeclaration(c, parent);
     if (targetFile !== undefined && targetFile.symbol !== undefined)
-      name = getSpecifierForModuleSymbol(b, targetFile.symbol, mode);
+      name = getSpecifierForModuleSymbol(b, targetFile.symbol, mode).specifier;
   }
   if (name.includes('/node_modules/')) {
     b.encounteredError = true;
@@ -714,7 +714,7 @@ function getModuleSpecifierOverride(b: NodeBuilder, parent: ImportTypeNode, lite
 }
 
 function isExternalModuleSymbol(symbol: Symbol): boolean {
-  return (symbol.flags & SymbolFlags.Module) !== 0 && symbol.name.startsWith('"');
+  return symbol.isExternalModule();
 }
 
 function isLiteralImportType(node: ImportTypeNode): boolean {

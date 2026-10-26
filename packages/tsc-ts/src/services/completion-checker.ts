@@ -186,7 +186,7 @@ export function getExportSymbolOfSymbol(c: Checker, symbol: Symbol): Symbol {
 }
 
 export function isExternalModuleSymbol(symbol: Symbol): boolean {
-  return (symbol.flags & SymbolFlags.Module) !== 0 && symbol.name.charCodeAt(0) === 0x22;
+  return symbol.isExternalModule();
 }
 
 /** The exports of a module, sorted like a symbol table's members. */

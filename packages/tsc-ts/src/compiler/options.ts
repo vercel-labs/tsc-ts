@@ -49,6 +49,16 @@ export enum ModuleKind {
   Preserve = 200,
 }
 
+/** Whether `import defer` and `import.defer()` are allowed under a module kind. */
+export function supportsDeferredImports(moduleKind: ModuleKind): boolean {
+  return moduleKind === ModuleKind.ESNext || moduleKind === ModuleKind.Preserve;
+}
+
+/** Whether `import source` and `import.source()` are allowed under a module kind. */
+export function supportsSourcePhaseImports(moduleKind: ModuleKind): boolean {
+  return moduleKind === ModuleKind.ESNext || moduleKind === ModuleKind.NodeNext || moduleKind === ModuleKind.Preserve;
+}
+
 export enum ModuleResolutionKind {
   /** @deprecated Accepted for parsing and validation only. */
   Classic = 1,

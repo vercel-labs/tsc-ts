@@ -320,7 +320,7 @@ export class Symbol implements ProgramLifetime {
 
   /** Whether this is the symbol of an external module, named by its quoted path. */
   isExternalModule(): boolean {
-    return (this.flags & SymbolFlags.Module) !== 0 && this.name.charCodeAt(0) === 0x22;
+    return (this.flags & SymbolFlags.Module) !== 0 && tryGetAmbientModuleNameFromSymbolName(this.name) !== undefined;
   }
 
   /** The flags of this symbol and its export symbol. */
@@ -503,6 +503,19 @@ export function getMembers(symbol: Symbol): SymbolTable {
  * vanishingly unlikely in a string-literal property name.
  */
 export const internalSymbolNamePrefix = '￾';
+
+/**
+ * The module name of an ambient module symbol's name: `"name"`, or for a pattern module with import
+ * attributes, the internal symbol name prefix, `"name"pattern@` and the id of the attributes node.
+ */
+export function tryGetAmbientModuleNameFromSymbolName(name: string): string | undefined {
+  if (name.length >= 2 && name.charCodeAt(0) === 0x22 && name.charCodeAt(name.length - 1) === 0x22)
+    return name.substring(1, name.length - 1);
+  if (!name.startsWith(internalSymbolNamePrefix + '"')) return undefined;
+  const markerIndex = name.lastIndexOf('"pattern@');
+  if (markerIndex < internalSymbolNamePrefix.length + 2) return undefined;
+  return name.substring(internalSymbolNamePrefix.length + 1, markerIndex);
+}
 
 export const enum InternalSymbolName {
   /** Call signatures. */

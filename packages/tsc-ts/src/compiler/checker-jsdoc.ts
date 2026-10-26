@@ -24,7 +24,13 @@ import {
   getText,
   getType,
 } from './ast.js';
-import { getSourceFileOfNode, isTypeNodeKind } from './binder-utilities.js';
+import {
+  getSourceFileOfNode,
+  getSourceTextOfNode,
+  isEntityNameExpression,
+  isTypeNodeKind,
+} from './binder-utilities.js';
+import { isTypeAssignableTo, isTypeIdenticalTo } from './relations.js';
 import { getAttachedJSDoc, getJSDoc } from './parser.js';
 import { isInJSFile } from './ast-utilities.js';
 import { Diagnostics } from './diagnostics.js';
@@ -322,39 +328,49 @@ function getIdentifierFromEntityNameExpression(node: Node): Node | undefined {
   return undefined;
 }
 
-/** An `@augments` or `@extends` tag naming another class than the `extends` clause. */
-export class AugmentsMismatch {
-  readonly name: Node;
-  readonly tagName: string;
-  readonly className: string;
-  readonly extendsName: string;
-
-  constructor(name: Node, tagName: string, className: string, extendsName: string) {
-    this.name = name;
-    this.tagName = tagName;
-    this.className = className;
-    this.extendsName = extendsName;
-  }
-}
-
-/** The `@augments` or `@extends` tag of a class whose class name differs from its `extends` clause. */
-export function findMismatchedAugmentsTag(
-  classLike: Node,
-  extendsType: ExpressionWithTypeArguments,
-): AugmentsMismatch | undefined {
-  const jsDoc = getAttachedJSDoc(classLike);
-  if (jsDoc === undefined) return undefined;
+/**
+ * Reports an `@augments` or `@extends` tag of a JavaScript class whose class doesn't match the
+ * `extends` clause: for an entity name, a different type; for another expression, a type the base
+ * type isn't assignable to.
+ */
+export function checkJSDocAugmentsTagMatchesExtends(
+  c: Checker,
+  node: Node,
+  baseTypeNode: ExpressionWithTypeArguments,
+  baseType: Type,
+): void {
+  if (!isInJSFile(node)) return;
+  const jsDoc = getAttachedJSDoc(node);
+  if (jsDoc === undefined) return;
   for (const j of jsDoc) {
     const tags = (j as JSDoc).tags;
     if (tags === undefined) continue;
     for (const tag of tags.nodes) {
       if (tag.kind !== SyntaxKind.JSDocAugmentsTag) continue;
       const augments = tag as JSDocAugmentsTag;
-      const targetName = getIdentifierFromEntityNameExpression(extendsType.expression);
+      const sourceType = getTypeFromTypeNode(c, augments.className);
       const sourceName = getIdentifierFromEntityNameExpression(augments.className.expression);
-      if (targetName !== undefined && sourceName !== undefined && getText(targetName) !== getText(sourceName))
-        return new AugmentsMismatch(sourceName, getText(augments.tagName), getText(sourceName), getText(targetName));
+      if (isEntityNameExpression(baseTypeNode.expression, false)) {
+        if (isTypeIdenticalTo(c, sourceType, baseType)) continue;
+        const targetName = getIdentifierFromEntityNameExpression(baseTypeNode.expression);
+        if (targetName !== undefined && sourceName !== undefined)
+          c.error(
+            sourceName,
+            Diagnostics.JSDoc_0_1_does_not_match_the_extends_2_clause,
+            getText(augments.tagName),
+            getText(sourceName),
+            getText(targetName),
+          );
+      } else if (sourceName !== undefined && !isTypeAssignableTo(c, baseType, sourceType)) {
+        const expression = baseTypeNode.expression;
+        c.error(
+          sourceName,
+          Diagnostics.JSDoc_0_1_does_not_match_the_extends_2_clause,
+          getText(augments.tagName),
+          getText(sourceName),
+          getSourceTextOfNode(getSourceFileOfNode(expression), expression),
+        );
+      }
     }
   }
-  return undefined;
 }

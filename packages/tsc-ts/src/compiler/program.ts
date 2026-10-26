@@ -106,6 +106,7 @@ import {
   type SourceOutputAndProjectReference,
 } from './tsconfig.js';
 import { SyntaxKind } from './syntax-kind.js';
+import { isSourcePhaseImport } from './ast-utilities.js';
 import { KnownSymlinks } from './symlinks.js';
 import { mark } from './timeline.js';
 import { LanguageVariant } from './types.js';
@@ -362,7 +363,8 @@ export class Program implements OutputPathsHost {
         )
           continue;
         const resolved = resolver.resolvePackageDirectory(dependency, packageJsonName, ModuleKind.CommonJS);
-        if (resolved !== undefined && resolved.resolvedFileName !== '')
+        // A dependency installed in place has no original path to map from.
+        if (resolved !== undefined && resolved.resolvedFileName !== '' && resolved.originalPath !== '')
           symlinks.processResolution(
             combinePaths(resolved.originalPath, 'package.json'),
             combinePaths(resolved.resolvedFileName, 'package.json'),
@@ -467,6 +469,8 @@ export class Program implements OutputPathsHost {
   }
 
   getResolvedModuleFromModuleSpecifier(file: SourceFile, specifier: Node): ResolvedModule | undefined {
+    // A source phase import loads no module declarations.
+    if (specifier.parent !== undefined && isSourcePhaseImport(specifier.parent)) return undefined;
     const text = specifierText(specifier);
     return this.getResolvedModule(file, text, this.getModeForUsageLocation(file, specifier));
   }

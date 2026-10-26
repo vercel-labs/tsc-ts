@@ -9,10 +9,11 @@ import {
   ModuleDeclaration,
   type Node,
   NodeFlags,
-  type PatternAmbientModule,
+  PatternAmbientModule,
   type QualifiedName,
   type SourceFile,
   Tristate,
+  type TypeReferenceNode,
   getExpression,
   getInitializer,
   getMembers as getMemberNodes,
@@ -74,6 +75,7 @@ import {
   markAliasDeclarationOfNameIfTypeOnly,
   getExportsOfModuleWorker,
   getTargetOfAliasDeclaration,
+  getTypeOfModuleImportAttributes,
   getTypeOnlyAliasDeclaration,
   isTypeOnlyImportOrExportDeclaration,
   resolveExternalModuleNameWorker,
@@ -81,6 +83,7 @@ import {
   resolveIndirectionAlias,
 } from './checker-modules.js';
 import { isJSAliasDeclaration } from './checker-javascript.js';
+import { isTypeIdenticalTo } from './relations.js';
 import { getFeatureMap } from './checker-features.js';
 import { NodeBuilderInternalFlags } from './transformers/declarations-resolver.js';
 import {
@@ -95,6 +98,7 @@ import {
   Symbol,
   SymbolFlags,
   type SymbolTable,
+  tryGetAmbientModuleNameFromSymbolName,
 } from './symbol.js';
 
 // ---- Name resolution
@@ -446,8 +450,11 @@ function checkAndReportErrorForExtendingInterface(c: Checker, location: Node): b
 function getEntityNameForExtendingInterface(node: Node): Node | undefined {
   switch (node.kind) {
     case SyntaxKind.Identifier:
+    case SyntaxKind.QualifiedName:
     case SyntaxKind.PropertyAccessExpression:
       return node.parent !== undefined ? getEntityNameForExtendingInterface(node.parent) : undefined;
+    case SyntaxKind.TypeReference:
+      return (node as TypeReferenceNode).typeName;
     case SyntaxKind.ExpressionWithTypeArguments: {
       const expression = getExpression(node)!;
       return isEntityNameExpression(expression, false) ? expression : undefined;
@@ -575,7 +582,7 @@ function checkAndReportErrorForUsingTypeAsNamespace(
   if (symbol === undefined) return false;
   const parent = location.parent;
   if (parent !== undefined && parent.kind === SyntaxKind.QualifiedName) {
-    const propName = (parent as QualifiedName).right.text;
+    const propName = getText((parent as QualifiedName).right);
     if (getPropertyOfType(c, getDeclaredTypeOfSymbol(c, symbol), propName) !== undefined) {
       c.error(
         parent,
@@ -836,6 +843,7 @@ export class MergedGlobals {
   readonly ambientModuleSymbols: Symbol[];
   readonly patternAmbientModules: PatternAmbientModule[];
   readonly patternAmbientModuleAugmentations: Map<string, Symbol>;
+  readonly patternAmbientModuleAugmentationTargets: Map<string, Symbol>;
   /** Whether the global `undefined` is the checker's own (no declaration of `undefined` merged). */
   readonly ownUndefined: boolean;
   /** Ids of the symbols merged into each shared symbol. */
@@ -854,6 +862,7 @@ export class MergedGlobals {
     this.ambientModuleSymbols = c.ambientModuleSymbols.slice();
     this.patternAmbientModules = c.patternAmbientModules.slice();
     this.patternAmbientModuleAugmentations = new Map(c.patternAmbientModuleAugmentations);
+    this.patternAmbientModuleAugmentationTargets = new Map(c.patternAmbientModuleAugmentationTargets);
     for (const [id, target] of this.mergedSymbols) {
       let ids = this.sources.get(target);
       if (ids === undefined) {
@@ -970,6 +979,8 @@ export function initializeGlobals(c: Checker): void {
     for (const pattern of merged.patternAmbientModules) c.patternAmbientModules.push(pattern);
     for (const [name, symbol] of merged.patternAmbientModuleAugmentations)
       c.patternAmbientModuleAugmentations.set(name, symbol);
+    for (const [name, symbol] of merged.patternAmbientModuleAugmentationTargets)
+      c.patternAmbientModuleAugmentationTargets.set(name, symbol);
     addMergeDiagnostics(c, merged, 0);
     if (merged.ownUndefined) setGlobal(c, 'undefined', c.undefinedSymbol);
     return;
@@ -1016,6 +1027,7 @@ export function mergeAmbientModulesAndAugmentations(c: Checker): void {
     return;
   }
   for (const symbol of c.ambientModuleSymbols) mergeGlobalSymbol(c, symbol);
+  mergePatternAmbientModules(c);
   for (const file of c.files)
     for (const augmentation of file.moduleAugmentations)
       if (augmentation.parent !== undefined && !isGlobalScopeAugmentation(augmentation.parent))
@@ -1023,7 +1035,7 @@ export function mergeAmbientModulesAndAugmentations(c: Checker): void {
 }
 
 export function isAmbientModuleSymbolName(name: string): boolean {
-  return name.length >= 2 && name.charCodeAt(0) === 0x22 && name.charCodeAt(name.length - 1) === 0x22;
+  return tryGetAmbientModuleNameFromSymbolName(name) !== undefined;
 }
 
 function isTypeDeclaration(node: Node): boolean {
@@ -1053,6 +1065,44 @@ function mergeGlobalSymbol(c: Checker, symbol: Symbol): void {
   );
 }
 
+/** Merges the pattern ambient modules with the same pattern and identical import attributes types. */
+function mergePatternAmbientModules(c: Checker): void {
+  const modules = c.patternAmbientModules;
+  if (modules.length === 0) return;
+  const groupsByPattern = new Map<string, number[]>();
+  const grouped: PatternAmbientModule[] = [];
+  for (const module of modules) {
+    const attributesType = getTypeOfModuleImportAttributes(c, module.symbol);
+    let groups = groupsByPattern.get(module.text);
+    let groupIndex = -1;
+    if (groups !== undefined)
+      for (const index of groups)
+        if (isTypeIdenticalTo(c, attributesType, getTypeOfModuleImportAttributes(c, grouped[index]!.symbol))) {
+          groupIndex = index;
+          break;
+        }
+    if (groupIndex === -1) {
+      if (groups === undefined) {
+        groups = [];
+        groupsByPattern.set(module.text, groups);
+      }
+      groups.push(grouped.length);
+      grouped.push(new PatternAmbientModule(module.text, module.starIndex, module.symbol));
+    } else {
+      const group = grouped[groupIndex]!;
+      grouped[groupIndex] = new PatternAmbientModule(
+        group.text,
+        group.starIndex,
+        mergeSymbol(c, group.symbol, module.symbol, false),
+      );
+    }
+  }
+  for (const module of modules)
+    if (c.globals.has(module.symbol.name)) setGlobal(c, module.symbol.name, getMergedSymbol(c, module.symbol));
+  modules.length = 0;
+  for (const module of grouped) modules.push(module);
+}
+
 function mergeModuleAugmentation(c: Checker, moduleName: Node): void {
   const moduleNode = moduleName.parent as ModuleDeclaration;
   const augmentationSymbol = moduleNode.symbol!;
@@ -1067,14 +1117,25 @@ function mergeModuleAugmentation(c: Checker, moduleName: Node): void {
     (moduleNode.parent!.flags & NodeFlags.Ambient) === 0
       ? Diagnostics.Invalid_module_name_in_augmentation_module_0_cannot_be_found
       : undefined;
-  let mainModule = resolveExternalModuleNameWorker(c, moduleName, moduleName, moduleNotFoundError, false, true);
+  // Module augmentations can't have import attributes.
+  let mainModule = resolveExternalModuleNameWorker(
+    c,
+    moduleName,
+    moduleName,
+    moduleNotFoundError,
+    false,
+    true,
+    undefined,
+  );
   if (mainModule === undefined) return;
   mainModule = resolveExternalModuleSymbol(c, mainModule, false)!;
   if ((mainModule.flags & SymbolFlags.Namespace) !== 0) {
     for (const pattern of c.patternAmbientModules)
-      if (pattern.symbol === mainModule) {
+      if (getMergedSymbol(c, pattern.symbol) === mainModule) {
+        // Merging the pattern into the augmentation keeps the pattern's own exports unchanged.
         const merged = mergeSymbol(c, augmentationSymbol, mainModule, true);
         c.patternAmbientModuleAugmentations.set(getText(moduleName), merged);
+        c.patternAmbientModuleAugmentationTargets.set(getText(moduleName), mainModule);
         return;
       }
     // Exports the module gets through `export *` live on the re-exported symbols; merge into those.
@@ -1927,7 +1988,7 @@ function resolveQualifiedName(
         qualified.right,
         Diagnostics.Cannot_access_0_1_because_0_is_a_type_but_not_a_namespace_Did_you_mean_to_retrieve_the_type_of_the_property_1_in_0_with_0_1,
         symbolToString(c, getMergedSymbol(c, exportedType)),
-        qualified.right.text,
+        getText(qualified.right),
       );
       return undefined;
     }
@@ -1943,7 +2004,7 @@ function tryGetQualifiedNameAsValue(c: Checker, node: Node): Symbol | undefined 
   if (symbol === undefined) return undefined;
   let current: Node = id;
   while (current.parent!.kind === SyntaxKind.QualifiedName) {
-    symbol = getPropertyOfType(c, getTypeOfSymbol(c, symbol), (current.parent as QualifiedName).right.text);
+    symbol = getPropertyOfType(c, getTypeOfSymbol(c, symbol), getText((current.parent as QualifiedName).right));
     if (symbol === undefined) return undefined;
     current = current.parent!;
   }

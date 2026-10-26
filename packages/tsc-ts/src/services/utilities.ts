@@ -47,6 +47,7 @@ import {
   VariableDeclarationList,
 } from '../compiler/ast.js';
 import {
+  getHeritageClauseElementName,
   isAmbientModule,
   isImportCall,
   isModifierKind,
@@ -644,7 +645,7 @@ export function getAdjustedLocation(node: Node, forRename: boolean, file: Source
     parent.token === node.kind &&
     parent.types.nodes.length === 1
   )
-    return getExpression(parent.types.nodes[0])!;
+    return getHeritageClauseElementName(parent.types.nodes[0]!);
   if (node.kind === SyntaxKind.ExtendsKeyword) {
     if (parent instanceof TypeParameterDeclaration) {
       const constraint = parent.constraint;

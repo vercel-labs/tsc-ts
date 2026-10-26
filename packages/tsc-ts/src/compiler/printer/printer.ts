@@ -375,6 +375,8 @@ const enum ListItem {
   ImportSpecifier,
   ExportSpecifier,
   ExpressionWithTypeArguments,
+  /** An `ExpressionWithTypeArguments` or a type reference in a heritage clause. */
+  HeritageClauseElement,
   JsxChild,
   JsxAttributeLike,
 }
@@ -1218,7 +1220,8 @@ export class Printer extends NameGeneratorHost {
     const state = this.enterNode(node);
     this.emitEntityName(node.left);
     this.write1('.');
-    this.emitIdentifierName(node.right);
+    if (node.right instanceof PrivateIdentifier) this.emitPrivateIdentifier(node.right);
+    else this.emitIdentifierName(node.right as Identifier);
     this.exitNode(node, state);
     return true;
   }
@@ -3312,6 +3315,10 @@ export class Printer extends NameGeneratorHost {
       this.emitIdentifierOrString(body.name, false);
       body = body.body;
     }
+    if (node.attributes !== undefined) {
+      this.write1(' with ');
+      this.emitTypeNode(node.attributes, TypePrecedence.NonArray);
+    }
     if (body === undefined) this.write1(';');
     else if (body instanceof ModuleBlock) {
       this.space();
@@ -3872,7 +3879,7 @@ export class Printer extends NameGeneratorHost {
     this.space();
     this.emitToken(node.token, node.pos, node);
     this.space();
-    this.emitList(ListItem.ExpressionWithTypeArguments, node, node.types, ListFormat.HeritageClauseTypes);
+    this.emitList(ListItem.HeritageClauseElement, node, node.types, ListFormat.HeritageClauseTypes);
     this.exitNode(node, state);
     return true;
   }
@@ -4092,6 +4099,10 @@ export class Printer extends NameGeneratorHost {
         break;
       case ListItem.ExpressionWithTypeArguments:
         if (node instanceof ExpressionWithTypeArguments) return this.emitExpressionWithTypeArguments(node);
+        break;
+      case ListItem.HeritageClauseElement:
+        if (node instanceof ExpressionWithTypeArguments) return this.emitExpressionWithTypeArguments(node);
+        if (node.kind === SyntaxKind.TypeReference) return this.emitTypeNodeWorker(node);
         break;
       case ListItem.JsxChild:
         return this.emitJsxChild(node);

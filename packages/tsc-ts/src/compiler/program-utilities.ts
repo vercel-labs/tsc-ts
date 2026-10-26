@@ -20,7 +20,7 @@ import {
   type Node,
   type SourceFile,
 } from './ast.js';
-import { isImportCall, isRequireCall } from './ast-utilities.js';
+import { isImportCall, isRequireCall, isSourcePhaseImportCall } from './ast-utilities.js';
 import { libMap } from './option-declarations.js';
 import {
   getEmitModuleDetectionKind,
@@ -415,6 +415,8 @@ export function getEmitSyntaxForUsageLocation(
   const fileEmitMode = getEmitModuleFormatOfFile(fileName, options, metadata);
   const call = walkUpParenthesizedExpressions(parent);
   if (call !== undefined && isImportCall(call)) {
+    // `import.source()` is never transformed to `require`.
+    if (isSourcePhaseImportCall(call)) return ModuleKind.ESNext;
     return shouldTransformImportCall(options, fileEmitMode) ? ModuleKind.CommonJS : ModuleKind.ESNext;
   }
   if (fileEmitMode === ModuleKind.CommonJS) return ModuleKind.CommonJS;

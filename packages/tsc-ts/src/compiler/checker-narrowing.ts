@@ -1194,7 +1194,7 @@ function writeFlowCacheKey(
       return writeFlowCacheKey(c, getExpression(node)!, declaredType, initialType, flowContainer);
     case SyntaxKind.QualifiedName: {
       const left = writeFlowCacheKey(c, (node as QualifiedName).left, declaredType, initialType, flowContainer);
-      return left === undefined ? undefined : left + '.' + (node as QualifiedName).right.text;
+      return left === undefined ? undefined : left + '.' + getText((node as QualifiedName).right);
     }
     case SyntaxKind.PropertyAccessExpression:
     case SyntaxKind.ElementAccessExpression: {
@@ -2400,7 +2400,7 @@ export function isMatchingReference(c: Checker, source: Node, target: Node): boo
         const targetName = getAccessedPropertyName(c, target);
         if (targetName !== undefined)
           return (
-            (source as QualifiedName).right.text === targetName &&
+            getText((source as QualifiedName).right) === targetName &&
             isMatchingReference(c, (source as QualifiedName).left, getExpression(target)!)
           );
       }
