@@ -470,6 +470,8 @@ export class NodeBuilder {
   pseudo: PseudoChecker | undefined = undefined;
   /** Set for declaration emit, which writes unions in an order that doesn't depend on the checker's history. */
   declarationOrder = false;
+  /** When set, the symbol each identifier naming a symbol refers to. */
+  idToSymbol: Map<Node, Symbol> | undefined = undefined;
 
   constructor(
     c: Checker,
@@ -586,6 +588,13 @@ export class NodeBuilder {
 
   identifier(text: string): Identifier {
     return this.factory.createIdentifier(text);
+  }
+
+  /** An identifier naming `symbol`, recorded in `idToSymbol`. */
+  symbolIdentifier(text: string, symbol: Symbol): Identifier {
+    const identifier = this.factory.createIdentifier(text);
+    this.idToSymbol?.set(identifier, symbol);
+    return identifier;
   }
 
   stringLiteral(text: string, isSingleQuote: boolean): StringLiteral {
@@ -3353,9 +3362,11 @@ export function typeToTypeNode(
   flags: number,
   internalFlags: NodeBuilderInternalFlags = NodeBuilderInternalFlags.None,
   tracker: SymbolTracker | undefined = undefined,
+  idToSymbol: Map<Node, Symbol> | undefined = undefined,
 ): Node | undefined {
   const b = new NodeBuilder(c, enclosingDeclaration, flags, internalFlags, tracker);
   b.pseudo = newPseudoChecker(c);
+  b.idToSymbol = idToSymbol;
   return b.finish(b.typeToTypeNode(type));
 }
 
