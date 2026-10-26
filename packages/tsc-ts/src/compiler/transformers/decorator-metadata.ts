@@ -67,7 +67,7 @@ export class DecoratorMetadata extends Transformer {
   private readonly legacyDecorators: boolean;
   private readonly facts: SyntaxFacts;
   private readonly serializer: MetadataSerializer;
-  /** The class whose members are visited. */
+  /** The class, or object literal, whose members are visited. */
   private parentClass: Node | undefined;
 
   constructor(context: EmitContext, options: CompilerOptions, resolver: EmitResolver, facts: SyntaxFacts) {
@@ -89,6 +89,14 @@ export class DecoratorMetadata extends Transformer {
       case SyntaxKind.ClassDeclaration:
       case SyntaxKind.ClassExpression:
         return this.visitClass(node);
+      case SyntaxKind.ObjectLiteralExpression: {
+        // Members of an object literal are not class elements and get no metadata.
+        const saved = this.parentClass;
+        this.parentClass = node;
+        const updated = this.visitEachChild(node);
+        this.parentClass = saved;
+        return updated;
+      }
       case SyntaxKind.PropertyDeclaration:
         if (node instanceof PropertyDeclaration) {
           if (!hasDecorators(node)) return this.visitEachChild(node);

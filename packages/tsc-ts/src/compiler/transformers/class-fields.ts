@@ -418,7 +418,7 @@ export class ClassFieldsTransformer extends Transformer {
   private visitForSubstitution(node: Node): Node | undefined {
     if (node instanceof Identifier) return this.visitIdentifier(node as Identifier);
     if (node instanceof PropertyAccessExpression && node.name instanceof Identifier)
-      return this.visitPropertyAccessExpressionForSubstitution(node);
+      return this.visitPropertyAccessExpressionForSubstitution(node, this.substitutionMode);
     return this.substitutionMode.visitEachChild(node);
   }
 
@@ -763,9 +763,10 @@ export class ClassFieldsTransformer extends Transformer {
   private visitMethodOrAccessorDeclaration(node: Node): Node | undefined {
     if (!isPrivateIdentifierClassElementDeclaration(node) || !this.shouldTransformClassElementToWeakMap(node))
       return this.classElementMode.visitEachChild(node);
-    const info = this.accessPrivateIdentifier(getName(node)!);
+    // The member's own class declares it; an untransformed or duplicate name leaves the member as written.
+    const info = this.getPrivateIdentifier(this.getPrivateEnvironment(), getName(node)!);
     if (info === undefined) throw new Error('Undeclared private name for property declaration.');
-    if (!info.isValid) return node;
+    if (info.kind === PrivateKind.Untransformed || !info.isValid) return node;
     const functionName = this.getHoistedFunctionName(node, info);
     if (functionName !== undefined) {
       const factory = this.factory;
@@ -878,9 +879,9 @@ export class ClassFieldsTransformer extends Transformer {
     const factory = this.factory;
     if (this.shouldTransformClassElementToWeakMap(node)) {
       // Fields become WeakMaps: the declaration goes.
-      const info = this.accessPrivateIdentifier(node.name);
+      const info = this.getPrivateIdentifier(this.getPrivateEnvironment(), node.name);
       if (info === undefined) throw new Error('Undeclared private name for property declaration.');
-      if (!info.isValid) return node;
+      if (info.kind === PrivateKind.Untransformed || !info.isValid) return node;
       // A static field of a class whose static blocks stay becomes a static block.
       if (info.isStatic && !this.shouldTransformPrivateElementsOrClassStaticBlocks) {
         const statement = this.transformPropertyOrClassStaticBlock(node, factory.createThisExpression());
@@ -1039,12 +1040,13 @@ export class ClassFieldsTransformer extends Transformer {
       }
     }
     // Property names are not references and are never substituted.
-    if (node.name instanceof Identifier) return this.visitPropertyAccessExpressionForSubstitution(node);
+    if (node.name instanceof Identifier) return this.visitPropertyAccessExpressionForSubstitution(node, this);
     return this.visitEachChild(node);
   }
 
-  private visitPropertyAccessExpressionForSubstitution(node: PropertyAccessExpression): Node {
-    const expression = this.visitNode(node.expression)!;
+  /** Visits only the expression of a property access, with `visitor`, so that its name is never substituted. */
+  private visitPropertyAccessExpressionForSubstitution(node: PropertyAccessExpression, visitor: VisitorBase): Node {
+    const expression = visitor.visitNode(node.expression)!;
     if (expression === node.expression) return node;
     return this.factory.updatePropertyAccessExpression(node, expression, node.questionDotToken, node.name, node.flags);
   }
@@ -1745,12 +1747,11 @@ export class ClassFieldsTransformer extends Transformer {
     }
     const statics = staticPropertiesAndClassStaticBlocks(node);
     // Aliases must be known before visiting members, so predict whether a temporary will wrap the class.
+    const hasTransformableStatics = this.hasTransformableStatics(node, statics);
     let isClassWithConstructorReference = false;
-    let hasTransformableStatics = false;
     let deferTempDeclaration = false;
     if (!isDecoratedClassDeclaration) {
       isClassWithConstructorReference = this.classContainsConstructorReference(node);
-      hasTransformableStatics = this.hasTransformableStatics(node, statics);
       let willHavePrivatePendingExpressions = false;
       if (this.shouldTransformPrivateElementsOrClassStaticBlocks) {
         const members = node.members.nodes;
@@ -1810,7 +1811,7 @@ export class ClassFieldsTransformer extends Transformer {
         for (let i = 0; i < initializers.length; i++) expressions.push(initializers[i]);
         expressions.push(factory.cloneIdentifier(temp));
       } else expressions.push(classExpression as Node);
-    } else {
+    } else if (hasTransformableStatics || this.pendingExpressions.length > 0) {
       for (let i = 0; i < this.pendingExpressions.length; i++)
         this.pendingStatements.push(factory.createExpressionStatement(this.pendingExpressions[i]));
       if (statics.length > 0) {
@@ -1821,7 +1822,7 @@ export class ClassFieldsTransformer extends Transformer {
       else if (this.shouldTransformPrivateElementsOrClassStaticBlocks && classThis !== undefined)
         expressions.push(factory.createAssignment(classThis, classExpression));
       else expressions.push(classExpression as Node);
-    }
+    } else expressions.push(classExpression as Node);
     if (expressions.length > 1) {
       context.addEmitFlags(classExpression, EmitFlags.Indented);
       for (let i = 0; i < expressions.length; i++) context.addEmitFlags(expressions[i], EmitFlags.StartOnNewLine);

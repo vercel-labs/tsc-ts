@@ -3,6 +3,7 @@ import {
   ClassExpression,
   ExportAssignment,
   type Node,
+  NodeVisitor,
   PrivateIdentifier,
   SourceFile,
   StringLiteral,
@@ -360,12 +361,33 @@ export function forgetIdentifierSets(): void {
   identifierSets.clear();
 }
 
-/** Whether no identifier in `file` is named `name`. */
+/** Collects the texts of a file's identifiers, private names and literals: the names its generated names avoid. */
+class NameTextCollector extends NodeVisitor {
+  readonly texts = new Set<string>();
+
+  visitNode(node: Node): boolean {
+    switch (node.kind) {
+      case SyntaxKind.Identifier:
+      case SyntaxKind.PrivateIdentifier:
+      case SyntaxKind.StringLiteral:
+      case SyntaxKind.NumericLiteral:
+      case SyntaxKind.BigIntLiteral:
+      case SyntaxKind.NoSubstitutionTemplateLiteral:
+        this.texts.add(getText(node));
+    }
+    node.forEachChild(this);
+    return false;
+  }
+}
+
+/** Whether no identifier, private name or literal in `file` has the text `name`. */
 export function isFileLevelUniqueName(file: SourceFile, name: string): boolean {
   let set = identifierSets.get(file);
   if (set === undefined) {
     if (identifierSets.size >= 16) identifierSets.clear();
-    set = new Set<string>(file.identifierTexts);
+    const collector = new NameTextCollector();
+    file.forEachChild(collector);
+    set = collector.texts;
     identifierSets.set(file, set);
   }
   return !set.has(name);

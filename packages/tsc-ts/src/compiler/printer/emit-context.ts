@@ -1,6 +1,7 @@
 // Side tables that transforms fill in and the printer reads: original nodes, emit flags,
 // comment and source map ranges, synthesized comments, generated names and emit helpers.
 import {
+  Block,
   ExpressionStatement,
   FunctionDeclaration,
   Identifier,
@@ -597,6 +598,21 @@ export class EmitContext extends NodeFactory {
     this.addEmitFlags(node, EmitFlags.CustomPrologue);
     this.varScopes[this.varScopes.length - 1].initializationStatements.push(node);
     return node;
+  }
+
+  /** `node` as a function body: a block as it is, an expression as `{ return node; }` with the expression's range. */
+  convertToFunctionBlock(node: Node, multiLine: boolean): Block {
+    if (node instanceof Block) return node as Block;
+    const factory = this.factory;
+    const statement = factory.createReturnStatement(node);
+    statement.pos = node.pos;
+    statement.end = node.end;
+    const block = factory.createBlock([statement], multiLine);
+    block.statements.pos = node.pos;
+    block.statements.end = node.end;
+    block.pos = node.pos;
+    block.end = node.end;
+    return block;
   }
 
   /** Marks the current variable scope as visiting parameters; returns the previous flags. */

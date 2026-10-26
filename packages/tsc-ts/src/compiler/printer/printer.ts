@@ -606,7 +606,8 @@ export class Printer extends NameGeneratorHost {
 
   isFileLevelUniqueName(name: string): boolean {
     const file = this.currentSourceFile;
-    return file === undefined || isFileLevelUniqueName(file, name);
+    // The names of the source file as parsed, not as transformed.
+    return file === undefined || isFileLevelUniqueName(this.context.mostOriginal(file) as SourceFile, name);
   }
 
   private getLiteralTextOfNode(node: Node, sourceFile: SourceFile | undefined, flags: LiteralTextFlags): string {
