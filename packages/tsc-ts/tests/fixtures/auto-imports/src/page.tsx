@@ -1,0 +1,1 @@
+const page = <Ca />;

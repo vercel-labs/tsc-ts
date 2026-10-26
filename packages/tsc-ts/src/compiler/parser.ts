@@ -7870,7 +7870,7 @@ export function isNodeCoreModule(moduleName: string): boolean {
 }
 
 // `require('module').builtinModules`, without and with only the `node:` prefix.
-const unprefixedNodeCoreModules = new Set<string>([
+export const unprefixedNodeCoreModules = new Set<string>([
   'assert',
   'assert/strict',
   'async_hooks',
@@ -7927,7 +7927,7 @@ const unprefixedNodeCoreModules = new Set<string>([
   'zlib',
 ]);
 
-const exclusivelyPrefixedNodeCoreModules = new Set<string>([
+export const exclusivelyPrefixedNodeCoreModules = new Set<string>([
   'node:quic',
   'node:sea',
   'node:sqlite',
