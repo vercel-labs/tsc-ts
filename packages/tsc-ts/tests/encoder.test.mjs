@@ -76,13 +76,7 @@ test('encodings use the protocol 9 layout', { skip }, async () => {
   // A module declaration's attributes come before its body.
   const typed = parseSourceFile('/c.ts', 'declare module "m" {}\ntype T = { a: 1 };\n');
   const [module, alias] = typed.statements.nodes;
-  const withAttributes = new ModuleDeclaration(
-    undefined,
-    module.keyword,
-    module.name,
-    alias.type,
-    module.body,
-  );
+  const withAttributes = new ModuleDeclaration(undefined, module.keyword, module.name, alias.type, module.body);
   const decoded = decodeNodes(encodeNode(withAttributes));
   assert.equal(decoded.attributes?.kind, alias.type.kind);
   assert.equal(decoded.body?.kind, module.body.kind);
