@@ -168,7 +168,6 @@ export const enum ObjectFlags {
   IdenticalBaseTypeCalculated = 1 << 27,
   IdenticalBaseTypeExists = 1 << 28,
   FromTypeNode = 1 << 29,
-  UnresolvedMembers = 1 << 30,
   /**
    * The type keeps the state that is computed lazily in the checker's side tables instead of its
    * own fields, which stay unset (`sideOf`). Every type with `TSC_TS_SIDE_STATE=1`.
@@ -361,6 +360,8 @@ export const enum CachedTypeKind {
   PromisedTypeOfPromise,
   Optional,
   OptionalProperty,
+  SimplifiedConditionalForReading,
+  SimplifiedConditionalForWriting,
 }
 
 export function cachedTypeKey(kind: CachedTypeKind, id: number): number {
@@ -1345,7 +1346,14 @@ export class TypeParameter extends Type {
   target: Type | undefined;
   mapper: TypeMapper | undefined;
   isThisType: boolean;
+  /**
+   * A type parameter as referenced inside a distributive conditional type on it, which stands for each
+   * constituent in turn; its constraint is the type parameter it was made from (`getDistributedTypeParameter`).
+   */
+  isDistributed: boolean;
   resolvedDefaultType: Type | undefined;
+  /** The distributed form of this type parameter, made on first use. */
+  distributedType: TypeParameter | undefined;
 
   constructor(id: number, symbol: Symbol | undefined) {
     super(TypeFlags.TypeParameter, ObjectFlags.None, id, symbol);
@@ -1353,8 +1361,27 @@ export class TypeParameter extends Type {
     this.target = undefined;
     this.mapper = undefined;
     this.isThisType = false;
+    this.isDistributed = false;
     this.resolvedDefaultType = undefined;
+    this.distributedType = undefined;
   }
+}
+
+/** Whether `t` is the distributed form of a type parameter. */
+export function isDistributedTypeParameter(t: Type): boolean {
+  return (t.flags & TypeFlags.TypeParameter) !== 0 && (t as TypeParameter).isDistributed;
+}
+
+/** The type parameter a distributed type parameter was made from; other types as they are. */
+export function getNonDistributedTypeParameter(t: Type): Type {
+  return (t.flags & TypeFlags.TypeParameter) !== 0 && (t as TypeParameter).isDistributed
+    ? (t as TypeParameter).constraint!
+    : t;
+}
+
+/** What `mapper` maps `t` to, a distributed type parameter as the type parameter it was made from. */
+export function getMappedType(t: Type, mapper: TypeMapper): Type {
+  return mapper.map(getNonDistributedTypeParameter(t));
 }
 
 /** `keyof T`. */
@@ -1956,12 +1983,12 @@ export function mergeTypeMappers(m1: TypeMapper | undefined, m2: TypeMapper): Ty
 }
 
 export function prependTypeMapping(source: Type, target: Type, mapper: TypeMapper | undefined): TypeMapper {
-  const simple = new SimpleTypeMapper(source, target);
+  const simple = new SimpleTypeMapper(getNonDistributedTypeParameter(source), target);
   return mapper === undefined ? simple : new MergedTypeMapper(simple, mapper);
 }
 
 export function appendTypeMapping(mapper: TypeMapper | undefined, source: Type, target: Type): TypeMapper {
-  const simple = new SimpleTypeMapper(source, target);
+  const simple = new SimpleTypeMapper(getNonDistributedTypeParameter(source), target);
   return mapper === undefined ? simple : new MergedTypeMapper(mapper, simple);
 }
 

@@ -8,6 +8,7 @@ import { getAliasForTypeNode, getTypeArgumentsOfDeferredReference } from './chec
 import { TypeSystemPropertyName, popTypeResolution, pushTypeResolution } from './checker-symbols.js';
 import { isGenericIndexType } from './checker-type-operators.js';
 import { compareCodePoints } from './diagnostics.js';
+import { utf8Length } from './character-codes.js';
 import { Diagnostics } from './diagnostic-messages.js';
 import type { Checker } from './checker.js';
 import {
@@ -79,6 +80,7 @@ import { addOptionality } from './checker-symbol-types.js';
 import { getSourceFileOfNode } from './binder-utilities.js';
 import { isPartOfTypeNode } from './transformers/alias-references.js';
 import { CheckFlags, declarationCount, getSymbolId, type Symbol, SymbolFlags, type SymbolTable } from './symbol.js';
+import { comparePseudoBigInts } from './pseudo-bigint.js';
 
 export const enum UnionReduction {
   None = 0,
@@ -562,11 +564,12 @@ function getTypeNameSymbol(t: Type): Symbol | undefined {
 function compareTypeNames(c: Checker, t1: Type, t2: Type): number {
   const s1 = getTypeNameSymbol(t1);
   const s2 = getTypeNameSymbol(t2);
-  if (s1 === s2)
-    return t1.alias !== undefined ? compareTypeLists(c, t1.alias.typeArguments, t2.alias!.typeArguments) : 0;
+  if (s1 === s2) return compareTypeLists(c, t1.alias?.typeArguments, t2.alias?.typeArguments);
   if (s1 === undefined) return 1;
   if (s2 === undefined) return -1;
-  return compareCodePoints(s1.name, s2.name);
+  const r = compareCodePoints(s1.name, s2.name);
+  // Distinct declarations with the same name stay together before alias arguments or structure decide.
+  return r !== 0 ? r : compareSymbols(c, s1, s2);
 }
 
 function compareTypeLists(c: Checker, s1: readonly Type[] | undefined, s2: readonly Type[] | undefined): number {
@@ -800,8 +803,17 @@ export function compareTypes(c: Checker, t1: Type, t2: Type): number {
   if ((flags & TypeFlags.Singleton) !== 0) {
     // Only distinguished by ids.
   } else if ((flags & TypeFlags.Object) !== 0) {
-    r = compareSymbols(c, t1.symbol, t2.symbol);
-    if (r !== 0) return r;
+    if ((t1.objectFlags & t2.objectFlags & ObjectFlags.InstantiationExpressionType) !== 0) {
+      // Instantiation expression types are ordered by their source declaration, since one expression
+      // can produce a type for each union constituent, then by the expression, without symbol ids.
+      r = compareNodes(c, t1.symbol?.declaration, t2.symbol?.declaration);
+      if (r !== 0) return r;
+      r = compareNodes(c, (t1 as InstantiationExpressionType).node, (t2 as InstantiationExpressionType).node);
+      if (r !== 0) return r;
+    } else {
+      r = compareSymbols(c, t1.symbol, t2.symbol);
+      if (r !== 0) return r;
+    }
     if ((t1.objectFlags & ObjectFlags.Reference) !== 0 && (t2.objectFlags & ObjectFlags.Reference) !== 0) {
       const r1 = t1 as TypeReference;
       const r2 = t2 as TypeReference;
@@ -823,9 +835,28 @@ export function compareTypes(c: Checker, t1: Type, t2: Type): number {
     } else if ((t1.objectFlags & ObjectFlags.Reference) !== 0) return -1;
     else if ((t2.objectFlags & ObjectFlags.Reference) !== 0) return 1;
     else {
+      // Unnamed non-reference object types are ordered by kind and instantiation data.
       r = (t1.objectFlags & ObjectFlags.ObjectTypeKindMask) - (t2.objectFlags & ObjectFlags.ObjectTypeKindMask);
       if (r !== 0) return r;
-      r = compareTypeMappers(c, (t1 as ObjectType).mapper, (t2 as ObjectType).mapper);
+      if ((t1.objectFlags & ObjectFlags.ReverseMapped) !== 0) {
+        const r1 = t1 as ReverseMappedType;
+        const r2 = t2 as ReverseMappedType;
+        r = compareTypes(c, r1.source!, r2.source!);
+        if (r !== 0) return r;
+        r = compareTypes(c, r1.mappedType!, r2.mappedType!);
+        if (r !== 0) return r;
+        r = compareTypes(c, r1.constraintType!, r2.constraintType!);
+        if (r !== 0) return r;
+      }
+      let m1 = (t1 as ObjectType).mapper;
+      let m2 = (t2 as ObjectType).mapper;
+      if ((t1.objectFlags & ObjectFlags.Mapped) !== 0) {
+        // instantiateAnonymousType prepends a mapping to a fresh type parameter; compare the
+        // instantiation itself rather than the identity of that parameter.
+        if (m1 instanceof CompositeTypeMapper) m1 = m1.m2;
+        if (m2 instanceof CompositeTypeMapper) m2 = m2.m2;
+      }
+      r = compareTypeMappers(c, m1, m2);
       if (r !== 0) return r;
     }
   } else if ((flags & TypeFlags.Union) !== 0) {
@@ -851,6 +882,9 @@ export function compareTypes(c: Checker, t1: Type, t2: Type): number {
     if (r !== 0) return r;
   } else if ((flags & TypeFlags.NumberLiteral) !== 0) {
     r = compareNumbers((t1 as LiteralType).numberValue, (t2 as LiteralType).numberValue);
+    if (r !== 0) return r;
+  } else if ((flags & TypeFlags.BigIntLiteral) !== 0) {
+    r = comparePseudoBigInts((t1 as LiteralType).stringValue, (t2 as LiteralType).stringValue);
     if (r !== 0) return r;
   } else if ((flags & TypeFlags.BooleanLiteral) !== 0) {
     const b1 = (t1 as LiteralType).stringValue === 'true';
@@ -2553,7 +2587,13 @@ export function getTemplateLiteralType(c: Checker, texts: string[], types: Type[
   }
   if (types.includes(c.wildcardType)) return c.wildcardType;
   const builder = new TemplateBuilder(c, texts[0]!);
-  if (!builder.addSpans(texts, types)) return c.stringType;
+  if (!builder.addSpans(texts, types)) {
+    if (builder.tooLarge) {
+      c.error(c.currentNode, Diagnostics.Type_instantiation_is_excessively_deep_and_possibly_infinite);
+      return c.errorType;
+    }
+    return c.stringType;
+  }
   if (builder.newTypes.length === 0) return getStringLiteralType(c, builder.text);
   builder.newTexts.push(builder.text);
   const newTexts = builder.newTexts;
@@ -2572,15 +2612,30 @@ export function getTemplateLiteralType(c: Checker, texts: string[], types: Type[
   return type;
 }
 
+/**
+ * Limits on the size of a template literal type that getTemplateLiteralType builds, in UTF-8 bytes of text
+ * and in placeholders. Recursive instantiations such as `Recur<any, `${S}_${S}`>` double the text or the
+ * placeholders on every step and exhaust memory long before the tail recursion limit of conditional types.
+ */
+const maxTemplateLiteralTypeLength = 50_000_000;
+const maxTemplateLiteralTypeSpans = 100_000;
+
 class TemplateBuilder {
   readonly c: Checker;
   text: string;
   readonly newTypes: Type[] = [];
   readonly newTexts: string[] = [];
+  /** UTF-8 bytes of `text`. */
+  private textBytes: number;
+  /** UTF-8 bytes of the texts already moved into `newTexts`. */
+  private movedBytes = 0;
+  /** Whether `addSpans` stopped because the result passed a size limit. */
+  tooLarge = false;
 
   constructor(c: Checker, text: string) {
     this.c = c;
     this.text = text;
+    this.textBytes = utf8Length(text);
   }
 
   addSpans(texts: string[], types: Type[]): boolean {
@@ -2588,17 +2643,30 @@ class TemplateBuilder {
     for (let i = 0; i < types.length; i++) {
       const t = types[i]!;
       if ((t.flags & (TypeFlags.Literal | TypeFlags.Null | TypeFlags.Undefined)) !== 0) {
-        this.text += getTemplateStringForType(c, t) + texts[i + 1]!;
+        const added = getTemplateStringForType(c, t) + texts[i + 1]!;
+        this.text += added;
+        this.textBytes += utf8Length(added);
       } else if ((t.flags & TypeFlags.TemplateLiteral) !== 0) {
         const template = t as TemplateLiteralType;
         this.text += template.texts[0]!;
+        this.textBytes += utf8Length(template.texts[0]!);
         if (!this.addSpans(template.texts, template.types)) return false;
         this.text += texts[i + 1]!;
+        this.textBytes += utf8Length(texts[i + 1]!);
       } else if (isGenericIndexType(c, t) || isPatternLiteralPlaceholderType(c, t)) {
         this.newTypes.push(t);
         this.newTexts.push(this.text);
+        this.movedBytes += this.textBytes;
         this.text = texts[i + 1]!;
+        this.textBytes = utf8Length(this.text);
       } else return false;
+      if (
+        this.movedBytes + this.textBytes > maxTemplateLiteralTypeLength ||
+        this.newTypes.length > maxTemplateLiteralTypeSpans
+      ) {
+        this.tooLarge = true;
+        return false;
+      }
     }
     return true;
   }

@@ -2416,10 +2416,16 @@ export function isMatchingReference(c: Checker, source: Node, target: Node): boo
 
 /** Whether `expr` is `reference.constructor`. */
 function isMatchingConstructorReference(c: Checker, f: FlowState, expr: Node): boolean {
+  // Only a literal name is read here; resolving an entity name argument could start a circularity.
+  let name: Node | undefined = undefined;
+  if (expr.kind === SyntaxKind.PropertyAccessExpression) name = (expr as PropertyAccessExpression).name;
+  else if (
+    expr.kind === SyntaxKind.ElementAccessExpression &&
+    isStringLiteralLike((expr as ElementAccessExpression).argumentExpression)
+  )
+    name = (expr as ElementAccessExpression).argumentExpression;
   return (
-    isAccessExpression(expr) &&
-    getAccessedPropertyName(c, expr) === 'constructor' &&
-    isMatchingReference(c, f.reference, getExpression(expr)!)
+    name !== undefined && getText(name) === 'constructor' && isMatchingReference(c, f.reference, getExpression(expr)!)
   );
 }
 

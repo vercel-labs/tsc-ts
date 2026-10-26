@@ -61,7 +61,7 @@ import { skipTrivia } from './scanner.js';
 import { Diagnostic, Diagnostics } from './diagnostics.js';
 import { type Symbol, SymbolFlags } from './symbol.js';
 import { SyntaxKind } from './syntax-kind.js';
-import { type Checker } from './checker.js';
+import { type Checker, createDiagnosticForNode } from './checker.js';
 import {
   checkSuperExpression,
   checkThisBeforeSuper,
@@ -153,9 +153,6 @@ import {
   isGenericIndexType,
   isGenericMappedType,
   isGenericType,
-  getMappedTypeNameTypeKind,
-  MappedTypeNameTypeKind,
-  getIndexForMappedType,
   getIndexTypeEx,
   getMappedTypeModifiers,
   MappedTypeModifiers,
@@ -970,8 +967,21 @@ export function checkThisExpression(c: Checker, node: Node): Type {
     const globalThisType = getTypeOfSymbol(c, c.globalThisSymbol);
     if (t === globalThisType && capturedByArrowFunction)
       c.error(node, Diagnostics.The_containing_arrow_function_captures_the_global_value_of_this);
-    else if (t === undefined)
-      c.error(node, Diagnostics.X_this_implicitly_has_type_any_because_it_does_not_have_a_type_annotation);
+    else if (t === undefined) {
+      // The related information goes on the reported diagnostic after it is added, as tsgo attaches it,
+      // so a later equal report compares unequal to it and is kept.
+      const diagnostic = c.error(
+        node,
+        Diagnostics.X_this_implicitly_has_type_any_because_it_does_not_have_a_type_annotation,
+      );
+      if (container.kind !== SyntaxKind.SourceFile) {
+        const outsideThis = tryGetThisTypeAt(c, container, getThisContainer(container, false, false));
+        if (outsideThis !== undefined && outsideThis !== globalThisType)
+          diagnostic.addRelatedInfo(
+            createDiagnosticForNode(container, Diagnostics.An_outer_value_of_this_is_shadowed_by_this_container, []),
+          );
+      }
+    }
   }
   return t ?? c.anyType;
 }
@@ -1210,7 +1220,8 @@ export function isTupleLikeType(c: Checker, t: Type): boolean {
 export function isMutableArrayLikeType(c: Checker, t: Type): boolean {
   return (
     isMutableArrayOrTuple(c, t) ||
-    ((t.flags & (TypeFlags.Any | TypeFlags.Nullable)) === 0 && isTypeAssignableTo(c, t, c.anyArrayType))
+    ((t.flags & (TypeFlags.Any | TypeFlags.Nullable | TypeFlags.Never)) === 0 &&
+      isTypeAssignableTo(c, t, c.anyArrayType))
   );
 }
 
@@ -1620,18 +1631,13 @@ export function checkIndexedAccessIndexType(c: Checker, t: Type, accessNode: Nod
   if ((t.flags & TypeFlags.IndexedAccess) === 0) return t;
   const objectType = (t as IndexedAccessType).objectType;
   const indexType = (t as IndexedAccessType).indexType;
-  // Remapping mapped types don't defer their index types.
-  const objectIndexType =
-    isGenericMappedType(c, objectType) &&
-    getMappedTypeNameTypeKind(c, objectType as MappedType) === MappedTypeNameTypeKind.Remapping
-      ? getIndexForMappedType(c, objectType as MappedType, IndexFlags.None)
-      : getIndexTypeEx(c, objectType, IndexFlags.None);
   const hasNumberIndexInfo = getIndexInfoOfType(c, objectType, c.numberType) !== undefined;
   if (
     everyType(
       indexType,
       (u) =>
-        isTypeAssignableTo(c, u, objectIndexType) || (hasNumberIndexInfo && isApplicableIndexType(c, u, c.numberType)),
+        isTypeAssignableTo(c, u, getIndexTypeEx(c, objectType, IndexFlags.None)) ||
+        (hasNumberIndexInfo && isApplicableIndexType(c, u, c.numberType)),
     )
   ) {
     if (

@@ -82,6 +82,7 @@ import { BuilderTracker, type NodeBuilder, TrackedSymbol, canReuseExistingJSType
 import { getSpecifierForModuleSymbol, lookupSymbolChain, symbolToTypeNode } from './node-builder-names.js';
 import { getExternalModuleFileFromDeclaration } from './checker-modules.js';
 import { getResolutionModeOverride } from './program-utilities.js';
+import { getMappedType } from './checker-types.js';
 
 /** Errors and names tracked while reusing a node, replayed only if the reuse succeeds. */
 class RecoveryBoundary {
@@ -435,7 +436,7 @@ class ExistingNodeReuser extends VisitorBase {
     if ((symbol.flags & SymbolFlags.TypeParameter) !== 0) {
       const declaredType = getDeclaredTypeOfSymbol(b.c, symbol);
       // A type parameter remapped by the scope.
-      if (b.mapper !== undefined && b.mapper.map(declaredType) !== declaredType) return undefined;
+      if (b.mapper !== undefined && getMappedType(declaredType, b.mapper) !== declaredType) return undefined;
     }
     if (!canReuseExistingJSTypeNode(b, node, b.getTypeFromTypeNode(node, false)!)) return undefined;
     const name = this.trackExistingEntityName(node.typeName);

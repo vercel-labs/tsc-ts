@@ -44,6 +44,7 @@ import {
   prependTypeMapping,
   LiteralType,
   PendingMembers,
+  getMappedType,
 } from './checker-types.js';
 import {
   UnionReduction,
@@ -191,7 +192,7 @@ export function membersHolder(c: Checker, t: Type): StructuredType {
   return side as StructuredType;
 }
 
-/** The `objectFlags` of `t` that resolving its members sets (MembersResolved, UnresolvedMembers). */
+/** The `objectFlags` of `t` that resolving its members sets (MembersResolved). */
 export function memberResolutionFlags(c: Checker, t: Type): ObjectFlags {
   if ((t.flags & TypeFlags.UnionOrIntersection) === 0) return lazyObjectFlags(c, t);
   const side = sideOfIfAny(c, t) as UnionOrIntersectionType | undefined;
@@ -287,8 +288,7 @@ function resolveObjectTypeMembers(
   }
   if (baseTypes.length !== 0) {
     members = !instantiated || members === undefined ? new Map(members ?? []) : members;
-    setStructuredTypeMembers(c, t, members, callSignatures, constructSignatures, indexInfos);
-    t.objectFlags |= ObjectFlags.UnresolvedMembers;
+    // The members are set once the bases are added: a recursive request for them resolves them again.
     for (const baseType of baseTypes) {
       const instantiatedBaseType =
         lastArgument !== undefined
@@ -307,7 +307,6 @@ function resolveObjectTypeMembers(
       for (const info of inherited) if (findIndexInfo(indexInfos, info.keyType) === undefined) added.push(info);
       if (added.length !== 0) indexInfos = indexInfos.concat(added);
     }
-    t.objectFlags &= ~ObjectFlags.UnresolvedMembers;
   }
   setStructuredTypeMembers(c, t, members, callSignatures, constructSignatures, indexInfos);
 }
@@ -845,11 +844,13 @@ function resolvePendingObjectTypeMembers(
   constructSignatures: Signature[],
   indexInfos: IndexInfo[],
 ): void {
-  setPendingStructuredTypeMembers(c, t, pending, callSignatures, constructSignatures, indexInfos);
-  if (baseTypes.length === 0) return;
+  if (baseTypes.length === 0) {
+    setPendingStructuredTypeMembers(c, t, pending, callSignatures, constructSignatures, indexInfos);
+    return;
+  }
+  // The members are set once the bases are added: a recursive request for them resolves them again.
   pending.hasBases = true;
   pending.resolving = true;
-  t.objectFlags |= ObjectFlags.UnresolvedMembers;
   for (const baseType of baseTypes) {
     const instantiatedBaseType =
       thisArgument !== undefined
@@ -874,8 +875,7 @@ function resolvePendingObjectTypeMembers(
         lazyBase = resolved;
     }
     const baseProperties = lazyBase === undefined ? getPropertiesOfType(c, instantiatedBaseType) : undefined;
-    if (t.pendingMembers === pending) pending.addBase(lazyBase, baseProperties);
-    else addInheritedMembers(t.membersValue!, baseProperties ?? lazyBase!.properties);
+    pending.addBase(lazyBase, baseProperties);
     const baseCallSignatures = getSignaturesOfType(c, instantiatedBaseType, SignatureKind.Call);
     if (baseCallSignatures.length !== 0) callSignatures = callSignatures.concat(baseCallSignatures);
     const baseConstructSignatures = getSignaturesOfType(c, instantiatedBaseType, SignatureKind.Construct);
@@ -886,11 +886,8 @@ function resolvePendingObjectTypeMembers(
     for (const info of inherited) if (findIndexInfo(indexInfos, info.keyType) === undefined) added.push(info);
     if (added.length !== 0) indexInfos = indexInfos.concat(added);
   }
-  t.objectFlags &= ~ObjectFlags.UnresolvedMembers;
   pending.resolving = false;
-  if (t.pendingMembers === pending)
-    setPendingStructuredTypeMembers(c, t, pending, callSignatures, constructSignatures, indexInfos);
-  else setStructuredTypeMembers(c, t, t.membersValue, callSignatures, constructSignatures, indexInfos);
+  setPendingStructuredTypeMembers(c, t, pending, callSignatures, constructSignatures, indexInfos);
 }
 
 function setPendingStructuredTypeMembers(
@@ -1117,7 +1114,7 @@ function getArrayMemberCallSignatures(c: Checker, t: UnionType): Signature[] {
   }
   const arrayArg = mapType(c, t, (u) => {
     const generic = isReadonlyArraySymbol(c, u.symbol!.parent!) ? c.globalReadonlyArrayType : c.globalArrayType;
-    return (u as ObjectType).mapper!.map((generic as InterfaceType).typeParameters()[0]!);
+    return getMappedType((generic as InterfaceType).typeParameters()[0]!, (u as ObjectType).mapper!);
   });
   const arrayType = createArrayTypeEx(
     c,
@@ -1848,6 +1845,18 @@ export function getUnionOrIntersectionProperty(
 }
 
 export function getDeclarationModifierFlagsFromSymbol(c: Checker, s: Symbol, isWrite: boolean): ModifierFlags {
+  const checkFlags = s.checkFlags;
+  if ((checkFlags & CheckFlags.Synthetic) !== 0) {
+    // The least restricted access of the constituents, for reading or for writing.
+    let access = ModifierFlags.None;
+    if ((checkFlags & (isWrite ? CheckFlags.ContainsWritePublic : CheckFlags.ContainsPublic)) !== 0)
+      access = ModifierFlags.Public;
+    else if ((checkFlags & (isWrite ? CheckFlags.ContainsWriteProtected : CheckFlags.ContainsProtected)) !== 0)
+      access = ModifierFlags.Protected;
+    else if ((checkFlags & (isWrite ? CheckFlags.ContainsWritePrivate : CheckFlags.ContainsPrivate)) !== 0)
+      access = ModifierFlags.Private;
+    return (checkFlags & CheckFlags.ContainsStatic) !== 0 ? access | ModifierFlags.Static : access;
+  }
   if (s.valueDeclaration !== undefined) {
     let declaration: Node | undefined;
     if (isWrite) declaration = getDeclarationOfKind(s, SyntaxKind.SetAccessor);
@@ -1858,16 +1867,6 @@ export function getDeclarationModifierFlagsFromSymbol(c: Checker, s: Symbol, isW
     return s.parent !== undefined && (s.parent.flags & SymbolFlags.Class) !== 0
       ? flags
       : flags & ~ModifierFlags.AccessibilityModifier;
-  }
-  if ((s.checkFlags & CheckFlags.Synthetic) !== 0) {
-    const access =
-      (s.checkFlags & CheckFlags.ContainsPrivate) !== 0
-        ? ModifierFlags.Private
-        : (s.checkFlags & CheckFlags.ContainsPublic) !== 0
-          ? ModifierFlags.Public
-          : ModifierFlags.Protected;
-    const staticModifier = (s.checkFlags & CheckFlags.ContainsStatic) !== 0 ? ModifierFlags.Static : 0;
-    return access | staticModifier;
   }
   if ((s.flags & SymbolFlags.Prototype) !== 0) return ModifierFlags.Public | ModifierFlags.Static;
   return 0;
@@ -1895,6 +1894,7 @@ export function createUnionOrIntersectionProperty(
     const prop = getPropertyOfTypeEx(c, t, name, skipObjectFunctionPropertyAugment, false);
     if (prop !== undefined) {
       const modifiers = getDeclarationModifierFlagsFromSymbol(c, prop, false);
+      const writeModifiers = getDeclarationModifierFlagsFromSymbol(c, prop, true);
       if ((prop.flags & SymbolFlags.ClassMember) !== 0) {
         if (isUnion) optionalFlag |= prop.flags & SymbolFlags.Optional;
         else optionalFlag &= prop.flags;
@@ -1922,9 +1922,16 @@ export function createUnionOrIntersectionProperty(
       }
       if (isUnion && isReadonlySymbol(c, prop)) checkFlags |= CheckFlags.Readonly;
       else if (!isUnion && !isReadonlySymbol(c, prop)) checkFlags &= ~CheckFlags.Readonly;
-      if ((modifiers & ModifierFlags.NonPublicAccessibilityModifier) === 0) checkFlags |= CheckFlags.ContainsPublic;
-      if ((modifiers & ModifierFlags.Protected) !== 0) checkFlags |= CheckFlags.ContainsProtected;
-      if ((modifiers & ModifierFlags.Private) !== 0) checkFlags |= CheckFlags.ContainsPrivate;
+      if ((modifiers & (ModifierFlags.Protected | ModifierFlags.Public)) === ModifierFlags.Protected)
+        checkFlags |= CheckFlags.ContainsProtected;
+      else if ((modifiers & (ModifierFlags.Private | ModifierFlags.Public)) === ModifierFlags.Private)
+        checkFlags |= CheckFlags.ContainsPrivate;
+      else checkFlags |= CheckFlags.ContainsPublic;
+      if ((writeModifiers & (ModifierFlags.Protected | ModifierFlags.Public)) === ModifierFlags.Protected)
+        checkFlags |= CheckFlags.ContainsWriteProtected;
+      else if ((writeModifiers & (ModifierFlags.Private | ModifierFlags.Public)) === ModifierFlags.Private)
+        checkFlags |= CheckFlags.ContainsWritePrivate;
+      else checkFlags |= CheckFlags.ContainsWritePublic;
       if ((modifiers & ModifierFlags.Static) !== 0) checkFlags |= CheckFlags.ContainsStatic;
       if (!isPrototypeProperty(prop)) syntheticFlag = CheckFlags.SyntheticProperty;
     } else if (isUnion) {
@@ -1939,15 +1946,26 @@ export function createUnionOrIntersectionProperty(
       } else checkFlags |= CheckFlags.ReadPartial;
     }
   }
+  if (singleProp === undefined) return undefined;
   if (
-    singleProp === undefined ||
-    (isUnion &&
-      (propSet !== undefined || (checkFlags & CheckFlags.Partial) !== 0) &&
-      (checkFlags & (CheckFlags.ContainsPrivate | CheckFlags.ContainsProtected)) !== 0 &&
-      !(propSet !== undefined && hasCommonDeclaration(propSet)))
-  )
-    // Missing, or private/protected in one constituent but missing or different in another.
-    return undefined;
+    isUnion &&
+    (propSet !== undefined || (checkFlags & CheckFlags.Partial) !== 0) &&
+    (checkFlags &
+      (CheckFlags.ContainsPrivate |
+        CheckFlags.ContainsProtected |
+        CheckFlags.ContainsWritePrivate |
+        CheckFlags.ContainsWriteProtected)) !==
+      0 &&
+    !(propSet !== undefined && hasCommonDeclaration(propSet))
+  ) {
+    // The property is private or protected in one constituent but missing or different in another.
+    // Private or protected reading leaves no property; private or protected writing restricts write
+    // access to that of the most restricted constituent.
+    if ((checkFlags & (CheckFlags.ContainsPrivate | CheckFlags.ContainsProtected)) !== 0) return undefined;
+    if ((checkFlags & CheckFlags.ContainsWritePrivate) !== 0)
+      checkFlags &= ~(CheckFlags.ContainsWritePublic | CheckFlags.ContainsWriteProtected);
+    else if ((checkFlags & CheckFlags.ContainsWriteProtected) !== 0) checkFlags &= ~CheckFlags.ContainsWritePublic;
+  }
   if (propSet === undefined && (checkFlags & CheckFlags.ReadPartial) === 0 && indexTypes.length === 0) {
     if (!mergedInstantiations) return singleProp;
     // Merged instantiations get a clone without a union parent, so `Array<T>.length` prints as such.
@@ -1978,7 +1996,7 @@ export function createUnionOrIntersectionProperty(
     if (firstValueDeclaration === undefined) firstValueDeclaration = prop.valueDeclaration;
     else if (prop.valueDeclaration !== undefined && prop.valueDeclaration !== firstValueDeclaration)
       hasNonUniformValueDeclaration = true;
-    for (const d of getDeclarations(prop)) declarations.push(d);
+    for (const d of getDeclarations(prop)) if (!declarations.includes(d)) declarations.push(d);
     const t = getTypeOfSymbol(c, prop);
     if (firstType === undefined) {
       firstType = t;
@@ -2307,11 +2325,25 @@ export function getReducedType(c: Checker, t: Type): Type {
     const side = sideOf(c, t);
     if ((side.objectFlags & ObjectFlags.IsNeverIntersectionComputed) === 0) {
       side.objectFlags |= ObjectFlags.IsNeverIntersectionComputed;
-      if (hasNeverReducedProperty(c, t as IntersectionType)) side.objectFlags |= ObjectFlags.IsNeverIntersection;
+      if (!isMappingOfSameObjectType(c, typesOf(t)) && hasNeverReducedProperty(c, t as IntersectionType))
+        side.objectFlags |= ObjectFlags.IsNeverIntersection;
     }
     if ((side.objectFlags & ObjectFlags.IsNeverIntersection) !== 0) return c.neverType;
   }
   return t;
+}
+
+/** Whether `types` are mapped types that all map the same object type. */
+function isMappingOfSameObjectType(c: Checker, types: readonly Type[]): boolean {
+  if (types.length === 0 || (types[0]!.objectFlags & ObjectFlags.Mapped) === 0) return false;
+  const first = getModifiersTypeFromMappedType(c, types[0] as MappedType);
+  if ((first.flags & TypeFlags.Object) === 0) return false;
+  for (let i = 1; i < types.length; i++) {
+    const t = types[i]!;
+    if ((t.objectFlags & ObjectFlags.Mapped) === 0 || getModifiersTypeFromMappedType(c, t as MappedType) !== first)
+      return false;
+  }
+  return true;
 }
 
 /**
@@ -2494,7 +2526,7 @@ export function getResolvedBaseConstraint(c: Checker, t: Type, stack?: Recursion
   if (!pushTypeResolution(c, t, TypeSystemPropertyName.ResolvedBaseConstraint)) return c.circularConstraintType;
   let constraint: Type | undefined;
   // At least 10 levels; up to 50 without deeply nested types on the stack.
-  const identity = getRecursionIdentity(t);
+  const identity = getRecursionIdentity(c, t);
   const current = stack ?? [];
   if (current.length < 10 || (current.length < 50 && !current.includes(identity)))
     constraint = computeBaseConstraint(c, getSimplifiedType(c, t, false), current.concat([identity]));

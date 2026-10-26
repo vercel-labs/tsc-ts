@@ -56,6 +56,7 @@ import {
   typeListKey,
   typesOf,
   typeListHash,
+  compareTypes,
 } from './checker-type-factory.js';
 import {
   TypeSystemPropertyName,
@@ -302,6 +303,7 @@ export function getInferTypeParameters(c: Checker, node: Node): Type[] {
   if (locals !== undefined)
     for (const symbol of locals.values())
       if ((symbol.flags & SymbolFlags.TypeParameter) !== 0) result.push(getDeclaredTypeOfSymbol(c, symbol));
+  result.sort((t1, t2) => compareTypes(c, t1, t2));
   return result;
 }
 

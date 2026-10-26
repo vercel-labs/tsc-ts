@@ -54,6 +54,7 @@ import {
   UniqueESSymbolType,
   emptyTypes,
   newTypeMapper,
+  TypeParameter,
 } from './checker-types.js';
 import {
   createArrayType,
@@ -115,6 +116,7 @@ import { checkExpressionWithTypeArguments } from './checker-calls.js';
 import { getIntendedTypeFromJSDocTypeReference } from './checker-jsdoc.js';
 import { getCombinedNodeFlags, hasSyntacticModifier } from './binder-utilities.js';
 import { CheckFlags, getDeclarations, getSymbolId, type Symbol, SymbolFlags } from './symbol.js';
+import { isStatement } from './printer/utilities.js';
 
 export function getTypeFromTypeNode(c: Checker, node: Node): Type {
   return getConditionalFlowTypeOfType(c, getTypeFromTypeNodeWorker(c, node), node);
@@ -442,7 +444,7 @@ function isConstTypeReference(node: Node): boolean {
   );
 }
 
-function isAssertionExpression(node: Node | undefined): boolean {
+export function isAssertionExpression(node: Node | undefined): boolean {
   return (
     node !== undefined && (node.kind === SyntaxKind.AsExpression || node.kind === SyntaxKind.TypeAssertionExpression)
   );
@@ -456,10 +458,45 @@ export function getTypeFromTypeReference(c: Checker, node: Node): Type {
     else
       type =
         getIntendedTypeFromJSDocTypeReference(c, node) ??
-        getTypeReferenceType(c, node, getSymbolFromTypeReference(c, node));
+        getDistributedTypeParameter(c, node, getTypeReferenceType(c, node, getSymbolFromTypeReference(c, node)));
     c.resolvedTypes.set(node.id, type);
   }
   return type;
+}
+
+/**
+ * The distributed form of a type parameter `t` that `node` references inside a distributive conditional type on
+ * it (one whose check type is a bare reference to the type parameter), up to the enclosing statement; otherwise `t`.
+ */
+function getDistributedTypeParameter(c: Checker, node: Node, t: Type): Type {
+  if ((t.flags & TypeFlags.TypeParameter) === 0 || (t as TypeParameter).isDistributed) return t;
+  for (let n = node.parent; n !== undefined && !isStatement(n); n = n.parent) {
+    if (n.kind !== SyntaxKind.ConditionalType) continue;
+    const checkTypeNode = (n as ConditionalTypeNode).checkType;
+    if (isSimpleIdentifierTypeReference(checkTypeNode) && getSymbolFromTypeReference(c, checkTypeNode) === t.symbol)
+      return getDistributedTypeFromTypeParameter(c, t as TypeParameter);
+  }
+  return t;
+}
+
+function getDistributedTypeFromTypeParameter(c: Checker, t: TypeParameter): TypeParameter {
+  let distributed = t.distributedType;
+  if (distributed === undefined) {
+    distributed = c.newTypeParameter(t.symbol);
+    distributed.isDistributed = true;
+    distributed.constraint = t;
+    t.distributedType = distributed;
+  }
+  return distributed;
+}
+
+/** A type reference that is a bare identifier without type arguments. */
+function isSimpleIdentifierTypeReference(node: Node): boolean {
+  return (
+    node.kind === SyntaxKind.TypeReference &&
+    (node as TypeReferenceNode).typeName.kind === SyntaxKind.Identifier &&
+    (node as TypeReferenceNode).typeArguments === undefined
+  );
 }
 
 export function getSymbolFromTypeReference(c: Checker, node: Node): Symbol {
