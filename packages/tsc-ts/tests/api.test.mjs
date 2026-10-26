@@ -170,6 +170,12 @@ test('tsc-ts --api keeps retained source files like tsc --api', { skip, timeout:
     await d.call('retainSourceFile', { file: { ...reference.file, parseOptionsKey: '4' } });
     await d.call('retainSourceFile', { file: { ...reference.file, scriptKind: 5 } });
     await d.call('retainSourceFile', {});
+    // The file is parsed again in a newer snapshot; the older version stays available through the old snapshot
+    // and the lease.
+    writeFileSync(file, readFileSync(file, 'utf8') + '\nexport const added = 1;\n');
+    const next = await d.snapshot({ fileNotifications: { changed: [file] } });
+    await d.call('getSourceFile', { snapshot: next.snapshot, project: base.project, file });
+    await d.call('getParentOfSymbol', { symbol: reference });
     await d.call('release', { snapshot: base.snapshot });
     await d.call('getParentOfSymbol', { symbol: reference });
     await d.call('getMembersOfSymbol', { symbol: reference });

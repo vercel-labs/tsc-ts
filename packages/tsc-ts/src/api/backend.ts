@@ -811,6 +811,9 @@ export class SessionFiles {
   // Paths `realpath` returned, which are their own real paths.
   private readonly realPaths = new Set<string>();
   private readonly parsed = new Map<string, SourceFile>();
+  // The parsed files of live snapshots and leases, by the inputs they were parsed with; a reparsed file's older
+  // versions stay while something keeps them.
+  private readonly retained = new Map<string, SourceFile[]>();
   // The node IDs of the files the client was told about, assigned on first use. A file parsed again gets a new one,
   // as tsc's node IDs do; a client of `--listen` sees the IDs a new server would give.
   private readonly nodeIds = new Map<SourceFile, number>();
@@ -890,6 +893,7 @@ export class SessionFiles {
     this.realPaths.clear();
     this.nodeIds.clear();
     this.nextNodeId = 1;
+    this.retained.clear();
   }
 
   /** The node ID of a parsed file, which names it in API answers (SourceFileDescriptor, getSourceFile). */
@@ -922,11 +926,22 @@ export class SessionFiles {
   }
 
   /**
-   * The file last parsed with these inputs, which the session still keeps. `parseOptionsKey` holds the module
-   * detection options as `sourceFileParseOptionsKey` gives them.
+   * The parsed file of a live snapshot or lease with these inputs, text hash (`sourceFileHash`) and script kind, as
+   * tsc's parse cache keys files. `parseOptionsKey` holds the module detection options as `sourceFileParseOptionsKey`
+   * gives them. An older version of a file stays available while a snapshot or lease keeps it.
    */
-  cachedSourceFile(fileName: string, path: string, parseOptionsKey: number): SourceFile | undefined {
-    return this.parsed.get(parsedKey(fileName, path, (parseOptionsKey & 1) !== 0, (parseOptionsKey & 2) !== 0));
+  cachedSourceFile(
+    fileName: string,
+    path: string,
+    parseOptionsKey: number,
+    contentHash: string,
+    scriptKind: number,
+  ): SourceFile | undefined {
+    const key = parsedKey(fileName, path, (parseOptionsKey & 1) !== 0, (parseOptionsKey & 2) !== 0);
+    for (const file of this.retained.get(key) ?? []) {
+      if (file.scriptKind === scriptKind && sourceFileHash(file) === contentHash) return file;
+    }
+    return undefined;
   }
 
   /** Keeps only the parsed files of `projects`, the projects of live snapshots, and `files`. */
@@ -936,6 +951,14 @@ export class SessionFiles {
     const unused: string[] = [];
     for (const [key, file] of this.parsed) if (!used.has(file)) unused.push(key);
     for (const key of unused) this.parsed.delete(key);
+    this.retained.clear();
+    for (const file of used) {
+      const options = file.externalModuleIndicatorOptions;
+      const key = parsedKey(file.fileName, file.path, options.jsx, options.force);
+      const versions = this.retained.get(key);
+      if (versions === undefined) this.retained.set(key, [file]);
+      else versions.push(file);
+    }
     const unnamed: SourceFile[] = [];
     for (const file of this.nodeIds.keys()) if (!used.has(file)) unnamed.push(file);
     for (const file of unnamed) this.nodeIds.delete(file);
@@ -1120,9 +1143,10 @@ export function nodeAtIndex(file: SourceFile, index: number): Node | undefined {
 
 // Source files as API references name them (SourceFileDescriptor).
 
-/** The xxh3-128 hash of the file's text, as 32 hexadecimal digits. */
+/** The xxh3-128 hash of the file's text, as 32 hexadecimal digits, computed once per file. */
 export function sourceFileHash(file: SourceFile): string {
-  return toHex(hash128String(file.text));
+  if (file.apiContentHash === '') file.apiContentHash = toHex(hash128String(file.text));
+  return file.apiContentHash;
 }
 
 /** The file's module detection options as tsc encodes them: 1 for `jsx`, 2 for `force`. */

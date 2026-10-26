@@ -794,15 +794,15 @@ export class Session {
       return invalid(`invalid parse options key ${JSON.stringify(key)}`);
     const scriptKind = descriptor?.scriptKind ?? 0;
     if (![1, 2, 3, 4, 6].includes(scriptKind)) return invalid(`invalid script kind ${scriptKind}`);
-    // Files are cached by name, path, options and text, and named by their script kind and node ID too.
-    const file = this.files.cachedSourceFile(descriptor?.fileName ?? '', descriptor?.path ?? '', optionsKey);
-    if (
-      file === undefined ||
-      backend.sourceFileHash(file) !== hash.toLowerCase() ||
-      backend.sourceFileScriptKind(file) !== scriptKind
-    ) {
-      throw new ClientError('source file is not available');
-    }
+    // Files are kept by name, path, options, text and script kind, and named by their node ID too.
+    const file = this.files.cachedSourceFile(
+      descriptor?.fileName ?? '',
+      descriptor?.path ?? '',
+      optionsKey,
+      hash.toLowerCase(),
+      scriptKind,
+    );
+    if (file === undefined) throw new ClientError('source file is not available');
     if (
       descriptor === undefined ||
       descriptor === null ||

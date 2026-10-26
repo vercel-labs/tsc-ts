@@ -8275,6 +8275,8 @@ export class SourceFile extends Node {
   apiEncoding: Uint8Array | undefined;
   /** The symbols the file owns, by id, as API file symbol references resolve them; made on first use. */
   apiSymbolIndex: Map<number, Symbol> | undefined;
+  /** The xxh3-128 hash of the text in API source file descriptors, as hexadecimal digits; `''` until first use. */
+  apiContentHash: string;
   /** Module specifiers of imports, exports, `require` calls and `import()` types, in source order. */
   imports: Node[];
   /** Names of `declare module "x"` augmentations and `declare global` blocks in modules. */
@@ -8342,6 +8344,7 @@ export class SourceFile extends Node {
     this.textCount = 0;
     this.apiEncoding = undefined;
     this.apiSymbolIndex = undefined;
+    this.apiContentHash = '';
     this.imports = [];
     this.moduleAugmentations = emptyNodes;
     this.ambientModuleNames = emptyStrings;
