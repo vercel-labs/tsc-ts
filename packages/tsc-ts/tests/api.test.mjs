@@ -176,6 +176,15 @@ test('tsc-ts --api keeps retained source files like tsc --api', { skip, timeout:
     const next = await d.snapshot({ fileNotifications: { changed: [file] } });
     await d.call('getSourceFile', { snapshot: next.snapshot, project: base.project, file });
     await d.call('getParentOfSymbol', { symbol: reference });
+    // Undoing the edit gives back the file the first snapshot has, and its references.
+    writeFileSync(file, readFileSync(file, 'utf8').replace('\nexport const added = 1;\n', ''));
+    const undone = await d.snapshot({ fileNotifications: { changed: [file] } });
+    const undoneBase = { snapshot: undone.snapshot, project: base.project };
+    await d.call('getSourceFile', { ...undoneBase, file });
+    const undoneSymbols = (await d.call('getSymbolsAtPositions', { ...undoneBase, file, positions })) ?? [];
+    const undoneOwned = undoneSymbols.find((s) => s !== null && s.reference.kind === 0 && s.parent !== undefined);
+    await d.call('getTypeOfSymbol', { ...undoneBase, symbol: undoneOwned.reference });
+    await d.call('getParentOfSymbol', { symbol: undoneOwned.reference });
     await d.call('release', { snapshot: base.snapshot });
     await d.call('getParentOfSymbol', { symbol: reference });
     await d.call('getMembersOfSymbol', { symbol: reference });

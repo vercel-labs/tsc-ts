@@ -916,6 +916,14 @@ export class SessionFiles {
     const key = parsedKey(fileName, path, externalModuleIndicatorOptions.jsx, externalModuleIndicatorOptions.force);
     const cached = this.parsed.get(key);
     if (cached !== undefined && cached.text === text) return cached;
+    // A file a snapshot or lease still keeps is taken again for the same text, as tsc's parse cache keys files by
+    // their text: undoing an edit gives back the earlier file.
+    for (const retained of this.retained.get(key) ?? []) {
+      if (retained.text === text) {
+        this.parsed.set(key, retained);
+        return retained;
+      }
+    }
     const file = parseSourceFile(
       fileName,
       text,
