@@ -1161,10 +1161,13 @@ export class NodeBuilder {
       (t.symbol.flags & SymbolFlags.Class) !== 0;
     // Instantiations of one anonymous type share a symbol, so tracking symbols rather than
     // types catches circular references through them. Nesting of arrays and tuples, which share the Array
-    // symbol or a tuple target, is not bounded by it.
+    // symbol or a tuple target, is not bounded by it. A deferred array or tuple reference is bounded by its
+    // node, which stops a recursive alias whose type arguments grow at each level (`type R<T> = R<T[]>[]`).
     let id: string | undefined = undefined;
-    if (isArrayOrTuple) id = undefined;
-    else if ((t.objectFlags & ObjectFlags.Reference) !== 0 && (t as TypeReference).node !== undefined)
+    if (isArrayOrTuple) {
+      const node = (t as TypeReference).node;
+      if (node !== undefined) id = 'n' + getNodeId(node);
+    } else if ((t.objectFlags & ObjectFlags.Reference) !== 0 && (t as TypeReference).node !== undefined)
       id = 'n' + getNodeId((t as TypeReference).node!);
     else if ((t.flags & TypeFlags.Conditional) !== 0) id = 'n' + getNodeId((t as ConditionalType).root.node);
     else if (t.symbol !== undefined) id = (isConstructorObject ? 'c' : 's') + getSymbolId(t.symbol);
