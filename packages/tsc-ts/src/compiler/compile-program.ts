@@ -375,6 +375,14 @@ export abstract class CompilerProgram {
     this.emitter = new ProgramEmitter(checked);
   }
 
+  /**
+   * The time spent in declaration emit while checking, to count as emit time rather than check time, since
+   * the last call. Only an incremental program emits while checking, to compute signatures.
+   */
+  takeNestedEmitTime(): number {
+    return 0;
+  }
+
   get program(): Program {
     return this.checked.program;
   }
@@ -513,7 +521,10 @@ export function getDiagnosticsOfProgram(
   if (result.length === configCount) {
     const checkStart = performance.now();
     const semantic = program.getSemanticDiagnostics();
-    program.times.checkTime = performance.now() - checkStart;
+    // Declaration emit that computed signatures while checking counts as emit time, as in TypeScript 7.1.
+    const nestedEmitTime = program.takeNestedEmitTime();
+    program.times.checkTime = Math.max(0, performance.now() - checkStart - nestedEmitTime);
+    program.times.emitTime += nestedEmitTime;
     for (const d of semantic) result.push(d);
     // Checking may have found more, such as missing global types.
     for (const d of program.getGlobalDiagnostics()) result.push(d);

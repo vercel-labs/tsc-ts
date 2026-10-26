@@ -1551,7 +1551,12 @@ class AffectedFilesHandler {
   private computeDtsSignature(file: SourceFile): string {
     const known = this.incremental.signatures.get(file.path);
     if (known !== undefined) return known;
-    return declarationSignature(this.incremental.emitter, file, this.snapshot.options);
+    const done = this.incremental.beginNestedEmit();
+    try {
+      return declarationSignature(this.incremental.emitter, file, this.snapshot.options);
+    } finally {
+      done();
+    }
   }
 
   updateShapeSignature(file: SourceFile, useFileVersionAsSignature: boolean): boolean {
@@ -2607,6 +2612,25 @@ export class IncrementalProgram extends CompilerProgram {
 
   get hasChangedDtsFile(): boolean {
     return this.snapshot.hasChangedDtsFile;
+  }
+
+  /** Time spent in declaration emit for signatures while checking (`computeDtsSignature`), not yet taken. */
+  private nestedEmitTime = 0;
+  private nestedEmitDepth = 0;
+  private nestedEmitStart = 0;
+
+  /** Starts timing a nested declaration emit; returns the function that ends it. */
+  beginNestedEmit(): () => void {
+    if (this.nestedEmitDepth++ === 0) this.nestedEmitStart = performance.now();
+    return () => {
+      if (--this.nestedEmitDepth === 0) this.nestedEmitTime += performance.now() - this.nestedEmitStart;
+    };
+  }
+
+  override takeNestedEmitTime(): number {
+    const time = this.nestedEmitTime;
+    this.nestedEmitTime = 0;
+    return time;
   }
 
   /**
