@@ -459,9 +459,12 @@ function checkGrammarNode(g: GrammarChecker, node: Node): boolean {
     case SyntaxKind.InferType:
       checkGrammarInferType(g, node);
       return true;
-    case SyntaxKind.ImportType:
+    case SyntaxKind.ImportType: {
+      const attributes = (node as ImportTypeNode).attributes;
+      if (attributes !== undefined) checkGrammarImportAttributeValues(g, attributes);
       checkGrammarImportAttributes(g, node);
       return true;
+    }
     case SyntaxKind.TupleType:
       checkGrammarTupleType(g, node as TupleTypeNode);
       return true;
@@ -2684,16 +2687,20 @@ function checkExternalImportOrExportDeclaration(g: GrammarChecker, node: Node): 
   }
   if (node.kind === SyntaxKind.ImportEqualsDeclaration) return true;
   const attributes = getImportAttributes(node);
-  if (attributes === undefined) return true;
+  return attributes === undefined || !checkGrammarImportAttributeValues(g, attributes);
+}
+
+/** Reports attribute values that are not string literals, and returns whether there are any. */
+function checkGrammarImportAttributeValues(g: GrammarChecker, node: ImportAttributes): boolean {
   let hasError = false;
-  for (const attribute of attributes.attributes.nodes) {
+  for (const attribute of node.attributes.nodes) {
     const value = (attribute as ImportAttribute).value;
     if (value.kind !== SyntaxKind.StringLiteral) {
       hasError = true;
       g.c.error(value, Diagnostics.Import_attribute_values_must_be_string_literal_expressions);
     }
   }
-  return !hasError;
+  return hasError;
 }
 
 function getImportAttributes(node: Node): ImportAttributes | undefined {
@@ -3583,11 +3590,13 @@ export function isInParameterInitializerBeforeContainingFunction(node: Node): bo
 /** A private name in an expression, which is only valid as `#x in obj`. */
 function checkGrammarPrivateIdentifierExpression(g: GrammarChecker, node: Node): boolean {
   const parent = node.parent!;
-  // Names of members, property accesses and qualified names (`typeof this.#x`) aren't expressions.
+  // Names of members, property accesses, qualified names (`typeof this.#x`) and destructured properties aren't
+  // expressions.
   if (
     parent.kind === SyntaxKind.PropertyAccessExpression ||
     parent.kind === SyntaxKind.QualifiedName ||
-    getName(parent) === node
+    getName(parent) === node ||
+    (parent.kind === SyntaxKind.BindingElement && (parent as BindingElement).propertyName === node)
   )
     return false;
   const isForIn = parent.kind === SyntaxKind.ForInStatement;

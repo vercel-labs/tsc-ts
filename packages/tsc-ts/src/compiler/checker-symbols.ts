@@ -5,6 +5,7 @@ import { isTypeAssignableToKindEx } from './checker-type-operators.js';
 import {
   BinaryExpression,
   type ElementAccessExpression,
+  type ExportAssignment,
   type Identifier,
   ModuleDeclaration,
   type Node,
@@ -62,7 +63,12 @@ import { getDeclaredTypeOfSymbol } from './checker-declared-types.js';
 import { symbolToString } from './type-printer.js';
 import { getTypeOfSymbol } from './checker-symbol-types.js';
 import { getPropertyOfType } from './checker-members.js';
-import { checkComputedPropertyName, checkExpressionCached, entityNameToString } from './checker-expressions.js';
+import {
+  checkComputedPropertyName,
+  checkExpressionCached,
+  entityNameToString,
+  isConstTypeReference,
+} from './checker-expressions.js';
 import {
   getLateBindableNameOfDeclaration,
   getPropertyNameFromType,
@@ -345,6 +351,8 @@ function onFailedToResolveSymbol(
 ): void {
   let declarationName = name;
   if (location !== undefined) {
+    // The `const` of a `const` assertion is not a name.
+    if (isConstTypeReferenceName(location)) return;
     if (location.parent !== undefined && location.parent.kind === SyntaxKind.JSDocLink) return;
     if (
       checkAndReportErrorForMissingPrefix(c, location, name) ||
@@ -609,6 +617,34 @@ function checkAndReportErrorForExportingPrimitiveType(c: Checker, location: Node
   return false;
 }
 
+/** Whether `node` is the `const` of a `const` assertion (`x as const`, `<const>x`). */
+function isConstTypeReferenceName(node: Node): boolean {
+  const parent = node.parent;
+  return (
+    node.kind === SyntaxKind.Identifier &&
+    parent !== undefined &&
+    isConstTypeReference(parent) &&
+    parent.parent !== undefined &&
+    (parent.parent.kind === SyntaxKind.AsExpression || parent.parent.kind === SyntaxKind.TypeAssertionExpression)
+  );
+}
+
+/** Whether `node` is the expression of an `export =` or `export default`, or the leftmost name of it. */
+function isExportAssignmentExpressionName(node: Node): boolean {
+  let current = node;
+  while (
+    current.parent !== undefined &&
+    (current.parent.kind === SyntaxKind.PropertyAccessExpression || current.parent.kind === SyntaxKind.QualifiedName)
+  )
+    current = current.parent;
+  const parent = current.parent;
+  return (
+    parent !== undefined &&
+    parent.kind === SyntaxKind.ExportAssignment &&
+    (parent as ExportAssignment).expression === current
+  );
+}
+
 function checkAndReportErrorForUsingNamespaceAsTypeOrValue(
   c: Checker,
   location: Node,
@@ -621,7 +657,9 @@ function checkAndReportErrorForUsingNamespaceAsTypeOrValue(
       resolveName(c, location, name, SymbolFlags.NamespaceModule, undefined, false, false),
     );
     if (symbol !== undefined) {
-      c.error(location, Diagnostics.Cannot_use_namespace_0_as_a_value, name);
+      // checkExportAssignment decides whether `export = ns` is an error.
+      if (!isExportAssignmentExpressionName(location))
+        c.error(location, Diagnostics.Cannot_use_namespace_0_as_a_value, name);
       return true;
     }
   } else if ((meaning & (SymbolFlags.Type & ~SymbolFlags.Value)) !== 0) {
@@ -677,6 +715,8 @@ function checkAndReportErrorForUsingTypeAsValue(
     resolveName(c, location, name, SymbolFlags.Type & ~SymbolFlags.Value, undefined, false, false),
   );
   if (symbol !== undefined && (getSymbolFlags(c, symbol) & SymbolFlags.Value) === 0) {
+    // checkExportAssignment decides whether `export = T` of a type is an error.
+    if (isExportAssignmentExpressionName(location)) return true;
     if (isES2015OrLaterConstructorName(name))
       c.error(
         location,

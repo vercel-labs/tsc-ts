@@ -6,15 +6,16 @@ import {
   type IndexedAccessTypeNode,
   JSDoc,
   JSDocDeprecatedTag,
-  type JsxAttribute,
   type JsxNamespacedName,
   type Node,
+  type SourceFile,
   NodeFlags,
   type QualifiedName,
   type TaggedTemplateExpression,
   type TypeReferenceNode,
   getExpression,
   getName,
+  getProperties,
   getTagName,
   getText,
 } from './ast.js';
@@ -31,6 +32,7 @@ import { hasMatchingArgument } from './checker-narrowing.js';
 import { entityNameToString } from './checker-expressions.js';
 import { isErrorType } from './checker-type-factory.js';
 import { getPropertyOfType } from './checker-members.js';
+import { getApparentTypeOfContextualType } from './checker-contextual.js';
 import { signatureToString } from './type-printer.js';
 import { declarationAt, declarationCount, getDeclarations, type Symbol, SymbolFlags } from './symbol.js';
 
@@ -347,11 +349,30 @@ export function checkDeprecatedImportSpecifier(c: Checker, node: Node, symbol: S
     addDeprecatedSuggestion(c, node, getDeclarations(targetSymbol), targetSymbol.name);
 }
 
-/** Reports a JSX attribute setting a deprecated property of the element's contextual props type. */
-export function checkDeprecatedJsxAttribute(c: Checker, contextualType: Type, attribute: JsxAttribute): void {
-  const name = attribute.name;
-  if (name.kind !== SyntaxKind.Identifier) return;
-  const prop = getPropertyOfType(c, contextualType, getText(name));
-  if (prop !== undefined && declarationCount(prop) !== 0 && isDeprecatedSymbol(c, prop))
-    addDeprecatedSuggestion(c, name, getDeclarations(prop), getText(name));
+/** Reports the deprecated properties the checked object literals of `file` set (`checkContextualDeprecations`). */
+export function checkObjectLiteralDeprecations(c: Checker, file: SourceFile): void {
+  const pending = c.objectLiteralsForDeprecations.get(file);
+  if (pending === undefined) return;
+  c.objectLiteralsForDeprecations.delete(file);
+  for (const node of pending) checkContextualDeprecations(c, node);
+}
+
+/**
+ * Reports the members of an object literal or the attributes of a JSX element that set a deprecated
+ * property of its contextual type. Deferred, so the contextual type of the final check is used.
+ */
+export function checkContextualDeprecations(c: Checker, node: Node): void {
+  const contextualType = getApparentTypeOfContextualType(c, node);
+  if (contextualType === undefined) return;
+  for (const property of getProperties(node)!.nodes) {
+    const name = getName(property);
+    if (name === undefined || name.kind === SyntaxKind.ComputedPropertyName) continue;
+    const text =
+      name.kind === SyntaxKind.JsxNamespacedName
+        ? (name as JsxNamespacedName).namespace.text + ':' + (name as JsxNamespacedName).name.text
+        : getText(name);
+    const prop = getPropertyOfType(c, contextualType, text);
+    if (prop !== undefined && declarationCount(prop) !== 0 && isDeprecatedSymbol(c, prop))
+      addDeprecatedSuggestion(c, name, getDeclarations(prop), text);
+  }
 }

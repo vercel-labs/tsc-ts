@@ -1164,6 +1164,8 @@ export function getTargetOfAliasDeclaration(c: Checker, node: Node | undefined):
     case SyntaxKind.ExportSpecifier:
       return getTargetOfExportSpecifier(c, node, SymbolFlags.Value | SymbolFlags.Type | SymbolFlags.Namespace, true);
     case SyntaxKind.ExportAssignment:
+      // An export assignment in a namespace is an error, and its expression is not resolved.
+      if (isContainedByNamespace(node)) return undefined;
       return withTypeOnlyMark(c, node, getTargetOfAliasLikeExpression(c, getExpression(node)!));
     case SyntaxKind.BinaryExpression:
       return withTypeOnlyMark(c, node, getTargetOfAliasLikeExpression(c, (node as BinaryExpression).right));
@@ -2936,15 +2938,23 @@ export function getDeclarationContainer(node: Node): Node {
 }
 
 /** `export = e` and `export default e`; the grammar checker reports misplaced ones. */
+/** Whether an export assignment is in a namespace, rather than a file or an ambient module. */
+function isContainedByNamespace(node: Node): boolean {
+  const container = node.parent!.kind === SyntaxKind.SourceFile ? node.parent! : node.parent!.parent!;
+  return container.kind === SyntaxKind.ModuleDeclaration && !isAmbientModule(container);
+}
+
 export function checkExportAssignment(c: Checker, node: Node): void {
-  if (!isInModuleElementContext(node)) return;
   const declaration = node as ExportAssignment;
+  // The expression is checked also where an export assignment is a grammar error.
+  const exprType = checkExpressionCached(c, declaration.expression);
+  if (!isInModuleElementContext(node)) return;
   const isExportEquals = declaration.isExportEquals;
   const ambient = (node.flags & NodeFlags.Ambient) !== 0;
   if (shouldCheckErasableSyntax(c, node) && isExportEquals && !ambient)
     c.error(node, Diagnostics.This_syntax_is_not_allowed_when_erasableSyntaxOnly_is_enabled);
+  if (isContainedByNamespace(node)) return;
   const container = node.parent!.kind === SyntaxKind.SourceFile ? node.parent! : node.parent!.parent!;
-  if (container.kind === SyntaxKind.ModuleDeclaration && !isAmbientModule(container)) return;
   const verbatimModuleSyntax = c.compilerOptions.verbatimModuleSyntax === true;
   const isIllegalExportDefaultInCJS =
     !isExportEquals &&
@@ -2962,7 +2972,6 @@ export function checkExportAssignment(c: Checker, node: Node): void {
       const name = getText(id);
       // A non-value is exported as a type, like `export { Id as default }`.
       if ((getSymbolFlags(c, sym) & SymbolFlags.Value) !== 0) {
-        checkExpressionCached(c, id);
         if (!isIllegalExportDefaultInCJS && !ambient && verbatimModuleSyntax && typeOnlyDeclaration !== undefined)
           c.error(
             id,
@@ -2981,21 +2990,15 @@ export function checkExportAssignment(c: Checker, node: Node): void {
         );
       if (!isIllegalExportDefaultInCJS && !ambient && c.isolatedModules && (sym.flags & SymbolFlags.Value) === 0)
         checkIsolatedModulesExportAssignment(c, node, sym, typeOnlyDeclaration, isExportEquals);
-    } else checkExpressionCached(c, id);
-  } else checkExpressionCached(c, expression);
+    }
+  }
   if (isIllegalExportDefaultInCJS) c.error(node, verbatimModuleSyntaxErrorMessage(node));
   checkExternalModuleExports(c, container);
   // A JSDoc `@type` on `export default`.
   const typeNode = getType(node);
   if (typeNode !== undefined) {
     const expr = getExpression(node)!;
-    checkTypeAssignableToAndOptionallyElaborate(
-      c,
-      checkExpressionCached(c, expr),
-      getTypeFromTypeNode(c, typeNode),
-      expr,
-      expr,
-    );
+    checkTypeAssignableToAndOptionallyElaborate(c, exprType, getTypeFromTypeNode(c, typeNode), expr, expr);
   }
 }
 
@@ -3193,6 +3196,7 @@ function checkIsolatedModulesAlias(
     getEmitModuleKind(c.compilerOptions) === ModuleKind.Preserve &&
     node.kind !== SyntaxKind.ImportEqualsDeclaration &&
     node.kind !== SyntaxKind.VariableDeclaration &&
+    node.kind !== SyntaxKind.BindingElement &&
     c.host.getEmitModuleFormatOfFile(getSourceFileOfNode(node)) === ModuleKind.CommonJS
   )
     // Under `--module preserve` ESM syntax emits as ESM, so it is an error in a file that is CommonJS (.cts, .cjs).

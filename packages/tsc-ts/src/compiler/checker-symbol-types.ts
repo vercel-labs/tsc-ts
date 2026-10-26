@@ -690,11 +690,21 @@ export function reportImplicitAny(
         return;
       }
       if (c.noImplicitAny && (declaration.flags & NodeFlags.Reparsed) !== 0) {
-        c.error(
-          declaration,
-          Diagnostics.This_overload_implicitly_returns_the_type_0_because_it_lacks_a_return_type_annotation,
-          typeAsString,
-        );
+        // A JSDoc `@overload`.
+        const nameText = declarationNameToString(file, getNameOfDeclaration(declaration));
+        if (nameText !== '')
+          c.error(
+            declaration,
+            Diagnostics.X_0_which_lacks_return_type_annotation_implicitly_has_an_1_return_type,
+            nameText,
+            typeAsString,
+          );
+        else
+          c.error(
+            declaration,
+            Diagnostics.This_overload_implicitly_returns_the_type_0_because_it_lacks_a_return_type_annotation,
+            typeAsString,
+          );
         return;
       }
       if (!c.noImplicitAny)

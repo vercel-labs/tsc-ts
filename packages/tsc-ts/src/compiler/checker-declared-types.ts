@@ -19,7 +19,7 @@ import {
   MappedTypeNode,
   getHeritageClauses,
 } from './ast.js';
-import { getSourceFileOfNode, isEnumConst, isObjectLiteralMethod } from './binder-utilities.js';
+import { getSourceFileOfNode, hasDynamicName, isEnumConst, isObjectLiteralMethod } from './binder-utilities.js';
 import { getHeritageClauseElementName } from './ast-utilities.js';
 import { Diagnostics } from './diagnostics.js';
 import { SyntaxKind } from './syntax-kind.js';
@@ -380,7 +380,7 @@ export function getDeclaredTypeOfEnum(c: Checker, symbol: Symbol): Type {
   for (const declaration of getDeclarations(symbol)) {
     if (declaration.kind !== SyntaxKind.EnumDeclaration) continue;
     for (const member of (declaration as EnumDeclaration).members.nodes) {
-      if (!hasBindableName(member)) continue;
+      if (hasDynamicName(member)) continue;
       const memberSymbol = getSymbolOfDeclaration(c, member)!;
       computeEnumMemberValues(c, declaration);
       const memberLinks = c.nodeLinks(member);

@@ -10,7 +10,6 @@
 // - grammar: checker-grammar.ts (checks the parser leaves to the checker)
 // - type nodes: `checkTypeNode` below
 import { checkPendingExternalEmitHelpers } from './checker-emit-helpers.js';
-import { produceDeferredCollisionChecks } from './checker-generated-code.js';
 import { resolveUntypedCall } from './checker-calls.js';
 import {
   type ImportTypeNode,
@@ -119,7 +118,6 @@ import {
   isConstTypeReference,
 } from './checker-expressions.js';
 import { checkFunctionLikeBody } from './checker-functions.js';
-import { produceDeferredIterationErrors } from './checker-iteration.js';
 import { checkFunctionOrMethodSymbols } from './checker-overloads.js';
 import { checkInferTypeParameterDeclarations, checkTypeLiteralMembers } from './checker-heritage.js';
 import { checkGrammarSourceFile } from './checker-grammar.js';
@@ -127,7 +125,7 @@ import { Diagnostics } from './diagnostic-messages.js';
 import { getTypeOfSymbol, reportImplicitAny } from './checker-symbol-types.js';
 import { getSymbolOfDeclaration } from './checker-symbols.js';
 import { checkUnusedIdentifiers } from './checker-unused.js';
-import { checkDeprecatedTypeReference } from './checker-deprecation.js';
+import { checkContextualDeprecations, checkDeprecatedTypeReference } from './checker-deprecation.js';
 
 /**
  * Checks `file` once; diagnostics accumulate in the checker. `checkUnused` also reports unused
@@ -147,7 +145,6 @@ export function checkSourceFile(c: Checker, file: SourceFile, checkUnused = fals
 
 function checkSourceFileWorker(c: Checker, file: SourceFile): void {
   c.fileBeingChecked = file;
-  c.saveDeferredDiagnostics = true;
   for (const statement of getStatements(file)!.nodes) checkSourceElement(c, statement);
   checkDeferredNodes(c, file);
   if (isExternalOrCommonJSModule(file)) checkExternalModuleExports(c, file);
@@ -159,9 +156,7 @@ function checkSourceFileWorker(c: Checker, file: SourceFile): void {
   checkDeferredNodes(c, file);
   checkPendingExternalEmitHelpers(c, file);
   c.fileBeingChecked = undefined;
-  c.saveDeferredDiagnostics = false;
-  produceDeferredIterationErrors(c);
-  produceDeferredCollisionChecks(c);
+  produceDeferredDiagnostics(c);
   // The file's deferred nodes are all checked; later ones are not queued (checkNodeDeferred).
   const links = c.nodeLinks(file);
   links.typeChecked = true;
@@ -182,7 +177,6 @@ function checkSourceFileWorker(c: Checker, file: SourceFile): void {
 export function checkSourceFileRange(c: Checker, file: SourceFile, start: number, end: number): boolean {
   const statements = getStatements(file)!.nodes;
   c.fileBeingChecked = file;
-  c.saveDeferredDiagnostics = true;
   for (let i = start; i < end; i++) checkSourceElement(c, statements[i]!);
   checkDeferredNodes(c, file);
   const whole = end === statements.length;
@@ -194,12 +188,22 @@ export function checkSourceFileRange(c: Checker, file: SourceFile, start: number
     checkPendingExternalEmitHelpers(c, file);
   }
   c.fileBeingChecked = undefined;
-  c.saveDeferredDiagnostics = false;
-  produceDeferredIterationErrors(c);
-  produceDeferredCollisionChecks(c);
+  produceDeferredDiagnostics(c);
   // Deferred nodes of a later range are queued again (checkNodeDeferred).
   c.nodeLinks(file).deferredNodes = undefined;
   return c.diagnostics.forFile(file.fileName).length > 0;
+}
+
+/**
+ * Reports the deferred diagnostics, in the order they were deferred. Diagnostics deferred while they
+ * are reported are dropped.
+ */
+export function produceDeferredDiagnostics(c: Checker): void {
+  const callbacks = c.deferredDiagnostics;
+  if (callbacks.length === 0) return;
+  const count = callbacks.length;
+  for (let i = 0; i < count; i++) callbacks[i]!();
+  c.deferredDiagnostics = [];
 }
 
 /** Checks a statement, declaration, class member or type node. */
@@ -532,6 +536,8 @@ function checkMappedType(c: Checker, node: MappedTypeNode): void {
 }
 
 function checkTypePredicate(c: Checker, node: TypePredicateNode): void {
+  // The predicate's type is checked also in a position a predicate can't have.
+  checkTypeNodeIfPresent(c, node.type);
   const parent = getTypePredicateParent(node);
   if (parent === undefined) {
     c.error(node, Diagnostics.A_type_predicate_is_only_allowed_in_return_type_position_for_functions_and_methods);
@@ -540,7 +546,6 @@ function checkTypePredicate(c: Checker, node: TypePredicateNode): void {
   const signature = getSignatureFromDeclaration(c, parent);
   const typePredicate = getTypePredicateOfSignature(c, signature);
   if (typePredicate === undefined) return;
-  checkTypeNodeIfPresent(c, node.type);
   if (typePredicate.kind === TypePredicateKind.This || typePredicate.kind === TypePredicateKind.AssertsThis) return;
   const parameterName = node.parameterName;
   if (typePredicate.parameterIndex >= 0) {
@@ -756,6 +761,17 @@ function checkDeferredNode(c: Checker, node: Node): void {
       break;
     case SyntaxKind.ClassExpression:
       checkClassLikeDeferred(c, node);
+      break;
+    case SyntaxKind.ObjectLiteralExpression: {
+      // Reported only as suggestions, which are computed when they are asked for (`getSuggestionDiagnostics`).
+      const file = getSourceFileOfNode(node);
+      const pending = c.objectLiteralsForDeprecations.get(file);
+      if (pending === undefined) c.objectLiteralsForDeprecations.set(file, [node]);
+      else pending.push(node);
+      break;
+    }
+    case SyntaxKind.JsxAttributes:
+      checkContextualDeprecations(c, node);
       break;
     case SyntaxKind.AsExpression:
     case SyntaxKind.TypeAssertionExpression:

@@ -782,17 +782,19 @@ export function checkInterfaceHeritage(c: Checker, node: Node): void {
   const links = c.symbolLinks(symbol);
   if (!links.interfaceChecked) {
     links.interfaceChecked = true;
+    // Reported on the first interface declaration, whichever declaration is checked first.
+    const firstName = getName(getDeclarationOfKind(symbol, SyntaxKind.InterfaceDeclaration)!)!;
     const t = getDeclaredTypeOfSymbol(c, symbol) as InterfaceType;
     if ((t.flags & TypeFlags.Object) !== 0) {
       const typeWithThis = getTypeWithThisArgument(c, t, undefined, false);
       // Later checks run only when inherited properties agree.
-      if (checkInheritedPropertiesAreIdentical(c, t, getName(node)!)) {
+      if (checkInheritedPropertiesAreIdentical(c, t, firstName)) {
         for (const baseType of getBaseTypes(c, t))
           checkTypeAssignableTo(
             c,
             typeWithThis,
             getTypeWithThisArgument(c, baseType, t.thisType, false),
-            getName(node),
+            firstName,
             Diagnostics.Interface_0_incorrectly_extends_interface_1,
           );
         checkIndexConstraints(c, t, symbol, false);

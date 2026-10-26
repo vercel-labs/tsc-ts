@@ -273,7 +273,8 @@ function isPotentiallyUnusedContainer(node: Node): boolean {
     case SyntaxKind.CaseBlock:
     case SyntaxKind.ForStatement:
     case SyntaxKind.ForInStatement:
-    case SyntaxKind.ForOfStatement: {
+    case SyntaxKind.ForOfStatement:
+    case SyntaxKind.ClassStaticBlockDeclaration: {
       const locals = getLocals(node);
       return locals !== undefined && locals.size !== 0;
     }
@@ -319,6 +320,7 @@ function checkUnusedIdentifiersOfNode(c: Checker, node: Node): void {
     case SyntaxKind.ForStatement:
     case SyntaxKind.ForInStatement:
     case SyntaxKind.ForOfStatement:
+    case SyntaxKind.ClassStaticBlockDeclaration:
       checkUnusedLocalsAndParameters(c, node);
       return;
     case SyntaxKind.Constructor:

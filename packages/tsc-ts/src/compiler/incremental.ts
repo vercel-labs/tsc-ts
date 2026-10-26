@@ -2607,6 +2607,7 @@ export class IncrementalProgram extends CompilerProgram {
     readonly signatures: ReadonlyMap<string, string> = new Map(),
   ) {
     super(checked, times);
+    checked.globalsInFileDiagnostics = true;
     this.snapshot = programToSnapshot(checked, oldSnapshot);
   }
 

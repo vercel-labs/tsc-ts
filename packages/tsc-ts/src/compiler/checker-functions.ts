@@ -106,7 +106,12 @@ import {
   getInferenceContext,
   instantiateContextualType,
 } from './checker-contextual.js';
-import { checkJSDocFullSignature, checkUnmatchedJSDocParameters, getFullSignatureTypeNode } from './checker-jsdoc.js';
+import {
+  checkJSDocFullSignature,
+  checkJSDocFullSignatureType,
+  checkUnmatchedJSDocParameters,
+  getFullSignatureTypeNode,
+} from './checker-jsdoc.js';
 import { getEffectiveCheckNode, isFunctionLike, nodeIsMissing } from './ast-utilities.js';
 import {
   getFlowTypeOfReferenceAt,
@@ -145,6 +150,7 @@ import {
 
 export function checkFunctionExpressionOrObjectLiteralMethod(c: Checker, node: Node, checkMode: CheckMode): Type {
   checkNodeDeferred(c, node);
+  checkJSDocFullSignatureType(c, node);
   if (node.kind === SyntaxKind.FunctionExpression) checkCollisionsForDeclarationName(c, node, getName(node));
   if (node.kind === SyntaxKind.GetAccessor || node.kind === SyntaxKind.SetAccessor) return c.anyType;
   if ((checkMode & CheckMode.SkipContextSensitive) !== 0 && isContextSensitive(c, node)) {
@@ -581,6 +587,9 @@ export function checkAwaitExpression(c: Checker, node: Node): Type {
 export function checkYieldExpression(c: Checker, node: Node): Type {
   checkGrammarYieldOfExpression(c, node);
   const yieldExpr = node as YieldExpression;
+  // The operand is checked also outside a generator.
+  const operand = yieldExpr.expression;
+  const yieldExpressionType = operand !== undefined ? checkExpression(c, operand) : c.undefinedWideningType;
   const func = getContainingFunctionLike(node);
   if (func === undefined) return c.anyType;
   const functionFlags = getFunctionFlags(func);
@@ -600,8 +609,6 @@ export function checkYieldExpression(c: Checker, node: Node): Type {
     returnType !== undefined ? getIterationTypesOfGeneratorFunctionReturnType(c, returnType, isAsync) : undefined;
   const signatureYieldType = iterationTypes?.yieldType ?? c.anyType;
   const signatureNextType = iterationTypes?.nextType ?? c.anyType;
-  const operand = yieldExpr.expression;
-  const yieldExpressionType = operand !== undefined ? checkExpression(c, operand) : c.undefinedWideningType;
   const yieldedType = getYieldedTypeOfYieldExpression(c, yieldExpr, yieldExpressionType, signatureNextType, isAsync);
   if (returnType !== undefined && yieldedType !== undefined)
     checkTypeAssignableToAndOptionallyElaborate(c, yieldedType, signatureYieldType, operand ?? node, operand);

@@ -46,7 +46,7 @@ import {
   isPrivateIdentifierClassElementDeclaration,
   isStatic,
 } from './binder-utilities.js';
-import { isFunctionLike, nodeIsMissing, nodeIsPresent } from './ast-utilities.js';
+import { isFunctionLike, isInJSFile, nodeIsMissing, nodeIsPresent } from './ast-utilities.js';
 import { ScriptTarget, getEmitScriptTarget, getUseDefineForClassFields } from './options.js';
 import { hasDynamicName, hasLateBindableName } from './checker-utilities.js';
 import { type DiagnosticMessage, Diagnostics } from './diagnostics.js';
@@ -78,7 +78,13 @@ import { getSymbolOfDeclaration } from './checker-symbols.js';
 import { getOptionalType, getTypeOfSymbol } from './checker-symbol-types.js';
 import { convertAutoToAny, getFlowTypeOfReference } from './checker-narrowing.js';
 import { TypeFacts, hasTypeFacts } from './checker-flow.js';
-import { getIndexInfosOfType, getSignaturesOfType, getTypeOfPropertyOfType } from './checker-members.js';
+import {
+  getIndexInfosOfType,
+  getPropertiesOfType,
+  getSignaturesOfType,
+  getTypeOfPropertyOfType,
+} from './checker-members.js';
+import { isConstructorDeclaredThisProperty } from './checker-javascript.js';
 import {
   checkJSDocLinksOfNode,
   checkNodeDeferred,
@@ -91,7 +97,7 @@ import {
   checkExportsOnMergedDeclarations,
 } from './checker-declarations.js';
 import { checkFunctionLikeBody } from './checker-functions.js';
-import { checkJSDocFullSignature } from './checker-jsdoc.js';
+import { checkJSDocFullSignature, checkJSDocFullSignatureType } from './checker-jsdoc.js';
 import { checkComputedPropertyName } from './checker-expressions.js';
 import { checkFunctionOrConstructorSymbol, checkFunctionOrMethodSymbols } from './checker-overloads.js';
 import {
@@ -149,6 +155,23 @@ export function checkClassLikeDeferred(c: Checker, node: Node): void {
 
 function checkClassMembers(c: Checker, node: Node): void {
   for (const member of getMembers(node)!.nodes) checkClassMember(c, member);
+  checkConstructorDeclaredProperties(c, node);
+}
+
+/**
+ * Resolves the types of a JavaScript class's properties declared by `this.x` assignments in its
+ * constructor, so the diagnostics of their initializers don't depend on which use is checked first.
+ */
+function checkConstructorDeclaredProperties(c: Checker, node: Node): void {
+  if (!isInJSFile(node)) return;
+  const symbol = getSymbolOfDeclaration(c, node);
+  if (symbol === undefined) return;
+  for (const property of getPropertiesOfType(c, getDeclaredTypeOfSymbol(c, symbol)))
+    if (
+      isConstructorDeclaredThisProperty(c, property) &&
+      c.symbolLinks(property).thisAssignmentLocation!.parent === node
+    )
+      getTypeOfSymbol(c, property);
 }
 
 function checkClassLikeDeclaration(c: Checker, node: Node): void {
@@ -242,6 +265,7 @@ function checkClassMember(c: Checker, member: Node): void {
       if (symbol !== undefined && member.kind !== SyntaxKind.Constructor) getTypeOfSymbol(c, symbol);
       checkFunctionLikeBody(c, member);
       if (member.kind === SyntaxKind.MethodDeclaration) {
+        checkJSDocFullSignatureType(c, member);
         checkJSDocFullSignature(c, member);
         checkFunctionOrMethodSymbols(c, member);
         if (hasSyntacticModifier(member, ModifierFlags.Abstract) && getBody(member) !== undefined)

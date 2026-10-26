@@ -189,15 +189,16 @@ export function checkRightHandSideOfForOf(c: Checker, statement: Node): Type {
 
 export function checkReturnStatement(c: Checker, node: Node): void {
   const s = node as ReturnStatement;
+  // The expression is checked also where a return statement is a grammar error.
+  const exprNode = s.expression;
+  const exprType = exprNode !== undefined ? checkExpressionCached(c, exprNode) : c.undefinedType;
   const container = getContainingFunction(node);
   // Returns outside functions and in static blocks are grammar errors.
   if (container === undefined) return;
   const signature = getSignatureFromDeclaration(c, container);
   const returnType = getReturnTypeOfSignature(c, signature);
   const functionFlags = getFunctionFlags(container);
-  const exprNode = s.expression;
   if (c.strictNullChecks || exprNode !== undefined || (returnType.flags & TypeFlags.Never) !== 0) {
-    const exprType = exprNode !== undefined ? checkExpressionCached(c, exprNode) : c.undefinedType;
     if (container.kind === SyntaxKind.SetAccessor) {
       if (exprNode !== undefined) c.error(node, Diagnostics.Setters_cannot_return_a_value);
     } else if (container.kind === SyntaxKind.Constructor) {

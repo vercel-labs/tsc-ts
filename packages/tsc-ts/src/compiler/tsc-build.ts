@@ -777,6 +777,9 @@ export class Orchestrator {
     times.parseTime = performance.now() - parseStart;
     const bindStart = performance.now();
     const checked = new CheckedProgram(program);
+    // The project's incremental program, made after checking, keeps the globals found checking a file
+    // with the file.
+    checked.globalsInFileDiagnostics = true;
     times.bindTime = performance.now() - bindStart;
     const options = program.options;
     const count = mayUseThreads ? checkerThreads(options.checkers, options.singleThreaded, program) : 1;

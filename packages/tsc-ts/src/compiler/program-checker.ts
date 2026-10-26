@@ -9,7 +9,14 @@
  */
 import { type Node, ScriptKind, type SourceFile } from './ast.js';
 import { Checker, CheckerHost, disposeChecker } from './checker.js';
-import { createDiagnostic, Diagnostic, type DiagnosticMessage, Diagnostics, messageCode } from './diagnostics.js';
+import {
+  compareDiagnostics,
+  createDiagnostic,
+  Diagnostic,
+  type DiagnosticMessage,
+  Diagnostics,
+  messageCode,
+} from './diagnostics.js';
 import type { EmitResult } from './emitter.js';
 import type { CompilerOptions, ModuleKind } from './options.js';
 import type { ResolvedModule } from './module-resolution-types.js';
@@ -266,6 +273,12 @@ export class CheckedProgram {
   referenceThreads = 1;
   readonly parallelGlobalDiagnostics: Diagnostic[] = [];
   /**
+   * Whether the semantic diagnostics of a file include the global diagnostics its checker found while
+   * checking it, as an incremental program caches them (IncrementalProgram). Such a program doesn't report
+   * the global diagnostics found by checking otherwise (`reportsGlobalDiagnosticsOfChecking`, compile-program.ts).
+   */
+  globalsInFileDiagnostics = false;
+  /**
    * The declaration diagnostics checker threads computed under `noEmit` (PlainProgram,
    * IncrementalProgram), by file index; `undefined` for files they did not. Set once every file is
    * checked.
@@ -436,7 +449,15 @@ export class CheckedProgram {
   private getBindAndCheckDiagnostics(file: SourceFile, checks?: readonly Diagnostic[]): Diagnostic[] {
     const options = this.program.options;
     const diagnostics = file.bindDiagnostics.slice();
-    for (const d of checks ?? this.checker.getDiagnostics(file)) diagnostics.push(d);
+    if (checks !== undefined) for (const d of checks) diagnostics.push(d);
+    else if (this.globalsInFileDiagnostics) {
+      const checker = this.checker;
+      const before = checker.getGlobalDiagnostics();
+      for (const d of checker.getDiagnostics(file)) diagnostics.push(d);
+      const after = checker.getGlobalDiagnostics();
+      if (after.length > before.length)
+        for (const d of after) if (!containsSortedDiagnostic(before, d)) diagnostics.push(d);
+    } else for (const d of this.checker.getDiagnostics(file)) diagnostics.push(d);
     if (isPlainJSFile(file, options)) {
       const result: Diagnostic[] = [];
       for (const d of diagnostics) if (plainJSErrors.has(d.code)) result.push(d);
@@ -467,6 +488,20 @@ export class CheckedProgram {
   }
 }
 
+/** Whether `sorted`, in `compareDiagnostics` order, has a diagnostic equal to `diagnostic`. */
+function containsSortedDiagnostic(sorted: readonly Diagnostic[], diagnostic: Diagnostic): boolean {
+  let low = 0;
+  let high = sorted.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    const c = compareDiagnostics(sorted[middle]!, diagnostic);
+    if (c === 0) return true;
+    if (c < 0) low = middle + 1;
+    else high = middle - 1;
+  }
+  return false;
+}
+
 /** The `@ts-ignore` and `@ts-expect-error` comments of a file, by line. */
 class Directives {
   private readonly byLine = new Map<number, { pos: number; end: number; kind: CommentDirectiveKind }>();
@@ -488,6 +523,11 @@ class Directives {
     const lineStarts = this.file.diagnosticFile().getLineStarts();
     const result: Diagnostic[] = [];
     for (const diagnostic of diagnostics) {
+      // A global diagnostic, or one of another file, has no line here.
+      if (diagnostic.file === undefined || diagnostic.file.fileName !== this.file.fileName) {
+        result.push(diagnostic);
+        continue;
+      }
       let ignored = false;
       for (let line = computeLineOfPosition(lineStarts, diagnostic.pos) - 1; line >= 0; line--) {
         const directive = this.byLine.get(line);
@@ -564,6 +604,7 @@ const plainJSErrors = codesOf([
   Diagnostics.A_continue_statement_can_only_jump_to_a_label_of_an_enclosing_iteration_statement,
   Diagnostics.A_default_clause_cannot_appear_more_than_once_in_a_switch_statement,
   Diagnostics.A_default_export_must_be_at_the_top_level_of_a_file_or_module_declaration,
+  Diagnostics.A_deferred_import_must_specify_a_namespace_binding,
   Diagnostics.A_definite_assignment_assertion_is_not_permitted_in_this_context,
   Diagnostics.A_destructuring_declaration_must_have_an_initializer,
   Diagnostics.A_get_accessor_cannot_have_parameters,

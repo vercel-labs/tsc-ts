@@ -1,5 +1,5 @@
 // JSX: element and fragment types, the `JSX` namespace, intrinsic elements, attributes and children.
-import { checkDeprecatedJsxAttribute, checkDeprecatedSignature } from './checker-deprecation.js';
+import { checkDeprecatedSignature } from './checker-deprecation.js';
 import {
   type BinaryExpression,
   type JsxAttribute,
@@ -14,6 +14,7 @@ import {
   type JsxText,
   type Node,
   type NodeList,
+  NodeVisitor,
   type PropertyAccessExpression,
   type QualifiedName,
   type SourceFile,
@@ -450,12 +451,15 @@ export function getJsxNamespaceContainerForImplicitImport(c: Checker, location: 
     links.jsxImplicitImportContainer = c.unknownSymbol;
     return undefined;
   }
+  // A missing module is reported once, at the first JSX tag of the file, whichever tag is checked first.
+  const finder = new FirstJsxTagFinder();
+  file.forEachChild(finder);
   const mod = resolveExternalModule(
     c,
     specifier,
     getText(specifier),
     Diagnostics.This_JSX_tag_requires_the_module_path_0_to_exist_but_none_could_be_found_Make_sure_you_have_types_for_the_appropriate_package_installed,
-    location,
+    finder.tag ?? location,
     false,
     undefined,
   );
@@ -463,6 +467,23 @@ export function getJsxNamespaceContainerForImplicitImport(c: Checker, location: 
   const result = resolved !== undefined ? getMergedSymbol(c, resolved) : undefined;
   links.jsxImplicitImportContainer = result ?? c.unknownSymbol;
   return result;
+}
+
+/** The first JSX element or self-closing element of a file, or the opening tag of its first fragment. */
+class FirstJsxTagFinder extends NodeVisitor {
+  tag: Node | undefined = undefined;
+
+  visitNode(node: Node): boolean {
+    if (node.kind === SyntaxKind.JsxElement || node.kind === SyntaxKind.JsxSelfClosingElement) {
+      this.tag = node;
+      return true;
+    }
+    if (node.kind === SyntaxKind.JsxFragment) {
+      this.tag = (node as JsxFragment).openingFragment;
+      return true;
+    }
+    return node.forEachChild(this);
+  }
 }
 
 /** The `JSX` namespace for `location`: the factory's, the runtime module's, or the global one. */
@@ -968,7 +989,6 @@ export function createJsxAttributesTypeFromAttributesProperty(
         if (allAttributesTable !== undefined) allAttributesTable.set(attributeSymbol.name, attributeSymbol);
         if (jsxNameText((attributeDecl as JsxAttribute).name) === jsxChildrenPropertyName)
           explicitlySpecifyChildrenAttribute = true;
-        if (contextualType !== undefined) checkDeprecatedJsxAttribute(c, contextualType, attributeDecl as JsxAttribute);
         if (
           contextualType !== undefined &&
           (checkMode & CheckMode.Inferential) !== 0 &&
@@ -1344,6 +1364,7 @@ export function checkJsx(c: Checker, node: Node, checkMode: CheckMode): Type {
     case SyntaxKind.JsxFragment:
       return checkJsxFragment(c, node as JsxFragment);
     case SyntaxKind.JsxAttributes:
+      checkNodeDeferred(c, node);
       return createJsxAttributesTypeFromAttributesProperty(c, node.parent!, checkMode);
   }
   return c.errorType;

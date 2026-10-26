@@ -552,6 +552,9 @@ class Watcher {
         this.files.current.set(watchFileKey(file.fileName, file.path, indicator), file);
       }
       const checked = new CheckedProgram(program);
+      // The incremental program `finishBuild` makes after checking keeps the globals found checking a file
+      // with the file.
+      checked.globalsInFileDiagnostics = true;
       const finish = (): void => {
         this.finishBuild(checked);
         // Rebuilds parse what changed themselves.
@@ -650,6 +653,7 @@ class Watcher {
       computeLastSignatures(this.snapshot, this.lastChecked, this.files.parsed);
     this.lastChecked = undefined;
     const checked = new CheckedProgram(program);
+    checked.globalsInFileDiagnostics = true;
     const signatures = new Map<string, string>();
     const threads = this.rebuildThreads(checked, signatures);
     // A new checker for checker threads: `rebuildThreads` may have emitted declarations with this one.

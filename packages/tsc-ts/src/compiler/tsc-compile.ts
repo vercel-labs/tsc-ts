@@ -367,6 +367,8 @@ export function compileInParallel(
   formattedReports.format = work.reporter.plainFormat();
   mark(`${threads} checkers`);
   const checked = new CheckedProgram(program);
+  // The incremental program made after checking keeps the globals found checking a file with the file.
+  if (work.incremental) checked.globalsInFileDiagnostics = true;
   times.bindTime = performance.now() - bindStart;
   mark('checker created');
   if (work.incremental && !checksIncrementalOnThreads(sys, program.commandLine.buildInfoFileName())) {

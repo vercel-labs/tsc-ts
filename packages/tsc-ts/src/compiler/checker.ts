@@ -30,7 +30,6 @@
 // | checker-grammar.ts              | grammar checks                                          |
 // | checker-flow.ts                 | control flow narrowing                                  |
 import type { ModuleSpecifierResult } from './node-builder-names.js';
-import type { DeferredCollisionCheck } from './checker-generated-code.js';
 import type { EmitHelperFileLinks } from './checker-emit-helpers.js';
 import { sideOf } from './side-state.js';
 import type { Node, PatternAmbientModule, SourceFile } from './ast.js';
@@ -116,12 +115,13 @@ import {
   TypeComparer,
   type VarianceStackEntry,
 } from './relations.js';
-import { TypeNodeVisitor, checkSourceFile } from './checker-source-file.js';
+import { TypeNodeVisitor, checkSourceFile, produceDeferredDiagnostics } from './checker-source-file.js';
+import { checkObjectLiteralDeprecations } from './checker-deprecation.js';
 import { InferenceCaches } from './checker-inference.js';
 import { AssignmentMarker, type FlowLoopInfo, type FlowState, type FlowWalk } from './checker-narrowing.js';
 import type { FlowNode, FlowReduceLabel } from './flow.js';
 import { JsxState } from './checker-jsx.js';
-import type { DeferredIterationError, IterationTypes } from './checker-iteration.js';
+import type { IterationTypes } from './checker-iteration.js';
 import type { SpreadIndices } from './checker-contextual.js';
 import { SourceFileMetadata, getEmitModuleFormatOfFile } from './program-utilities.js';
 import type { GrammarChecker } from './checker-grammar.js';
@@ -679,11 +679,17 @@ export class Checker implements TypeChecking {
   readonly awaitedTypeStack: number[] = [];
   /** Iteration types by type id and iteration use. */
   readonly iterationTypesCache = new Map<number, IterationTypes>();
-  /** Whether diagnostics can be deferred to the end of the file being checked. */
-  saveDeferredDiagnostics = false;
-  deferredIterationErrors: DeferredIterationError[] = [];
-  /** Collision checks waiting for the end of the file (checker-generated-code.ts). */
-  deferredCollisionChecks: DeferredCollisionCheck[] = [];
+  /**
+   * Diagnostics reported after the checks of the file being checked, or before the next global
+   * diagnostics are read, in the order they were deferred. Reporting them earlier could resolve types
+   * that are being resolved.
+   */
+  deferredDiagnostics: (() => void)[] = [];
+  /**
+   * The checked object literals of each file whose members may set deprecated properties of their contextual
+   * types, reported when the file's suggestion diagnostics are asked for (`checkObjectLiteralDeprecations`).
+   */
+  readonly objectLiteralsForDeprecations = new Map<SourceFile, Node[]>();
   /** Binding patterns whose implied type is being computed as a contextual type. */
   readonly contextualBindingPatterns: Node[] = [];
   /** The binding pattern or assignment pattern that implied each type. */
@@ -736,11 +742,13 @@ export class Checker implements TypeChecking {
   flowTypeCache: Map<Node, Type> | undefined = undefined;
   flowInvocationCount = 0;
   /** The reduce labels being passed, innermost last; each limits its target label's antecedents. */
-  readonly flowReduceLabels: FlowReduceLabel[] = [];
+  flowReduceLabels: FlowReduceLabel[] = [];
   readonly flowNodeReachable = new Map<FlowNode, boolean>();
   readonly flowNodePostSuper = new Map<FlowNode, boolean>();
   lastFlowNode: FlowNode | undefined = undefined;
   lastFlowNodeReachable = false;
+  /** Symbols whose explicit type is being found, for flow analysis of self-referential `for...of`. */
+  readonly resolvingExplicitTypeOfSymbol = new Set<Symbol>();
   readonly assignmentMarker: AssignmentMarker;
   readonly primitiveTypeAliasSuggestions = new Map<string, Symbol>();
 
@@ -1005,11 +1013,13 @@ export class Checker implements TypeChecking {
   /** Checks `file`, including unused identifiers, and returns its suggestion diagnostics. */
   getSuggestionDiagnostics(file: SourceFile): Diagnostic[] {
     checkSourceFile(this, file, true);
+    checkObjectLiteralDeprecations(this, file);
     return this.suggestionDiagnostics.forFile(file.fileName);
   }
 
   /** Diagnostics without a file, such as missing global types. */
   getGlobalDiagnostics(): Diagnostic[] {
+    produceDeferredDiagnostics(this);
     return this.diagnostics.globals();
   }
 
@@ -1208,8 +1218,8 @@ export function disposeChecker(c: Checker): void {
   c.cachedTypesById.clear();
   c.cachedTypesByPair.clear();
   c.iterationTypesCache.clear();
-  c.deferredIterationErrors = [];
-  c.deferredCollisionChecks = [];
+  c.deferredDiagnostics = [];
+  c.objectLiteralsForDeprecations.clear();
   c.errorTypes.clear();
   c.globalTypeCache.clear();
   c.globalSymbolCache.clear();

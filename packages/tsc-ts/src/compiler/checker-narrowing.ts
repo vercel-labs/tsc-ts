@@ -119,7 +119,7 @@ import {
   getInferenceContext,
   isContextSensitiveFunctionOrObjectLiteralMethod,
 } from './checker-contextual.js';
-import { instantiateType } from './instantiation.js';
+import { instantiateType, isNodeDescendantOf } from './instantiation.js';
 import { IterationUse, checkIteratedTypeOrElementType } from './checker-iteration.js';
 import { checkSuperExpression } from './checker-super.js';
 import { getSymbolNameForPrivateIdentifier } from './binder.js';
@@ -946,6 +946,16 @@ function getTypeOfDottedName(c: Checker, node: Node): Type | undefined {
 
 function getExplicitTypeOfSymbol(c: Checker, original: Symbol): Type | undefined {
   const symbol = resolveSymbol(c, original) ?? original;
+  // `for (const x of x.y)` asks for the explicit type of `x` while finding it.
+  const resolving = c.resolvingExplicitTypeOfSymbol;
+  if (resolving.has(symbol)) return undefined;
+  resolving.add(symbol);
+  const result = getExplicitTypeOfResolvedSymbol(c, symbol);
+  resolving.delete(symbol);
+  return result;
+}
+
+function getExplicitTypeOfResolvedSymbol(c: Checker, symbol: Symbol): Type | undefined {
   if ((symbol.flags & (SymbolFlags.Function | SymbolFlags.Method | SymbolFlags.Class | SymbolFlags.ValueModule)) !== 0)
     return getTypeOfSymbol(c, symbol);
   if ((symbol.flags & (SymbolFlags.Variable | SymbolFlags.Property)) !== 0) {
@@ -2652,7 +2662,11 @@ function isCallChain(node: Node): boolean {
 // ---- Reachability
 
 export function isReachableFlowNode(c: Checker, flow: FlowNode): boolean {
+  // The reduce labels of an enclosing flow analysis don't apply.
+  const outerReduceLabels = c.flowReduceLabels;
+  if (outerReduceLabels.length !== 0) c.flowReduceLabels = [];
   const result = isReachableFlowNodeWorker(c, flow, false);
+  c.flowReduceLabels = outerReduceLabels;
   c.lastFlowNode = flow;
   c.lastFlowNodeReachable = result;
   return result;
@@ -2665,7 +2679,8 @@ function isReachableFlowNodeWorker(c: Checker, start: FlowNode, noCacheCheckIn: 
     if (flow === c.lastFlowNode) return c.lastFlowNodeReachable;
     const flags = flow.flags;
     if ((flags & FlowFlags.Shared) !== 0) {
-      if (!noCacheCheck) {
+      // A result found through a reduce label holds only for that label's antecedents.
+      if (!noCacheCheck && c.flowReduceLabels.length === 0) {
         const cached = c.flowNodeReachable.get(flow);
         if (cached !== undefined) return cached;
         const reachable = isReachableFlowNodeWorker(c, flow, true);
@@ -2835,7 +2850,6 @@ function findFunctionOrSourceFile(node: Node | undefined): Node | undefined {
 }
 
 function ensureAssignmentsMarked(c: Checker, symbol: Symbol): void {
-  if (c.symbolLinks(symbol).lastAssignmentPos !== 0) return;
   const parent = findFunctionOrSourceFile(symbol.valueDeclaration);
   if (parent === undefined) return;
   const links = c.nodeLinks(parent);
@@ -3148,12 +3162,25 @@ export function getNarrowedTypeOfSymbol(c: Checker, symbol: Symbol, location: No
     )
   )
     return t;
+  // A reference in the declaration's own initializer would need the declaration's type; defaults of
+  // the binding elements and nested functions are narrowed.
+  const rootInitializer = getInitializer(rootDeclaration);
+  if (
+    rootInitializer !== undefined &&
+    location.pos >= rootInitializer.pos &&
+    location.end <= rootInitializer.end &&
+    isNodeDescendantOf(location, rootInitializer) &&
+    getControlFlowContainer(declaration) === getControlFlowContainer(location)
+  )
+    return t;
   const links = c.nodeLinks(parent);
   if ((links.flags & NodeCheckFlags.InCheckIdentifier) !== 0) return t;
   links.flags |= NodeCheckFlags.InCheckIdentifier;
   let result = t;
   const parentType = getTypeForBindingElementParent(c, parent, CheckMode.Normal);
   const parentTypeConstraint = parentType !== undefined ? mapToBaseConstraintOrType(c, parentType) : undefined;
+  // Only the parent's type is guarded; flow analysis may narrow the binding elements again.
+  links.flags &= ~NodeCheckFlags.InCheckIdentifier;
   if (
     parentTypeConstraint !== undefined &&
     (parentTypeConstraint.flags & TypeFlags.Union) !== 0 &&
@@ -3173,7 +3200,6 @@ export function getNarrowedTypeOfSymbol(c: Checker, symbol: Symbol, location: No
         ? c.neverType
         : getBindingElementTypeFromParentType(c, declaration as BindingElement, narrowedType, true);
   }
-  links.flags &= ~NodeCheckFlags.InCheckIdentifier;
   return result;
 }
 

@@ -50,6 +50,7 @@ import {
 import { getContextualCallSignature } from './checker-contextual.js';
 import { entityNameToString, getResolvedSymbol } from './checker-expressions.js';
 import { isArrayType } from './checker-type-factory.js';
+import { checkSourceElement } from './checker-source-file.js';
 
 /** The type a JSDoc type reference to a JavaScript-style name means, if it is one. */
 export function getIntendedTypeFromJSDocTypeReference(c: Checker, node: Node): Type | undefined {
@@ -146,6 +147,12 @@ export function getParameterTypeOfFullSignature(c: Checker, fn: Node, parameter:
 export function getReturnTypeOfFullSignature(c: Checker, fn: Node): Type | undefined {
   const signature = getSignatureOfFullSignatureType(c, fn);
   return signature !== undefined ? getReturnTypeOfSignature(c, signature) : undefined;
+}
+
+/** Checks the type of a JSDoc `@type` on a function as a type node. */
+export function checkJSDocFullSignatureType(c: Checker, fn: Node): void {
+  const typeNode = getFullSignatureTypeNode(fn);
+  if (typeNode !== undefined) checkSourceElement(c, typeNode);
 }
 
 /** A JSDoc `@type` on a function needs a call signature taking at least its parameters. */
