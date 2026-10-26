@@ -24,8 +24,123 @@ const nestedKeyOf =
   '  ? `${K}` | (T[K] extends object ? `${K}.${NestedKeyOf<T[K]>}` : never)\n' +
   '  : never;\n';
 
-/** Projects as `[name, files, args]`; files without a tsconfig.json get one with `base` options. */
+/** Projects as `[name, files, args, diagnosticCodes]`; missing configs use `base`; optional codes validate fixtures. */
 const projects = [
+  [
+    'typeof import callback instantiations preserve direct and mapped parameters',
+    {
+      'factory.ts':
+        'export type Params<T> = { items: T[]; onFlush: (items: T[]) => void; delay: number };\n' +
+        'export declare function direct<T>(params: Params<T>): void;\n' +
+        'export declare function mapped<T>(params: Omit<Params<T>, "delay">): void;\n',
+      'a.ts':
+        'import { direct, mapped } from "./factory";\nimport * as factory from "./factory";\n' +
+        'type Item = Record<string, unknown>;\n' +
+        'type Direct = typeof import("./factory").direct<Item>;\n' +
+        'type Mapped = typeof import("./factory").mapped<Item>;\n' +
+        'declare const directCallbacks: Array<Parameters<Direct>[0]["onFlush"]>;\n' +
+        'declare const mappedCallbacks: Array<Parameters<Mapped>[0]["onFlush"]>;\n' +
+        'declare const namedDirect: Parameters<typeof direct<Item>>[0];\n' +
+        'declare const namespaceDirect: Parameters<typeof factory.direct<Item>>[0];\n' +
+        'declare const namedMapped: Parameters<typeof mapped<Item>>[0];\n' +
+        'declare const namespaceMapped: Parameters<typeof factory.mapped<Item>>[0];\n' +
+        'directCallbacks.push(namedDirect.onFlush, namespaceDirect.onFlush);\n' +
+        'mappedCallbacks.push(namedMapped.onFlush, namespaceMapped.onFlush);\n',
+    },
+    [],
+    [],
+  ],
+  [
+    'typeof import callback instantiations reject incompatible parameters',
+    {
+      'factory.ts':
+        'type Params<T> = { onFlush: (items: T[]) => void; delay: number };\n' +
+        'export declare function direct<T>(params: Params<T>): void;\n' +
+        'export declare function mapped<T>(params: Omit<Params<T>, "delay">): void;\n',
+      'a.ts':
+        'type Direct = typeof import("./factory").direct<Record<string, unknown>>;\n' +
+        'type Mapped = typeof import("./factory").mapped<Record<string, unknown>>;\n' +
+        'declare const directCallbacks: Array<Parameters<Direct>[0]["onFlush"]>;\n' +
+        'declare const mappedCallbacks: Array<Parameters<Mapped>[0]["onFlush"]>;\n' +
+        'declare const wrong: (items: number[]) => void;\n' +
+        'directCallbacks.push(wrong);\nmappedCallbacks.push(wrong);\n',
+    },
+    [],
+    [2345, 2345],
+  ],
+  [
+    'typeof import constructors and re-export aliases keep instantiations separate',
+    {
+      'factory.ts':
+        'export declare class Box<T> { constructor(value: T); value: T }\n' +
+        'export declare function identity<T>(value: T): T;\n',
+      'barrel.ts': 'export { Box, identity as alias } from "./factory";\n',
+      'a.ts':
+        'export {};\n' +
+        'type Text = typeof import("./barrel").alias<string>;\n' +
+        'type Number = typeof import("./barrel").alias<number>;\n' +
+        'type Generic = typeof import("./barrel").alias;\n' +
+        'declare const text: Text;\ndeclare const number: Number;\ndeclare const generic: Generic;\n' +
+        'const s: string = text("s");\nconst n: number = number(1);\n' +
+        'const gs: string = generic("s");\nconst gn: number = generic(1);\n' +
+        'type Constructor = typeof import("./barrel").Box<string>;\n' +
+        'declare const Box: Constructor;\nconst args: ConstructorParameters<Constructor> = ["s"];\n' +
+        'const instance: InstanceType<Constructor> = new Box(...args);\nconst value: string = instance.value;\n' +
+        'const plain: import("./factory").Box<string> = instance;\n' +
+        'new Box(1);\nconst wrong: number = text("s");\ntext(1);\n',
+    },
+    [],
+    [2345, 2322, 2345],
+  ],
+  [
+    'typeof import signatures apply defaults and select matching overloads',
+    {
+      'factory.ts':
+        'export declare function pair<T, U = T>(first: T, second: U): [T, U];\n' +
+        'export declare function overloaded<T>(value: T): T;\n' +
+        'export declare function overloaded<T, U>(value: T, other: U): [T, U];\n' +
+        'export declare function overloaded(value: string): string;\n',
+      'a.ts':
+        'declare const pair: typeof import("./factory").pair<string>;\n' +
+        'declare const overloaded: typeof import("./factory").overloaded<string>;\n' +
+        'const tuple: [string, string] = pair("a", "b");\n' +
+        'const value: string = overloaded("s");\npair("a", 1);\noverloaded("s", 1);\n',
+    },
+    [],
+    [2345, 2554],
+  ],
+  [
+    'typeof import signatures report arity and constraint errors',
+    {
+      'factory.ts':
+        'export declare function plain(value: string): string;\n' +
+        'export declare function pair<T, U>(first: T, second: U): [T, U];\n' +
+        'export declare function constrained<T extends string>(value: T): T;\n',
+      'a.ts':
+        'type Plain = typeof import("./factory").plain<string>;\n' +
+        'type Pair = typeof import("./factory").pair<string>;\n' +
+        'type Constraint = typeof import("./factory").constrained<number>;\n',
+    },
+    [],
+    [2635, 2635, 2344],
+  ],
+  [
+    'typeof import instantiates callable export equals without a qualifier',
+    {
+      'factory.ts': 'declare function identity<T>(value: T): T;\nexport = identity;\n',
+      'a.ts':
+        'declare const text: typeof import("./factory")<string>;\n' +
+        'declare const number: typeof import("./factory")<number>;\n' +
+        'declare const generic: typeof import("./factory");\n' +
+        'const s: string = text("s");\nconst n: number = number(1);\nconst b: boolean = generic(true);\ntext(1);\n',
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { ...base, module: 'CommonJS' },
+        files: ['a.ts'],
+      }),
+    },
+    [],
+    [2345],
+  ],
   [
     'BigInt literals as names and values below ES2020',
     {
@@ -1354,12 +1469,19 @@ test('projects reduced from real-world code match tsgo', { skip, timeout: 300_00
   await Promise.all(
     projects
       .filter(([name]) => filter === undefined || name.includes(filter))
-      .map(async ([name, source, args = []]) => {
+      .map(async ([name, source, args = [], diagnosticCodes]) => {
         const files =
           'tsconfig.json' in source
             ? source
             : { ...source, 'tsconfig.json': JSON.stringify({ compilerOptions: base }) };
         const [expected, actual] = await Promise.all([run([tsgo], files, args), run(tscTs, files, args)]);
+        if (diagnosticCodes !== undefined) {
+          assert.deepEqual(
+            [...expected.stdout.matchAll(/\berror TS(\d+):/g)].map((match) => Number(match[1])),
+            diagnosticCodes,
+            name + ': oracle diagnostics',
+          );
+        }
         const problems = [];
         if (expected.stdout !== actual.stdout)
           problems.push(`stdout\n  tsgo: ${expected.stdout}\n  ours: ${actual.stdout}`);

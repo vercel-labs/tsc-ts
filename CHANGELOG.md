@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve generic type arguments in value import queries such as `typeof import("./factory").fn<T>`, including constructor signatures and type-argument diagnostics.
+
 <!-- release:start -->
 
 ## 0.0.10
