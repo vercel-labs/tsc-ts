@@ -1,7 +1,7 @@
 // The compiler behind the API server. Everything it exports is plain data or
 // an opaque reference that callers pass back in.
 import {
-  type ExternalModuleIndicatorOptions,
+  ExternalModuleIndicatorOptions,
   getLocals,
   getLocalSymbol,
   getSymbol,
@@ -123,7 +123,8 @@ import { isTypeAssignableTo } from '../compiler/relations.js';
 import { typeToString } from '../compiler/type-printer.js';
 import { type CompletionList, getCompletionsAtPosition } from '../services/completions.js';
 import { type AutoImportRegistry, buildAutoImportRegistry } from '../services/auto-import-view.js';
-import { combinePaths, getDirectoryPath } from '../compiler/path.js';
+import { buildPackageBuckets, type PackageBuckets, type PackageHost } from '../services/auto-import-packages.js';
+import { getDirectoryPath } from '../compiler/path.js';
 import {
   getReferencedSymbolsForNode,
   getReferencesToSymbolInFile,
@@ -237,12 +238,23 @@ export const enum SignatureKind {
   Construct = 1,
 }
 
+// The node_modules buckets a project built for auto-imports while the session's files are at one generation.
+class ProjectPackages {
+  readonly buckets = new Map<string, PackageBuckets>();
+  constructor(
+    readonly generation: number,
+    readonly host: PackageHost,
+  ) {}
+}
+
 // A configured project: a tsconfig.json, its program and a type checker for
 // queries. Diagnostics come from a separate checker, as in tsc --api.
 export class Project {
   private readonly checker: Checker;
   // The exports auto-imports offer from the program's files, extracted with a checker of their own on first use.
   private autoImports: AutoImportRegistry | undefined;
+  // The node_modules buckets of auto-imports, by importing directory.
+  private packages: ProjectPackages | undefined;
 
   private constructor(
     private readonly config: ParsedCommandLine,
@@ -251,6 +263,8 @@ export class Project {
     private readonly checked: CheckedProgram,
     // The file system the program's files were loaded through, with the files it looked up.
     private readonly loadedThrough: CachedFileSystem,
+    // Where auto-imports read packages from.
+    private readonly host: ProjectHost,
   ) {
     this.checker = checked.createChecker();
   }
@@ -258,7 +272,7 @@ export class Project {
   private static load(config: ParsedCommandLine, host: ProjectHost, configSeen: readonly string[]): Project {
     const fs = new CachedFileSystem(new HostFileSystem(host));
     const program = new Program(config, projectCompilerHost(fs, host));
-    return new Project(config, configSeen, new CheckedProgram(program), fs);
+    return new Project(config, configSeen, new CheckedProgram(program), fs, host);
   }
 
   static open(host: ProjectHost, configFileName: string): Project {
@@ -356,7 +370,7 @@ export class Project {
       projectCompilerHost(new CachedFileSystem(new HostFileSystem(host)), host),
     );
     if (program === undefined) return this.reload(host);
-    return new Project(this.config, this.configSeen, new CheckedProgram(program), this.loadedThrough);
+    return new Project(this.config, this.configSeen, new CheckedProgram(program), this.loadedThrough, host);
   }
 
   compilerOptions(): CompilerOptions {
@@ -411,10 +425,10 @@ export class Project {
   }
 
   /**
-   * Completions at a UTF-16 position. With `withAutoImports`, auto-imports come from the program's files, as tsc
-   * prepares them for a request; without, or for a file with a `node_modules` directory above it, whose packages'
-   * exports are not indexed, a completion list that needs them throws `NeedsAutoImports`. `onAutoImportsNeeded` is
-   * called when the list needs them.
+   * Completions at a UTF-16 position. With `withAutoImports`, auto-imports come from the program's files and the
+   * packages in the node_modules directories above the file, as tsc prepares them for a request; without, a
+   * completion list that needs them throws `NeedsAutoImports`. `onAutoImportsNeeded` is called when the list needs
+   * them.
    */
   completionsAtPosition(
     file: SourceFile,
@@ -424,7 +438,6 @@ export class Project {
     withAutoImports: boolean,
     onAutoImportsNeeded: () => void,
   ): CompletionList | undefined {
-    const autoImports = withAutoImports && !this.hasNodeModulesAbove(file) ? this.autoImportRegistry() : undefined;
     return getCompletionsAtPosition(
       this.checker,
       this.program,
@@ -432,25 +445,60 @@ export class Project {
       position,
       triggerCharacter,
       includeSymbols,
-      autoImports,
+      withAutoImports ? this.autoImportRegistry() : undefined,
       onAutoImportsNeeded,
     );
   }
 
   private autoImportRegistry(): AutoImportRegistry {
-    this.autoImports ??= buildAutoImportRegistry(this.program, this.checked.createChecker());
+    if (this.autoImports === undefined) {
+      const registry = buildAutoImportRegistry(this.program, this.checked.createChecker());
+      registry.packagesFor = (file) => this.packageBucketsFor(file, registry);
+      this.autoImports = registry;
+    }
     return this.autoImports;
   }
 
-  // Whether a directory above the file has a `node_modules` directory.
-  private hasNodeModulesAbove(file: SourceFile): boolean {
-    let directory = getDirectoryPath(file.fileName);
-    for (;;) {
-      if (this.program.host.fs.directoryExists(combinePaths(directory, 'node_modules'))) return true;
-      const parent = getDirectoryPath(directory);
-      if (parent === directory) return false;
-      directory = parent;
+  // The node_modules buckets for a file, built for its directory until the client reports a change.
+  private packageBucketsFor(file: SourceFile, registry: AutoImportRegistry): PackageBuckets {
+    const generation = this.host.files?.generation ?? 0;
+    if (this.packages === undefined || this.packages.generation !== generation) {
+      this.packages = new ProjectPackages(generation, this.packageHost());
     }
+    const directory = getDirectoryPath(file.path);
+    let buckets = this.packages.buckets.get(directory);
+    if (buckets === undefined) {
+      buckets = buildPackageBuckets(
+        this.packages.host,
+        file.fileName,
+        registry.resolvedPackageNames,
+        registry.deepImportPackages,
+      );
+      this.packages.buckets.set(directory, buckets);
+    }
+    return buckets;
+  }
+
+  // Packages are read through a file system of their own, so the files they read are not files the project depends
+  // on, and parsed without the program's module detection options, as tsc parses them for auto-imports.
+  private packageHost(): PackageHost {
+    const host = this.host;
+    const fs = new CachedFileSystem(new HostFileSystem(host));
+    const toPath = (fileName: string): string => this.program.toPath(fileName);
+    return {
+      fs,
+      currentDirectory: host.currentDirectory,
+      toPath,
+      getSourceFile: (fileName: string): SourceFile | undefined => {
+        const text = fs.readFile(fileName);
+        if (text === undefined) return undefined;
+        const path = toPath(fileName);
+        const options = new ExternalModuleIndicatorOptions(false, false);
+        return host.files !== undefined
+          ? host.files.sourceFile(fileName, path, options, text)
+          : parseSourceFile(fileName, text, new ParseOptions(path, ScriptKind.Unknown, options));
+      },
+    };
   }
 
   // The node at a UTF-16 position: the touching property name or token.
@@ -855,6 +903,8 @@ export class SessionFiles {
   // as tsc's node IDs do; a client of `--listen` sees the IDs a new server would give.
   private readonly nodeIds = new Map<SourceFile, number>();
   private nextNodeId = 1;
+  /** Counts the changes the client reported, so what was read from files before a change can be read again. */
+  generation = 0;
 
   constructor(
     private readonly toPath: (fileName: string) => string,
@@ -903,6 +953,7 @@ export class SessionFiles {
    * others not; returns their paths, with the paths they were read through in node_modules.
    */
   invalidate(fileNames: readonly string[], deleted: boolean): string[] {
+    if (fileNames.length > 0) this.generation++;
     const paths: string[] = [];
     for (const fileName of fileNames) {
       const path = this.toPath(fileName);
@@ -919,6 +970,7 @@ export class SessionFiles {
 
   /** Forgets the contents of every file, and which files were reported deleted. */
   invalidateAll(): void {
+    this.generation++;
     this.contents.clear();
     this.deleted.clear();
   }

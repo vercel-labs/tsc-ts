@@ -104,6 +104,7 @@ const enum Features {
   Node16Default = Imports | SelfName | Exports | ExportsPatternTrailers,
   NodeNextDefault = Imports | SelfName | Exports | ExportsPatternTrailers | ImportsPatternRoot,
   BundlerDefault = Imports | SelfName | Exports | ExportsPatternTrailers | ImportsPatternRoot,
+  All = Imports | SelfName | Exports | ExportsPatternTrailers | ImportsPatternRoot,
 }
 
 function extensionsToString(extensions: number): string {
@@ -522,6 +523,27 @@ export class Resolver {
   getPackageScopeForPath(directory: string): PackageJsonInfo | undefined {
     const state = new ResolutionState(this, undefined, '', directory, false, ModuleKind.None, this.options);
     return state.getPackageScopeForPath(directory);
+  }
+
+  /**
+   * The TypeScript or declaration file a package's directory loads (its `typings`, `types` or `main` field, or
+   * an index file), as tsgo finds a package's main entrypoint; `''` for none.
+   */
+  loadPackageMainEntrypoint(info: PackageJsonInfo): string {
+    const state = this.entrypointState(info.packageDirectory);
+    return state.loadPackageMainEntrypoint(info);
+  }
+
+  /** The TypeScript or declaration file an `exports` target path of a package loads; `''` for none. */
+  loadPackageExportTargetEntrypoint(packageDirectory: string, candidate: string, target: string): string {
+    return this.entrypointState(packageDirectory).loadPackageExportTargetEntrypoint(candidate, target);
+  }
+
+  private entrypointState(packageDirectory: string): ResolutionState {
+    const state = new ResolutionState(this, undefined, '', packageDirectory, false, ModuleKind.None, this.options);
+    state.extensions = Extensions.TypeScript | Extensions.Declaration;
+    state.features = Features.All;
+    return state;
   }
 
   /** Resolves an `extends` specifier of a tsconfig file. */
@@ -1826,6 +1848,14 @@ class ResolutionState {
     }
     if (this.traces !== undefined) this.trace(Diagnostics.File_0_does_not_exist, fileName);
     return false;
+  }
+
+  loadPackageMainEntrypoint(info: PackageJsonInfo): string {
+    return this.loadNodeModuleFromDirectoryWorker(this.extensions, info.packageDirectory, info)?.path ?? '';
+  }
+
+  loadPackageExportTargetEntrypoint(candidate: string, target: string): string {
+    return this.loadFileNameFromPackageJsonField(this.extensions, candidate, target)?.path ?? '';
   }
 
   private loadNodeModuleFromDirectory(

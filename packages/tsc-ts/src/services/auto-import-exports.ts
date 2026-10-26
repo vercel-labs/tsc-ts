@@ -364,7 +364,27 @@ export class ExportExtractor {
     private readonly packageName: string,
     private readonly moduleResolver: Resolver,
     private readonly toPath: (fileName: string) => string,
+    // For a package's files, the real path of a file, which its module id is made from.
+    private readonly realpath?: (fileName: string) => string,
   ) {}
+
+  /** The module id of a file: of its real path for a package's files. */
+  private getModuleId(file: SourceFile): string {
+    return this.realpath === undefined
+      ? fileModuleId(file.path)
+      : fileModuleId(this.toPath(this.realpath(file.fileName)));
+  }
+
+  /** The module id of a module symbol, of its file's real path for a package's files. */
+  private getModuleIdForSymbol(symbol: Symbol): string | undefined {
+    const id = tryGetModuleIdAndFileNameOfModuleSymbol(symbol);
+    if (id === undefined) return undefined;
+    if (id.fileName !== '' && this.realpath !== undefined) {
+      const declaration = getNonAugmentationDeclaration(symbol);
+      if (declaration?.kind === SyntaxKind.SourceFile) return this.getModuleId(declaration as SourceFile);
+    }
+    return id.moduleId;
+  }
 
   /** A module file's exports and its augmentations' exports, or a script's ambient modules' exports. */
   extractFromFile(file: SourceFile): Export[] {
@@ -384,7 +404,7 @@ export class ExportExtractor {
 
   private extractFromModule(file: SourceFile, symbol: Symbol): Export[] {
     const exports: Export[] = [];
-    const moduleId = fileModuleId(file.path);
+    const moduleId = this.getModuleId(file);
     for (const [name, exported] of symbol.exports ?? emptySymbolTable) {
       this.extractFromSymbol(name, exported, moduleId, file.fileName, file, exports);
     }
@@ -457,10 +477,10 @@ export class ExportExtractor {
         const reexportParent =
           reexported.parent === undefined ? undefined : getMergedSymbol(lease.getChecker(), reexported.parent);
         if (reexportParent?.isExternalModule() === true) {
-          const target = tryGetModuleIdAndFileNameOfModuleSymbol(reexportParent);
-          if (target !== undefined) {
+          const targetModuleId = this.getModuleIdForSymbol(reexportParent);
+          if (targetModuleId !== undefined) {
             exported.targetExportName = reexported.name;
-            exported.targetModuleId = target.moduleId;
+            exported.targetModuleId = targetModuleId;
           }
         }
         exported.through = InternalSymbolName.ExportStar;
@@ -554,8 +574,8 @@ export class ExportExtractor {
         exported.scriptElementKind = getSymbolKind(lease.tryChecker(), target, declaration);
         let targetModuleId = fileModuleId(getSourceFileOfNode(declaration).path);
         if (parent?.isExternalModule() === true) {
-          const id = tryGetModuleIdAndFileNameOfModuleSymbol(parent);
-          if (id !== undefined) targetModuleId = id.moduleId;
+          const id = this.getModuleIdForSymbol(parent);
+          if (id !== undefined) targetModuleId = id;
         }
         exported.targetExportName = target.name;
         exported.targetModuleId = targetModuleId;

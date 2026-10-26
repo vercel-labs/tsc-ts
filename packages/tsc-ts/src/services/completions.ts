@@ -1293,6 +1293,7 @@ class SymbolSearch {
     if (this.autoImports === undefined) throw new NeedsAutoImports();
     const view = new AutoImportView(
       this.autoImports,
+      this.autoImports.packagesFor(this.file),
       this.file,
       this.program,
       this.c,

@@ -1,5 +1,5 @@
-// Auto-import candidates for a file: the exports a project offers, and the fix that imports each one, as tsgo's
-// ls/autoimport Registry and View find them for completions.
+// Auto-import candidates for a file: the exports of a project's files and of the packages it can import, and the fix
+// that imports each one, as tsgo's ls/autoimport Registry and View find them for completions.
 import {
   getImportClause,
   getModuleSpecifier,
@@ -19,11 +19,14 @@ import { resolveExternalModuleName } from '../compiler/checker-modules.js';
 import { getSymbolAtLocation } from '../compiler/checker-services.js';
 import { isIdentifierText } from '../compiler/scanner.js';
 import {
+  getAllowedEndingsInPreferredOrder,
   getModuleSpecifiersForFileWithInfo,
+  type ModuleSpecifierEnding,
   ModuleSpecifierPreferences,
   ModuleSpecifierResultKind,
 } from '../compiler/module-specifiers.js';
-import { Resolver } from '../compiler/module-resolution.js';
+import { getConditions, Resolver } from '../compiler/module-resolution.js';
+import { processEntrypointEnding } from '../compiler/package-entrypoints.js';
 import {
   type CompilerOptions,
   getEmitModuleDetectionKind,
@@ -35,7 +38,9 @@ import { getEmitModuleFormatOfFile, isSourceFileJS } from '../compiler/program-u
 import type { Program } from '../compiler/program.js';
 import { ProgramModuleSpecifierHost } from '../compiler/program-checker.js';
 import {
+  containsPath,
   ensurePathIsNonModuleName,
+  ensureTrailingDirectorySeparator,
   getDirectoryPath,
   getRelativePathFromDirectory,
   hasJSFileExtension,
@@ -56,15 +61,27 @@ import {
   moduleSpecifierOfId,
   tryGetModuleIdAndFileNameOfModuleSymbol,
 } from './auto-import-exports.js';
+import {
+  addPackageJsonDependencies,
+  ancestorDirectories,
+  collectProgramPackageNames,
+  getResolvedPackageNames,
+  type PackageBuckets,
+} from './auto-import-packages.js';
 import { tryGetImportFromModuleSpecifier } from './completions.js';
 
-/** The exports of a project's files, for the auto-imports of files in it. */
+/** The exports of a project's files, for the auto-imports of files in it, and the packages it uses. */
 export class AutoImportRegistry {
   constructor(
     readonly index: ExportIndex,
-    /** Package names the program's files import. */
+    /** Package names the program's files import, without `@types/`. */
     readonly resolvedPackageNames: ReadonlySet<string>,
+    /** Packages without `exports` whose subpaths the program's files import. */
+    readonly deepImportPackages: ReadonlySet<string>,
   ) {}
+
+  /** The node_modules buckets for an importing file; undefined while packages are not indexed. */
+  packagesFor: (file: SourceFile) => PackageBuckets | undefined = () => undefined;
 }
 
 /**
@@ -76,12 +93,31 @@ export function buildAutoImportRegistry(program: Program, checker: Checker): Aut
   const toPath = (fileName: string): string => program.toPath(fileName);
   const extractor = new ExportExtractor(checker, '', resolver, toPath);
   const index = new ExportIndex();
+  const projectRoot = program.toPath(program.commandLine.currentDirectory);
   for (const file of program.getSourceFiles()) {
     if (program.isSourceFileDefaultLibrary(file.path)) continue;
+    // A package's files belong to the node_modules buckets.
     if (containsLowercaseDirectorySequence(file.fileName, '/node_modules/')) continue;
+    if (hasSymlinkToNodeModules(program, file.path, projectRoot)) continue;
     for (const exported of extractor.extractFromFile(file)) index.insertAsWords(exported);
   }
-  return new AutoImportRegistry(index, new Set());
+  const names = collectProgramPackageNames(program);
+  return new AutoImportRegistry(index, getResolvedPackageNames(program, checker, names), names.deepImports);
+}
+
+/**
+ * Whether a file outside the project is in a directory a symlink in a node_modules directory links to, so that a
+ * node_modules bucket offers its exports.
+ */
+function hasSymlinkToNodeModules(program: Program, path: string, projectRoot: string): boolean {
+  if (containsPath(projectRoot, path, true)) return false;
+  const symlinks = program.getSymlinkCache();
+  for (const directory of ancestorDirectories(getDirectoryPath(path))) {
+    const links = symlinks.getSymlinksOfDirectory(ensureTrailingDirectorySeparator(directory));
+    if (links === undefined) continue;
+    for (const link of links) if (containsLowercaseDirectorySequence(link, '/node_modules/')) return true;
+  }
+  return false;
 }
 
 /** Whether a path has a directory sequence, compared in lowercase as tsgo's `ContainsLowercaseDirectorySequence`. */
@@ -147,9 +183,13 @@ export class AutoImportView {
   private readonly specifierCache = new Map<string, { specifier: string; kind: ModuleSpecifierResultKind }>();
   private readonly specifierHost: ProgramModuleSpecifierHost;
   private readonly shouldUseUriStyleNodeCoreModules: boolean | undefined;
+  private conditions: ReadonlySet<string> | undefined;
+  private allowedEndings: readonly ModuleSpecifierEnding[] | undefined;
 
   constructor(
     private readonly registry: AutoImportRegistry,
+    /** The node_modules buckets for the importing file, if packages are indexed. */
+    private readonly packages: PackageBuckets | undefined,
     private readonly importingFile: SourceFile,
     private readonly program: Program,
     private readonly checker: Checker,
@@ -171,6 +211,33 @@ export class AutoImportView {
       if (modulePathOfId(exported.moduleId) === this.importingFile.path) continue;
       results.push(exported);
     }
+    const packages = this.packages;
+    if (packages === undefined) return results;
+
+    // The packages the importing file may use: the dependencies of the package.json files above it and the packages
+    // the program imports. Without a package.json, every package.
+    let allowedPackages: Set<string> | undefined;
+    const directories = ancestorDirectories(getDirectoryPath(this.importingFile.path));
+    for (const directory of directories) {
+      const contents = packages.directories.get(directory)?.packageJson.contents;
+      if (contents === undefined || !contents.parseable) continue;
+      allowedPackages ??= new Set();
+      addPackageJsonDependencies(contents, allowedPackages);
+    }
+    if (allowedPackages !== undefined) for (const name of this.registry.resolvedPackageNames) allowedPackages.add(name);
+
+    // A package in a node_modules directory hides the packages of the same name further up.
+    const excludedPackages = new Set<string>();
+    for (const directory of directories) {
+      const bucket = packages.nodeModules.get(directory);
+      if (bucket === undefined) continue;
+      for (const exported of bucket.index.searchWordPrefix(prefix)) {
+        if (excludedPackages.has(exported.packageName)) continue;
+        if (allowedPackages !== undefined && !allowedPackages.has(exported.packageName)) continue;
+        results.push(exported);
+      }
+      for (const name of bucket.packageNames) excludedPackages.add(name);
+    }
     return results;
   }
 
@@ -186,8 +253,15 @@ export class AutoImportView {
       if (!isIdentifierText(name, LanguageVariant.Standard)) continue;
       if (forJSX && !(isUpperCaseStart(name) || e.isRenameable())) continue;
       const target = e.targetKey() !== '' ? e.targetKey() : e.exportKey();
-      const key =
-        target + '\u0001' + name + '\u0001' + (e.ambientModuleName() !== '' ? e.ambientModuleName() : e.packageName);
+      let ambientModuleOrPackageName = e.ambientModuleName() !== '' ? e.ambientModuleName() : e.packageName;
+      // The `node:` and unprefixed forms of a Node built-in group together, so the ranking can drop one.
+      if (
+        (e.packageName === '@types/node' || e.path.toLowerCase().includes('/node_modules/@types/node/')) &&
+        unprefixedNodeCoreModules.has(ambientModuleOrPackageName)
+      ) {
+        ambientModuleOrPackageName = 'node:' + ambientModuleOrPackageName;
+      }
+      const key = target + '\u0001' + name + '\u0001' + ambientModuleOrPackageName;
       const existing = grouped.get(key);
       if (existing !== undefined) {
         for (let i = 0; i < existing.length; i++) {
@@ -458,6 +532,24 @@ export class AutoImportView {
     }
     const ambient = moduleSpecifierOfId(e.moduleId);
     if (ambient !== '') return { specifier: ambient, kind: ModuleSpecifierResultKind.Ambient };
+    // A package's export is imported by the specifier of its file's first entrypoint the importing file's
+    // conditions reach.
+    if (e.packageName !== '') {
+      const entrypoints = this.packages?.entrypoints.get(e.path);
+      if (entrypoints !== undefined) {
+        const conditions = this.getConditions();
+        for (const entrypoint of entrypoints) {
+          if (
+            isSubsetOf(entrypoint.includeConditions, conditions) &&
+            !intersects(conditions, entrypoint.excludeConditions)
+          ) {
+            const specifier = processEntrypointEnding(entrypoint, this.options, this.getAllowedEndings());
+            return { specifier, kind: ModuleSpecifierResultKind.NodeModules };
+          }
+        }
+        return { specifier: '', kind: ModuleSpecifierResultKind.None };
+      }
+    }
     // By the file the export was found in and the module's file: a file's relative module augmentation exports from
     // another module than the file itself.
     const cacheKey = e.path + '\u0000' + e.moduleFileName;
@@ -481,6 +573,26 @@ export class AutoImportView {
     const none = { specifier: '', kind: ModuleSpecifierResultKind.None };
     this.specifierCache.set(cacheKey, none);
     return none;
+  }
+
+  // The conditions of the importing file's resolutions.
+  private getConditions(): ReadonlySet<string> {
+    this.conditions ??= new Set(
+      getConditions(this.options, this.specifierHost.getDefaultResolutionModeForFile(this.importingFile)),
+    );
+    return this.conditions;
+  }
+
+  private getAllowedEndings(): readonly ModuleSpecifierEnding[] {
+    this.allowedEndings ??= getAllowedEndingsInPreferredOrder(
+      this.preferences,
+      this.specifierHost,
+      this.options,
+      this.importingFile,
+      '',
+      this.specifierHost.getDefaultResolutionModeForFile(this.importingFile),
+    );
+    return this.allowedEndings;
   }
 
   /** Negative when `a` is better; fixes of equal kind and specifier quality compare equal. */
@@ -708,4 +820,16 @@ function relativeModuleSpecifier(directory: string, fileName: string): string {
 
 function isTypeOnlyClause(clause: ImportClause): boolean {
   return clause.phaseModifier === SyntaxKind.TypeKeyword;
+}
+
+function isSubsetOf(set: ReadonlySet<string> | undefined, other: ReadonlySet<string>): boolean {
+  if (set === undefined) return true;
+  for (const value of set) if (!other.has(value)) return false;
+  return true;
+}
+
+function intersects(set: ReadonlySet<string>, other: ReadonlySet<string> | undefined): boolean {
+  if (other === undefined) return false;
+  for (const value of set) if (other.has(value)) return true;
+  return false;
 }
