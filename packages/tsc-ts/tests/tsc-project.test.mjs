@@ -12,7 +12,7 @@ import { tscTs, tscTsMissing } from './toolchain.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
 const project = join(root, 'packages/tsc-ts/tests/fixtures/tsc-project');
-const libs = join(root, 'upstream/typescript-go/internal/bundled/libs');
+const libs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 
 // Every file under dir, keyed by relative path.
 const files = (dir, base = dir, out = {}) => {

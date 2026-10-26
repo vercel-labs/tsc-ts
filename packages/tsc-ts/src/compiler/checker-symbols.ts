@@ -1231,11 +1231,7 @@ function hasMatchingDiagnostic(diagnostics: readonly Diagnostic[], a: Diagnostic
 }
 
 function lookupOrIssueError(c: Checker, location: Node, message: DiagnosticMessage, args: string[]) {
-  const diagnostic = createDiagnosticForNode(location, message, args);
-  const existing = c.diagnostics.lookup(diagnostic);
-  if (existing !== undefined) return existing;
-  c.addDiagnostic(diagnostic);
-  return diagnostic;
+  return c.addDiagnostic(createDiagnosticForNode(location, message, args));
 }
 
 export function getExcludedSymbolFlags(flags: SymbolFlags): SymbolFlags {

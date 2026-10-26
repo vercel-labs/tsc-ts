@@ -9,8 +9,7 @@
 // apps/web, tsconfig.bench.json) checks. A profile from older sources still applies to the functions that did not
 // change, so refreshing it is a matter of gain, not of correctness. SCRIPTC selects the scriptc executable.
 import { spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -79,21 +78,11 @@ function scriptcVersion() {
   return version;
 }
 
-// TypeScript 7.0.2's lib files, from the tsc bundled with the installed scriptc.
+// TypeScript's lib files, from the pinned upstream (npm run fetch:upstream).
 function typescriptLib() {
-  const require = createRequire(join(root, 'package.json'));
-  const scriptcPackage = JSON.parse(readFileSync(require.resolve('scriptc/package.json'), 'utf8'));
-  for (const name of Object.keys(scriptcPackage.optionalDependencies ?? {})) {
-    let path;
-    try {
-      path = require.resolve(`${name}/package.json`);
-    } catch {
-      continue;
-    }
-    const lib = join(dirname(path), 'dist/lib/typescript/lib');
-    if (existsSync(join(lib, 'lib.d.ts'))) return lib;
-  }
-  throw new Error('no scriptc platform package with TypeScript lib files is installed');
+  const lib = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
+  if (!existsSync(join(lib, 'lib.d.ts'))) throw new Error(`no lib files in ${lib}: run npm run fetch:upstream`);
+  return lib;
 }
 
 function run(command, args, options) {

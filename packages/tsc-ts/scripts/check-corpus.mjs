@@ -39,8 +39,8 @@ const jsOnly = args.includes('--js');
 const checkOptions = option('--options', '');
 const env = { ...process.env, TSC_TS_CHECK_OPTIONS: checkOptions };
 const inputs = args.filter((a, i) => !a.startsWith('--') && !valued.has(args[i - 1]));
-const libs = join(repo, 'upstream/typescript-go/internal/bundled/libs');
-const cases = join(repo, 'upstream/TypeScript/tests/cases');
+const libs = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
+const cases = join(repo, 'upstream/TypeScript/tsc/testdata/tests/cases');
 const oracle = join(repo, 'packages/tsgo/dist/check-oracle');
 const work = tempDir('tsc-ts-check-corpus-');
 

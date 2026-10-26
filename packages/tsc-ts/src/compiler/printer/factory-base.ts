@@ -1834,7 +1834,7 @@ export abstract class NodeFactoryBase {
     body: ModuleBody | undefined,
   ): ModuleDeclaration {
     if (modifiers !== node.modifiers || keyword !== node.keyword || name !== node.name || body !== node.body) {
-      const updated = new ModuleDeclaration(modifiers, keyword, name, body);
+      const updated = new ModuleDeclaration(modifiers, keyword, name, node.attributes, body);
       this.finishUpdate(updated, node);
       return updated;
     }

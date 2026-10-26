@@ -14,7 +14,7 @@ import {
 } from './option-declarations.js';
 import type { System } from './tsc-cli.js';
 
-export const version = '7.0.2';
+export const version = '7.1.0-beta';
 
 /** Whether output gets colors: `NO_COLOR` and `FORCE_COLOR` override the TTY check. */
 export function defaultIsPretty(sys: System): boolean {

@@ -19,10 +19,11 @@ export enum ScriptTarget {
   ES2023 = 10,
   ES2024 = 11,
   ES2025 = 12,
+  ES2026 = 13,
   ESNext = 99,
   JSON = 100,
   Latest = ESNext,
-  LatestStandard = ES2025,
+  LatestStandard = ES2026,
 }
 
 export enum ModuleKind {
@@ -66,8 +67,8 @@ export enum ModuleDetectionKind {
 
 export enum JsxEmit {
   Preserve = 1,
-  ReactNative = 2,
-  React = 3,
+  React = 2,
+  ReactNative = 3,
   ReactJSX = 4,
   ReactJSXDev = 5,
 }

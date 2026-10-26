@@ -130,7 +130,12 @@ import { Diagnostics } from './diagnostic-messages.js';
 import { Diagnostic, DiagnosticCategory, type DiagnosticMessage, messageCategory } from './diagnostics.js';
 import { ModuleKind, ScriptTarget, getEmitModuleKind } from './options.js';
 import { fileExtensionIsOneOf, isExternalModuleNameRelative } from './path.js';
-import { SourceFileMetadata, getEmitModuleFormatOfFile, getImpliedNodeFormatForEmit } from './program-utilities.js';
+import {
+  SourceFileMetadata,
+  getEmitModuleFormatOfFile,
+  getImpliedNodeFormatForEmit,
+  resolutionModeAttribute,
+} from './program-utilities.js';
 import { CharacterCodes } from './character-codes.js';
 import { Scanner, ScannerErrorReporter, skipTrivia, tokenToString } from './scanner.js';
 import { typeToString } from './type-printer.js';
@@ -3039,26 +3044,10 @@ function checkGrammarJSDocTypeInTypeScript(g: GrammarChecker, node: Node): void 
   );
 }
 
-/** The `resolution-mode` of import type attributes, as tsgo's `getResolutionModeOverride`. */
+/** The `resolution-mode` of import type attributes, as tsgo's `GetResolutionModeOverride`. */
 function getResolutionModeOverride(g: GrammarChecker, node: ImportAttributes, reportErrors: boolean): ModuleKind {
-  const attributes = node.attributes.nodes;
-  if (attributes.length !== 1) {
-    if (reportErrors)
-      grammarErrorOnNode(
-        g,
-        node,
-        Diagnostics.Type_import_attributes_should_have_exactly_one_key_resolution_mode_with_value_import_or_require,
-      );
-    return ModuleKind.None;
-  }
-  const attribute = attributes[0]! as ImportAttribute;
-  const name = attribute.name;
-  if (name === undefined || !isStringLiteralLike(name)) return ModuleKind.None;
-  if (getText(name) !== 'resolution-mode') {
-    if (reportErrors)
-      grammarErrorOnNode(g, name, Diagnostics.X_resolution_mode_is_the_only_valid_key_for_type_import_attributes);
-    return ModuleKind.None;
-  }
+  const attribute = resolutionModeAttribute(node);
+  if (attribute === undefined) return ModuleKind.None;
   const value = attribute.value;
   if (!isStringLiteralLike(value)) return ModuleKind.None;
   const text = getText(value);
@@ -3401,7 +3390,7 @@ function checkGrammarMetaProperty(g: GrammarChecker, node: MetaProperty): boolea
         return grammarErrorOnNode(
           g,
           name,
-          Diagnostics.X_0_is_not_a_valid_meta_property_for_keyword_import_Did_you_mean_meta_or_defer,
+          Diagnostics.X_0_is_not_a_valid_meta_property_for_keyword_import_Did_you_mean_meta_defer_or_source,
           nameText,
         );
       return grammarErrorOnNode(

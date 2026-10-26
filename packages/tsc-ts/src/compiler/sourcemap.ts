@@ -255,8 +255,8 @@ export class SourceMapGenerator {
     let json =
       '{"version":3,"file":' +
       jsonString(this.file) +
-      ',"sourceRoot":' +
-      jsonString(this.sourceRoot) +
+      // An empty source root is left out, as tsgo's `omitzero` does.
+      (this.sourceRoot === '' ? '' : ',"sourceRoot":' + jsonString(this.sourceRoot)) +
       ',"sources":' +
       jsonStrings(this.sources) +
       ',"names":' +

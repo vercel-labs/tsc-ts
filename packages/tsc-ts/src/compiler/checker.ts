@@ -35,7 +35,13 @@ import { sideOf } from './side-state.js';
 import type { Node, PatternAmbientModule, SourceFile } from './ast.js';
 import { CompactSymbolLinkTable, IntLinkTable, LinkTable, PagedIdSet, SparseLinkTable } from './link-tables.js';
 import { getErrorRangeForNode, getSourceFileOfNode } from './binder-utilities.js';
-import { Diagnostic, type DiagnosticMessage, Diagnostics, compareDiagnostics } from './diagnostics.js';
+import {
+  Diagnostic,
+  type DiagnosticMessage,
+  Diagnostics,
+  compareDiagnostics,
+  equalDiagnostics,
+} from './diagnostics.js';
 import {
   type CompilerOptions,
   ModuleKind,
@@ -186,22 +192,35 @@ export abstract class CheckerHost {
   }
 }
 
-/** Per-file and global diagnostics, sorted on read like tsgo's DiagnosticsCollection. */
+/**
+ * Per-file and global diagnostics, sorted on read like tsgo's DiagnosticsCollection, which keeps one of
+ * each set of equal diagnostics.
+ */
 class DiagnosticCollection {
   private readonly byFile = new Map<string, Diagnostic[]>();
   private readonly sortedFiles = new Set<string>();
   private readonly global: Diagnostic[] = [];
   private globalSorted = true;
-  /** The diagnostics added since `startLog`, while recording. */
+  /** The diagnostics at each file, position, end and code, to find an equal one when adding. */
+  private readonly byLocation = new Map<string, Diagnostic[]>();
+  /** The diagnostics reported since `startLog`, while recording, also those equal to one already added. */
   private log: Diagnostic[] | undefined = undefined;
 
-  add(diagnostic: Diagnostic): void {
+  /** Adds `diagnostic` unless an equal one was added; returns the one the collection holds. */
+  add(diagnostic: Diagnostic): Diagnostic {
     if (this.log !== undefined) this.log.push(diagnostic);
     const file = diagnostic.file;
+    const key = `${file === undefined ? '' : file.fileName}\0${diagnostic.pos}\0${diagnostic.end}\0${diagnostic.code}`;
+    const existing = this.byLocation.get(key);
+    if (existing === undefined) this.byLocation.set(key, [diagnostic]);
+    else {
+      for (const d of existing) if (equalDiagnostics(d, diagnostic)) return d;
+      existing.push(diagnostic);
+    }
     if (file === undefined) {
       this.global.push(diagnostic);
       this.globalSorted = false;
-      return;
+      return diagnostic;
     }
     let list = this.byFile.get(file.fileName);
     if (list === undefined) {
@@ -210,6 +229,7 @@ class DiagnosticCollection {
     }
     list.push(diagnostic);
     this.sortedFiles.delete(file.fileName);
+    return diagnostic;
   }
 
   forFile(fileName: string): Diagnostic[] {
@@ -261,12 +281,24 @@ class DiagnosticCollection {
       const globals = new Set<Diagnostic>();
       for (const d of added) if (d.file === undefined) globals.add(d);
       if (globals.size > 0) {
-        this.removedGlobals += globals.size;
         let kept = 0;
-        for (const d of this.global) if (!globals.has(d)) this.global[kept++] = d;
+        for (const d of this.global) {
+          if (!globals.has(d)) this.global[kept++] = d;
+          else this.forget(d);
+        }
+        this.removedGlobals += this.global.length - kept;
         this.global.length = kept;
       }
     }
+  }
+
+  /** Removes the global diagnostic `diagnostic` from the location index. */
+  private forget(diagnostic: Diagnostic): void {
+    const key = `\0${diagnostic.pos}\0${diagnostic.end}\0${diagnostic.code}`;
+    const existing = this.byLocation.get(key);
+    if (existing === undefined) return;
+    const at = existing.indexOf(diagnostic);
+    if (at >= 0) existing.splice(at, 1);
   }
 
   /** Records the diagnostics added from now on. */
@@ -1080,15 +1112,15 @@ export class Checker implements TypeChecking {
 
   /** Reports `message` at `node`, or as a global diagnostic without a node. */
   error(node: Node | undefined, message: DiagnosticMessage, ...args: string[]): Diagnostic {
-    const diagnostic = createDiagnosticForNode(node, message, args);
-    this.addDiagnostic(diagnostic);
-    return diagnostic;
+    return this.addDiagnostic(createDiagnosticForNode(node, message, args));
   }
 
-  addDiagnostic(diagnostic: Diagnostic): void {
+  /** Reports `diagnostic`; returns the equal diagnostic already reported, if any, else `diagnostic`. */
+  addDiagnostic(diagnostic: Diagnostic): Diagnostic {
     this.reports++;
     // Discard diagnostics created while at the maximum number of nested typeToString calls.
-    if (this.serializationLevel < maxSerializationLevel) this.diagnostics.add(diagnostic);
+    if (this.serializationLevel < maxSerializationLevel) return this.diagnostics.add(diagnostic);
+    return diagnostic;
   }
 
   addSuggestion(diagnostic: Diagnostic): void {

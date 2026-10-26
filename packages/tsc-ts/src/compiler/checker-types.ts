@@ -167,8 +167,8 @@ export const enum ObjectFlags {
   // Type references only.
   IdenticalBaseTypeCalculated = 1 << 27,
   IdenticalBaseTypeExists = 1 << 28,
-  UnresolvedMembers = 1 << 29,
-  FromTypeNode = 1 << 30,
+  FromTypeNode = 1 << 29,
+  UnresolvedMembers = 1 << 30,
   /**
    * The type keeps the state that is computed lazily in the checker's side tables instead of its
    * own fields, which stay unset (`sideOf`). Every type with `TSC_TS_SIDE_STATE=1`.

@@ -8,8 +8,8 @@
 import { Diagnostics, messageWithArgs, type MessageWithArgs } from './diagnostics.js';
 import { toPath, type Path } from './path.js';
 
-export const typeScriptVersion = '7.0.2';
-export const typeScriptVersionMajorMinor = '7.0';
+export const typeScriptVersion = '7.1.0-beta';
+export const typeScriptVersionMajorMinor = '7.1';
 
 //// JSON values
 

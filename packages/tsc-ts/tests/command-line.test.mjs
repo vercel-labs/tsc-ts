@@ -16,7 +16,7 @@ const root = resolve(here, '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
 const haveScript = existsSync('/usr/bin/script');
 // tsgo's embedded lib files, which ours reads as `bundled:///libs/` from here.
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 // Lets the many Node processes share compiled code (https://nodejs.org/api/module.html#module-compile-cache).
 const compileCache = process.env.NODE_COMPILE_CACHE ? { NODE_COMPILE_CACHE: process.env.NODE_COMPILE_CACHE } : {};
 

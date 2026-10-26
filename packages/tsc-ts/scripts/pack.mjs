@@ -5,7 +5,7 @@
 //                      programmatic API (tsc-ts/api): its JS build with
 //                      .d.ts files in dist/api, and its sources
 //   @tsc-ts/<platform> the native executable for this host, with
-//                      TypeScript 7.0.2's lib files next to it in lib/
+//                      TypeScript's lib files next to it in lib/
 //
 // Usage: node scripts/pack.mjs [main] [platform] [--binary <path>] [--check]
 //
@@ -27,9 +27,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { executableName, hostDescription, hostPlatform, packageName, platforms } from '../bin/platforms.js';
 
@@ -131,21 +130,11 @@ function isNewerThan([major, minor], [baseMajor, baseMinor]) {
   return major > baseMajor || (major === baseMajor && minor > baseMinor);
 }
 
-// TypeScript 7.0.2's lib files, from the tsc bundled with the installed scriptc.
+// TypeScript's lib files, from the pinned upstream (npm run fetch:upstream).
 function typescriptLib() {
-  const require = createRequire(join(root, 'package.json'));
-  const scriptc = JSON.parse(readFileSync(require.resolve('scriptc/package.json'), 'utf8'));
-  for (const name of Object.keys(scriptc.optionalDependencies ?? {})) {
-    let path;
-    try {
-      path = require.resolve(`${name}/package.json`);
-    } catch {
-      continue;
-    }
-    const lib = join(dirname(path), 'dist/lib/typescript/lib');
-    if (existsSync(join(lib, 'lib.d.ts'))) return lib;
-  }
-  throw new Error('no scriptc platform package with TypeScript lib files is installed');
+  const lib = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
+  if (!existsSync(join(lib, 'lib.d.ts'))) throw new Error(`no lib files in ${lib}: run npm run fetch:upstream`);
+  return lib;
 }
 
 function pack(dir) {

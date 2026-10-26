@@ -1110,6 +1110,7 @@ class Decoder {
           this.modifiers(0),
           (common & 1) !== 0 ? SyntaxKind.NamespaceKeyword : SyntaxKind.ModuleKeyword,
           this.required(1),
+          undefined,
           this.node(2),
         );
       case SyntaxKind.ImportEqualsDeclaration:

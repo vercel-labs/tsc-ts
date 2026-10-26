@@ -10,8 +10,8 @@ import { compileSources } from './temp.mjs';
 const root = resolve(import.meta.dirname, '..');
 const repo = resolve(root, '../..');
 const oracle = resolve(repo, 'packages/tsgo/dist/scan-oracle');
-const cases = resolve(repo, 'upstream/TypeScript/tests/cases');
-const libs = resolve(repo, 'upstream/typescript-go/internal/bundled/libs');
+const cases = resolve(repo, 'upstream/TypeScript/tsc/testdata/tests/cases');
+const libs = resolve(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
 
 // Every 25th test case, plus the fixtures and the bundled libs.
 function sample() {

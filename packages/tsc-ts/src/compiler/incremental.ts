@@ -2697,10 +2697,9 @@ export class IncrementalProgram extends CompilerProgram {
   emit(writer: OutputWriter): EmitResult {
     const options = this.snapshot.options;
     let result: EmitResult | undefined;
-    if (options.noEmit === true) {
-      result = new EmitResult();
-      result.emitSkipped = true;
-    } else result = handleNoEmitOnError(this);
+    // A `noEmit` program emits only its build info, and its emit is not skipped (tsgo's `HandleNoEmitOptions`).
+    if (options.noEmit === true) result = new EmitResult();
+    else result = handleNoEmitOnError(this);
     if (result !== undefined) {
       const buildInfoResult = this.emitBuildInfo(writer);
       if (buildInfoResult !== undefined) {

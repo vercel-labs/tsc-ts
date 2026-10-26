@@ -4,6 +4,7 @@
 import {
   ExportDeclaration,
   ExternalModuleIndicatorOptions,
+  Identifier,
   ImportAttribute,
   ImportAttributes,
   ImportClause,
@@ -59,6 +60,8 @@ export function getDefaultLibFileName(options: CompilerOptions): string {
   switch (getEmitScriptTarget(options)) {
     case ScriptTarget.ESNext:
       return 'lib.esnext.full.d.ts';
+    case ScriptTarget.ES2026:
+      return 'lib.es2026.full.d.ts';
     case ScriptTarget.ES2025:
       return 'lib.es2025.full.d.ts';
     case ScriptTarget.ES2024:
@@ -115,6 +118,8 @@ export function scriptTargetName(target: ScriptTarget): string {
       return 'ES2024';
     case ScriptTarget.ES2025:
       return 'ES2025';
+    case ScriptTarget.ES2026:
+      return 'ES2026';
     case ScriptTarget.ESNext:
       return 'ESNext';
     case ScriptTarget.JSON:
@@ -316,19 +321,25 @@ function literalText(node: Node): string {
 
 /** The `resolution-mode` of `import type` attributes, or `None`. */
 export function getResolutionModeOverride(attributes: ImportAttributes | undefined): ModuleKind {
-  if (attributes === undefined) return ModuleKind.None;
-  const elements = attributes.attributes.nodes;
-  if (elements.length !== 1) return ModuleKind.None;
-  const attribute = elements[0]!;
-  if (!(attribute instanceof ImportAttribute)) return ModuleKind.None;
-  const name = attribute.name;
-  if (name === undefined || !isStringLiteralLike(name) || literalText(name) !== 'resolution-mode')
-    return ModuleKind.None;
-  if (!isStringLiteralLike(attribute.value)) return ModuleKind.None;
+  const attribute = resolutionModeAttribute(attributes);
+  if (attribute === undefined || !isStringLiteralLike(attribute.value)) return ModuleKind.None;
   const text = literalText(attribute.value);
   if (text === 'import') return ModuleKind.ESNext;
   if (text === 'require') return ModuleKind.CommonJS;
   return ModuleKind.None;
+}
+
+/** The `resolution-mode` attribute among import attributes, as tsgo's `GetResolutionModeOverride` finds it. */
+export function resolutionModeAttribute(attributes: ImportAttributes | undefined): ImportAttribute | undefined {
+  if (attributes === undefined) return undefined;
+  for (const attribute of attributes.attributes.nodes) {
+    if (!(attribute instanceof ImportAttribute)) continue;
+    const name = attribute.name;
+    if (name === undefined) continue;
+    const text = name instanceof Identifier ? name.text : literalText(name);
+    if (text === 'resolution-mode') return attribute;
+  }
+  return undefined;
 }
 
 /** The attributes of an import or export declaration or a JSDoc `@import`, if any. */

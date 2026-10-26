@@ -98,7 +98,7 @@ Native builds read lib files from the executable's directory, or from `TSC_TS_LI
 ```sh
 npm run build:native -w tsc-ts       # packages/tsc-ts/dist/tsc
 npm run build:native:dev -w tsc-ts   # unoptimized, faster to build
-TSC_TS_LIB_DIR=upstream/typescript-go/internal/bundled/libs packages/tsc-ts/dist/tsc -p path/to/project
+TSC_TS_LIB_DIR=upstream/TypeScript/tsc/internal/bundled/libs packages/tsc-ts/dist/tsc -p path/to/project
 ```
 
 `build:native` optimizes with the committed profile `packages/tsc-ts/profiles/tsc-ts.profdata`. `npm run refresh-profile -w tsc-ts -- --project <dir>[:<tsconfig>]` collects it again: it builds an instrumented tsc-ts, checks the tsc-ts sources and each project with it, and merges the results. A profile from older sources still applies to the functions that did not change. A profile from another scriptc version does not: the code scriptc generates changes between versions, so the profile is collected again whenever the pinned scriptc changes. `profiles/scriptc-version` records the scriptc that collected it, and `tests/profile.test.mjs` fails when it differs from the pinned one. Functions whose code changed since the profile was collected lose their counts too, so the profile is also collected again for each release. A fresh profile checks the nine benchmark projects in about 15% less time at `--checkers 1`, and 14% less at `--checkers 16`, than the one collected 30 commits earlier.

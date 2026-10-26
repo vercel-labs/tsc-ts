@@ -1116,7 +1116,6 @@ class Binder extends NodeVisitor {
     if (this.seenThisKeyword) node.flags |= NodeFlags.ContainsThis;
     if (node.kind === SyntaxKind.SourceFile) {
       node.flags |= this.emitFlags;
-      (node as SourceFile).endFlowNode = this.currentFlow;
     }
     const returnTarget = this.currentReturnTarget;
     if (returnTarget !== undefined) {

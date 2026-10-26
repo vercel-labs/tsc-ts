@@ -1,5 +1,5 @@
-// The installed scriptc platform package, which bundles TypeScript 7.0.2's tsc,
-// and the tsc-ts under test.
+// The installed scriptc platform package, the reference tsc that tsc-ts is compared with, and the tsc-ts
+// under test.
 import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -7,7 +7,11 @@ const scope = resolve('../../node_modules/@scriptc');
 const platform = existsSync(scope) ? readdirSync(scope).find((name) => name.startsWith('cli-')) : undefined;
 
 export const scriptcDist = platform === undefined ? undefined : join(scope, platform, 'dist');
-export const typescriptLib = scriptcDist === undefined ? undefined : join(scriptcDist, 'lib/typescript/lib');
+/**
+ * TypeScript's tsc at the pinned upstream with its lib files next to it, as its npm package has them
+ * (`npm run build:oracle` builds it into packages/tsgo/dist/typescript).
+ */
+export const typescriptLib = resolve('../tsgo/dist/typescript');
 
 // TSC_TS_BIN names a native tsc-ts executable, relative to the repository
 // root; otherwise tests run the Node build.

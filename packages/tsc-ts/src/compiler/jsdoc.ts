@@ -937,6 +937,7 @@ export class JSDocParser {
         undefined,
         SyntaxKind.NamespaceKeyword,
         typeNameOrNamespaceName,
+        undefined,
         body,
       );
       if (nested) jsDocNamespaceNode.flags |= NodeFlags.NestedNamespace;

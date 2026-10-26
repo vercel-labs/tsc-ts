@@ -11,8 +11,8 @@ import { compileSources, tempDir } from './temp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
-const cases = join(root, 'upstream/TypeScript/tests/cases');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
+const cases = join(root, 'upstream/TypeScript/tsc/testdata/tests/cases');
 
 // Recursive base types, conditional, mapped, literal and tuple types, inference and narrowing.
 const directories = [

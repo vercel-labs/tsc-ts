@@ -15,8 +15,8 @@ import { compileSources, tempDir } from './temp.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
-const testsRoot = join(root, 'upstream/TypeScript/tests/cases');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
+const testsRoot = join(root, 'upstream/TypeScript/tsc/testdata/tests/cases');
 const workers = Number(process.env.TEST_WORKERS ?? 12);
 // Lets the many Node processes share compiled code (https://nodejs.org/api/module.html#module-compile-cache).
 const compileCache = process.env.NODE_COMPILE_CACHE ? { NODE_COMPILE_CACHE: process.env.NODE_COMPILE_CACHE } : {};

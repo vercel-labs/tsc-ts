@@ -8,6 +8,7 @@ import {
   CheckedProgram,
   CompilerProgram,
   CompileTimes,
+  declarationDiagnosticsDue,
   getDiagnosticsOfProgram,
   OutputWriter,
   PlainProgram,
@@ -320,6 +321,8 @@ export function compileWithDeclarationThread(
   let declaring = true;
   const report = (): void => {
     if (diagnostics === undefined || declaring) return;
+    if (declarationDiagnosticsDue(compilerProgram, diagnostics, false))
+      for (const d of compilerProgram.getDeclarationDiagnostics()) diagnostics.push(d);
     const result = reportEmitAndErrors(
       sys,
       compilerProgram,
@@ -338,7 +341,7 @@ export function compileWithDeclarationThread(
     declaring = false;
     report();
   });
-  // `PlainProgram.emit` reports the declaration errors once the thread has found them.
+  // `report` adds the declaration errors once the thread has found them, when they are due.
   diagnostics = getDiagnosticsOfProgram(compilerProgram, false, true);
   mark('diagnostics collected');
   report();

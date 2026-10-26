@@ -758,7 +758,7 @@ export function createIsolatedDeclarationError(node: Node, requiresAddingUndefin
     case SyntaxKind.BindingElement:
       return createDiagnosticForNode(
         node,
-        Diagnostics.Binding_elements_can_t_be_exported_directly_with_isolatedDeclarations,
+        Diagnostics.Binding_elements_with_initializers_can_t_be_exported_directly_with_isolatedDeclarations,
         [],
       );
     case SyntaxKind.PropertyDeclaration:

@@ -1,5 +1,4 @@
-// Fetches TypeScript-Go at the pinned commit, and TypeScript's test cases at
-// the commit it pins, as shallow sparse checkouts under upstream/.
+// Fetches TypeScript at the pinned commit as a shallow sparse checkout in upstream/TypeScript.
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -25,23 +24,17 @@ function checkout(dir, url, commit, paths) {
   git(['-C', dir, 'checkout', '-q', '--detach', commit]);
 }
 
-const root = resolve('upstream/typescript-go');
-// _scripts holds ast.json, the AST schema scripts/generate-ast.mjs reads. The enums and API options of
-// TypeScript 7's API package are the source of tsc-ts's public API types (scripts/generate-api.mjs).
-checkout(root, identity.repository, identity.commit, [
-  'internal',
-  'cmd',
-  '_scripts',
-  '_packages/native-preview/src/enums',
-  '_packages/native-preview/src/api',
+// TypeScript 7's Go compiler is in tsc/, with TypeScript's compiler and conformance test cases in
+// tsc/testdata/tests/cases. tools/scripts/tsc holds ast.json, the AST schema scripts/generate-ast.mjs reads.
+// The enums and API options of TypeScript 7's API package (packages/typescript/src) are the source of
+// tsc-ts's public API types (scripts/generate-api.mjs).
+checkout(resolve('upstream/TypeScript'), identity.repository, identity.commit, [
+  'tsc/internal',
+  'tsc/cmd',
+  'tsc/testdata/tests/cases/compiler',
+  'tsc/testdata/tests/cases/conformance',
+  'tools/scripts/tsc',
+  'packages/typescript/src/enums',
+  'packages/typescript/src/api',
 ]);
 console.log('Pinned upstream: ' + identity.commit);
-
-const tsCommit = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD:_submodules/TypeScript'], {
-  encoding: 'utf8',
-}).stdout.trim();
-checkout(resolve('upstream/TypeScript'), 'https://github.com/microsoft/TypeScript.git', tsCommit, [
-  'tests/cases/compiler',
-  'tests/cases/conformance',
-]);
-console.log('TypeScript test cases: ' + tsCommit);

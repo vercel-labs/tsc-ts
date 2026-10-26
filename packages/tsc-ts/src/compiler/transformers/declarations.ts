@@ -2004,6 +2004,7 @@ export class DeclarationTransformer extends Transformer {
             this.declareModifiers(),
             SyntaxKind.NamespaceKeyword,
             namespaceName,
+            undefined,
             factory.created(new ModuleBlock(factory.createNodeList([classDeclaration]))),
           ),
         );
@@ -2084,6 +2085,7 @@ export class DeclarationTransformer extends Transformer {
         this.declareModifiers(),
         SyntaxKind.NamespaceKeyword,
         name,
+        undefined,
         this.factory.created(new ModuleBlock(this.factory.createNodeList(stripped))),
       ),
     );
@@ -2274,6 +2276,7 @@ export class DeclarationTransformer extends Transformer {
           modifiers,
           SyntaxKind.NamespaceKeyword,
           name,
+          undefined,
           this.factory.created(new ModuleBlock(this.factory.createNodeList(addOns))),
         ),
       ),

@@ -14,7 +14,7 @@ import { tempDir } from './temp.mjs';
 import { tscTs, tscTsMissing } from './toolchain.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const bundledLibs = join(resolve(here, '../../..'), 'upstream/typescript-go/internal/bundled/libs');
+const bundledLibs = join(resolve(here, '../../..'), 'upstream/TypeScript/tsc/internal/bundled/libs');
 const tsgo = join(resolve(here, '../../..'), 'packages/tsgo/dist/tsgo');
 const tsgoMissing = !existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo';
 
@@ -162,9 +162,9 @@ test('with a program error, emit on checker threads matches emit on one checker'
   }
 });
 
-// Under `noEmit`, a program with declarations reports the errors of declaration emit. At `--checkers 1` in native
-// builds, the declaration thread finds them while the main thread checks (`compileWithDeclarationThread`), and
-// with checker threads each checker finds those of the files it checks.
+// Under `noEmit`, a program with declarations reports the errors of declaration emit when it has no other errors,
+// as tsgo does. At `--checkers 1` in native builds, the declaration thread finds them while the main thread checks
+// (`compileWithDeclarationThread`), and with checker threads each checker finds those of the files it checks.
 test('under noEmit, declaration errors found on threads match those of one checker', { skip: tscTsMissing }, () => {
   const config = JSON.parse(files['tsconfig.json']);
   Object.assign(config.compilerOptions, { noEmit: true });
@@ -174,7 +174,7 @@ test('under noEmit, declaration errors found on threads match those of one check
     writeFileSync(join(cwd, path), content);
   }
   const expected = run(cwd, ['--singleThreaded']);
-  assert.ok(expected.stdout.includes('TS4094'), 'a declaration error is reported');
+  assert.ok(!expected.stdout.includes('TS4094'), 'with a type error, no declaration error is reported');
   assert.ok(expected.stdout.includes('TS2322'), 'a type error is reported');
   assert.deepEqual(Object.keys(expected.outputs), []);
   for (const checkers of ['1', '3']) {

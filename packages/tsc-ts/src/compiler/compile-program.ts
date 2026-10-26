@@ -445,10 +445,11 @@ export class PlainProgram extends CompilerProgram {
 
   emit(writer: OutputWriter): EmitResult {
     const options = this.options;
-    if (options.noEmit !== true) {
-      const skipped = handleNoEmitOnError(this);
-      if (skipped !== undefined) return skipped;
-    }
+    // A `noEmit` program emits nothing, and its emit is not skipped (tsgo's `HandleNoEmitOptions`): its
+    // declaration errors come with its other diagnostics (`getDiagnosticsOfProgram`).
+    if (options.noEmit === true) return new EmitResult();
+    const skipped = handleNoEmitOnError(this);
+    if (skipped !== undefined) return skipped;
     const program = this.program;
     const files = program.getSourceFiles();
     const parallel = this.checked.emittedInParallel;
@@ -473,13 +474,6 @@ export class PlainProgram extends CompilerProgram {
               return combineEmitResults([written, declarations()]);
             }),
           );
-    if (options.noEmit === true) {
-      // Emit is skipped only for files that would have been emitted.
-      result.emitSkipped = files.some((file) => program.sourceFileMayBeEmitted(file, false));
-      // Declaration emit still runs for its errors, as in tsgo, also when other errors were found.
-      if (getEmitDeclarations(options) && options.noEmitOnError !== true)
-        for (const d of this.getDeclarationDiagnostics()) result.diagnostics.push(d);
-    }
     return result;
   }
 }
@@ -496,10 +490,9 @@ export function handleNoEmitOnError(program: CompilerProgram): EmitResult | unde
 }
 
 /**
- * Config and syntax errors; without syntax errors, program, global and semantic errors too, and
- * declaration errors under `noEmit` (or `withDeclarationDiagnostics`). With `declarationsLater`, the
- * declaration errors are left to `program.emit`, which reports them under `noEmit` (without
- * `noEmitOnError`) whether or not other errors were found.
+ * Config and syntax errors; without syntax errors, program, global and semantic errors too, and, when
+ * there are none of these, declaration errors under `noEmit` (or `withDeclarationDiagnostics`). With
+ * `declarationsLater`, the declaration errors are left to the caller (`declarationDiagnosticsDue`).
  */
 export function getDiagnosticsOfProgram(
   program: CompilerProgram,
@@ -526,15 +519,26 @@ export function getDiagnosticsOfProgram(
     for (const d of program.getGlobalDiagnostics()) result.push(d);
     mark('semantic diagnostics');
   }
-  if (
-    !declarationsLater &&
+  if (!declarationsLater && declarationDiagnosticsDue(program, result, withDeclarationDiagnostics))
+    for (const d of program.getDeclarationDiagnostics()) result.push(d);
+  return result;
+}
+
+/**
+ * Whether `getDiagnosticsOfProgram` adds the declaration errors to `diagnostics`: under `noEmit` (or
+ * `withDeclarationDiagnostics`) with declarations, when only config errors were found.
+ */
+export function declarationDiagnosticsDue(
+  program: CompilerProgram,
+  diagnostics: readonly Diagnostic[],
+  withDeclarationDiagnostics: boolean,
+): boolean {
+  const options = program.options;
+  return (
     (withDeclarationDiagnostics || options.noEmit === true) &&
     getEmitDeclarations(options) &&
-    result.length === configCount
-  ) {
-    for (const d of program.getDeclarationDiagnostics()) result.push(d);
-  }
-  return result;
+    diagnostics.length === program.getConfigFileParsingDiagnostics().length
+  );
 }
 
 /** Combines emit results in order. */

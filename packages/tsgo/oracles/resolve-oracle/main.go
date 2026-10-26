@@ -11,13 +11,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/microsoft/typescript-go/internal/collections"
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/diagnostics"
-	"github.com/microsoft/typescript-go/internal/module"
-	"github.com/microsoft/typescript-go/internal/tspath"
-	"github.com/microsoft/typescript-go/internal/vfs"
-	"github.com/microsoft/typescript-go/internal/vfs/vfstest"
+	"github.com/microsoft/TypeScript/tsc/internal/collections"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/diagnostics"
+	"github.com/microsoft/TypeScript/tsc/internal/module"
+	"github.com/microsoft/TypeScript/tsc/internal/tspath"
+	"github.com/microsoft/TypeScript/tsc/internal/vfs"
+	"github.com/microsoft/TypeScript/tsc/internal/vfs/vfstest"
 )
 
 type pathMapping struct {
@@ -75,14 +75,14 @@ func (o *options) toCompilerOptions() *core.CompilerOptions {
 		TraceResolution:           tristate(o.TraceResolution),
 		CustomConditions:          o.CustomConditions,
 		ModuleSuffixes:            o.ModuleSuffixes,
-		RootDirs:                  o.RootDirs,
-		TypeRoots:                 o.TypeRoots,
+		RootDirs:                  directories(o.RootDirs),
+		TypeRoots:                 directories(o.TypeRoots),
 		Types:                     o.Types,
-		PathsBasePath:             o.PathsBasePath,
-		ConfigFilePath:            o.ConfigFilePath,
-		OutDir:                    o.OutDir,
-		DeclarationDir:            o.DeclarationDir,
-		RootDir:                   o.RootDir,
+		PathsBasePath:             tspath.RootedDirectoryPath(o.PathsBasePath),
+		ConfigFilePath:            tspath.RootedFilePath(o.ConfigFilePath),
+		OutDir:                    tspath.RootedDirectoryPath(o.OutDir),
+		DeclarationDir:            tspath.RootedDirectoryPath(o.DeclarationDir),
+		RootDir:                   tspath.RootedDirectoryPath(o.RootDir),
 	}
 	if o.Paths != nil {
 		paths := collections.NewOrderedMapWithSizeHint[string, []string](len(o.Paths))
@@ -146,15 +146,17 @@ type host struct {
 	cwd string
 }
 
-func (h *host) FS() vfs.FS                  { return h.fs }
-func (h *host) GetCurrentDirectory() string { return h.cwd }
+func (h *host) FS() vfs.FS { return h.fs }
+func (h *host) GetCurrentDirectory() tspath.RootedDirectoryPath {
+	return tspath.RootedDirectoryPath(h.cwd)
+}
 
 type projectReference struct {
 	name    string
 	options *core.CompilerOptions
 }
 
-func (p *projectReference) ConfigName() string                     { return p.name }
+func (p *projectReference) ConfigName() tspath.RootedFilePath      { return tspath.RootedFilePath(p.name) }
 func (p *projectReference) CompilerOptions() *core.CompilerOptions { return p.options }
 
 func format(m *diagnostics.Message, args []any) string {
@@ -184,9 +186,14 @@ func run(c *testCase) []*result {
 	for link, target := range c.Symlinks {
 		files[link] = vfstest.Symlink(target)
 	}
-	h := &host{fs: vfstest.FromMap(files, c.UseCaseSensitiveFileNames), cwd: c.CurrentDirectory}
+	h := &host{fs: vfstest.FromMap(files, caseSensitivity(c.UseCaseSensitiveFileNames)), cwd: c.CurrentDirectory}
 	compilerOptions := c.Options.toCompilerOptions()
-	resolver := module.NewResolver(h, compilerOptions, c.TypingsLocation, c.ProjectName)
+	resolver := module.NewResolver(module.ResolverOptions{
+		Host:            h,
+		CompilerOptions: compilerOptions,
+		TypingsLocation: tspath.RootedDirectoryPath(c.TypingsLocation),
+		ProjectName:     c.ProjectName,
+	})
 	var ref module.ResolvedProjectReference
 	if c.Redirect != nil {
 		var redirectOptions *core.CompilerOptions
@@ -202,7 +209,7 @@ func run(c *testCase) []*result {
 	return results
 }
 
-func resolve(resolver *module.Resolver, h *host, compilerOptions *core.CompilerOptions, ref module.ResolvedProjectReference, req request) (res *result) {
+func resolve(resolver *module.DefaultResolver, h *host, compilerOptions *core.CompilerOptions, ref module.ResolvedProjectReference, req request) (res *result) {
 	res = &result{}
 	defer func() {
 		if r := recover(); r != nil {
@@ -216,22 +223,22 @@ func resolve(resolver *module.Resolver, h *host, compilerOptions *core.CompilerO
 	mode := core.ResolutionMode(req.Mode)
 	switch req.Kind {
 	case "module":
-		r, traces := resolver.ResolveModuleName(req.Name, req.ContainingFile, mode, redirect)
-		res.ResolvedFileName = r.ResolvedFileName
-		res.OriginalPath = r.OriginalPath
+		r, traces, _ := resolver.ResolveModuleName(req.Name, tspath.RootedFilePath(req.ContainingFile), mode, redirect)
+		res.ResolvedFileName = string(r.ResolvedFileName)
+		res.OriginalPath = string(r.OriginalPath)
 		res.Extension = r.Extension
 		res.ResolvedUsingTsExtension = r.ResolvedUsingTsExtension
 		res.IsExternalLibraryImport = r.IsExternalLibraryImport
 		res.PackageID = toPackageID(r.PackageId)
-		res.AlternateResult = r.AlternateResult
+		res.AlternateResult = string(r.AlternateResult)
 		for _, d := range r.ResolutionDiagnostics {
 			res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%d %s", d.Code(), d.String()))
 		}
 		res.Traces = formatTraces(traces)
 	case "type":
-		r, traces := resolver.ResolveTypeReferenceDirective(req.Name, req.ContainingFile, mode, redirect)
-		res.ResolvedFileName = r.ResolvedFileName
-		res.OriginalPath = r.OriginalPath
+		r, traces := resolver.ResolveTypeReferenceDirective(req.Name, tspath.RootedFilePath(req.ContainingFile), mode, redirect)
+		res.ResolvedFileName = string(r.ResolvedFileName)
+		res.OriginalPath = string(r.OriginalPath)
 		res.Primary = r.Primary
 		res.IsExternalLibraryImport = r.IsExternalLibraryImport
 		res.PackageID = toPackageID(r.PackageId)
@@ -240,7 +247,7 @@ func resolve(resolver *module.Resolver, h *host, compilerOptions *core.CompilerO
 		}
 		res.Traces = formatTraces(traces)
 	case "automaticTypes":
-		res.Names = module.GetAutomaticTypeDirectiveNames(compilerOptions, h)
+		res.Names = module.GetAutomaticTypeDirectiveNames(compilerOptions, h.GetCurrentDirectory(), h.fs)
 		if res.Names == nil {
 			res.Names = []string{}
 		}
@@ -249,14 +256,14 @@ func resolve(resolver *module.Resolver, h *host, compilerOptions *core.CompilerO
 		a, b := req.Name, req.ContainingFile
 		res.Names = []string{
 			tspath.NormalizePath(a),
-			tspath.GetNormalizedAbsolutePath(a, b),
+			tspath.GetNormalizedAbsolutePath(a, tspath.RootedDirectoryPath(b)),
 			tspath.CombinePaths(b, a),
 			tspath.GetDirectoryPath(a),
 			tspath.GetBaseFileName(a),
-			strings.Join(tspath.GetPathComponents(a, b), "|"),
-			string(tspath.ToPath(a, b, false)),
-			strconv.Itoa(tspath.ComparePaths(a, b, tspath.ComparePathsOptions{UseCaseSensitiveFileNames: false})),
-			strconv.FormatBool(tspath.ContainsPath(b, a, tspath.ComparePathsOptions{UseCaseSensitiveFileNames: true})),
+			strings.Join(tspath.GetPathComponents(tspath.CombinePaths(b, a)), "|"),
+			toPath(a, b),
+			strconv.Itoa(tspath.ComparePaths(a, b, tspath.CaseInsensitive)),
+			strconv.FormatBool(tspath.ContainsPath(b, a, tspath.CaseSensitive)),
 			tspath.RemoveFileExtension(a),
 			tspath.TryGetExtensionFromPath(a),
 			tspath.GetDeclarationFileExtension(a),
@@ -266,8 +273,8 @@ func resolve(resolver *module.Resolver, h *host, compilerOptions *core.CompilerO
 			tspath.ResolvePath(b, a),
 		}
 	case "config":
-		r := module.ResolveConfig(req.Name, req.ContainingFile, h)
-		res.ResolvedFileName = r.ResolvedFileName
+		r := module.ResolveConfig(req.Name, tspath.RootedFilePath(req.ContainingFile), h.fs)
+		res.ResolvedFileName = string(r.ResolvedFileName)
 		res.Extension = r.Extension
 		res.IsExternalLibraryImport = r.IsExternalLibraryImport
 		res.PackageID = toPackageID(r.PackageId)
@@ -304,4 +311,31 @@ func runSafely(c *testCase) (results []*result) {
 		}
 	}()
 	return run(c)
+}
+
+func directories(paths []string) []tspath.RootedDirectoryPath {
+	if paths == nil {
+		return nil
+	}
+	result := make([]tspath.RootedDirectoryPath, len(paths))
+	for i, p := range paths {
+		result[i] = tspath.RootedDirectoryPath(p)
+	}
+	return result
+}
+
+func caseSensitivity(sensitive bool) tspath.CaseSensitivity {
+	if sensitive {
+		return tspath.CaseSensitive
+	}
+	return tspath.CaseInsensitive
+}
+
+// toPath is a case-insensitive path key of fileName relative to basePath, as the "path" requests
+// compare it.
+func toPath(fileName string, basePath string) string {
+	if tspath.IsRootedDiskPath(fileName) {
+		return tspath.ToFileNameLowerCase(tspath.NormalizePath(fileName))
+	}
+	return tspath.ToFileNameLowerCase(tspath.GetNormalizedAbsolutePath(fileName, tspath.RootedDirectoryPath(basePath)))
 }

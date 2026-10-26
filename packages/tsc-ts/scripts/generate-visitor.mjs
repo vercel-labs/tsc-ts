@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
-const goAst = resolve(root, '../../upstream/typescript-go/internal/ast');
+const goAst = resolve(root, '../../upstream/TypeScript/tsc/internal/ast');
 const tsAst = readFileSync(join(root, 'src/compiler/ast.ts'), 'utf8');
 const go = readFileSync(join(goAst, 'ast_generated.go'), 'utf8') + readFileSync(join(goAst, 'ast.go'), 'utf8');
 

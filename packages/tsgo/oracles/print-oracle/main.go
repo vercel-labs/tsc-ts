@@ -19,20 +19,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/parser"
-	"github.com/microsoft/typescript-go/internal/printer"
-	"github.com/microsoft/typescript-go/internal/sourcemap"
-	"github.com/microsoft/typescript-go/internal/tspath"
+	"github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/parser"
+	"github.com/microsoft/TypeScript/tsc/internal/printer"
+	"github.com/microsoft/TypeScript/tsc/internal/sourcemap"
+	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
 
 func parse(fileName string, text string) *ast.SourceFile {
-	opts := ast.SourceFileParseOptions{FileName: fileName, Path: tspath.Path(fileName)}
+	opts := ast.SourceFileParseOptions{FileName: tspath.RootedFilePath(fileName), PathKey: tspath.PathKey(fileName)}
 	if !tspath.IsDeclarationFileName(fileName) {
 		opts.ExternalModuleIndicatorOptions.Force = tspath.FileExtensionIsOneOf(fileName, []string{tspath.ExtensionCjs, tspath.ExtensionCts, tspath.ExtensionMjs, tspath.ExtensionMts})
 	}
-	return parser.ParseSourceFile(opts, text, core.GetScriptKindFromFileName(fileName))
+	return parser.ParseSourceFile(opts, text, core.GetScriptKindFromFileName(tspath.RootedFilePath(fileName)))
 }
 
 func print(path string, options printer.PrinterOptions, sourceMap bool) (out string, err error) {
@@ -50,7 +50,7 @@ func print(path string, options printer.PrinterOptions, sourceMap bool) (out str
 	if !sourceMap {
 		return p.EmitSourceFile(file), nil
 	}
-	generator := sourcemap.NewGenerator("out.js", "", "/", tspath.ComparePathsOptions{UseCaseSensitiveFileNames: true, CurrentDirectory: "/"})
+	generator := sourcemap.NewGenerator("out.js", "", "/", tspath.CaseSensitive)
 	writer := printer.NewTextWriter(options.NewLine.GetNewLineCharacter(), 0)
 	p.Write(file.AsNode(), file, writer, generator)
 	return writer.String() + "\n" + generator.String(), nil

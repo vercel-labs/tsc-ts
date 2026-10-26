@@ -7,7 +7,7 @@ import { compileSources } from './temp.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const repo = resolve(root, '../..');
-const libs = join(repo, 'upstream/typescript-go/internal/bundled/libs');
+const libs = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
 const oracle = join(repo, 'packages/tsgo/dist/check-oracle');
 
 /** `n` declarations named after `prefix`, which a flow walk passes one by one. */
@@ -539,7 +539,8 @@ test(
       expected,
       differsFromOracle,
     } of cases) {
-      const file = corpus !== undefined ? join(repo, 'upstream/TypeScript/tests/cases', corpus) : join(out, fileName);
+      const file =
+        corpus !== undefined ? join(repo, 'upstream/TypeScript/tsc/testdata/tests/cases', corpus) : join(out, fileName);
       if (corpus === undefined) writeFileSync(file, source.join('\n') + '\n');
       const env = { ...process.env, TSC_TS_CHECK_OPTIONS: options };
       const actual = execFileSync(process.execPath, ['--stack-size=16000', join(out, 'drivers/check.js'), file, libs], {

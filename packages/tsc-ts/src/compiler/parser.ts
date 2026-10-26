@@ -1,4 +1,4 @@
-// The TypeScript/JavaScript/JSX/JSON parser, a port of TypeScript 7.0.2's (tsgo) parser with its
+// The TypeScript/JavaScript/JSX/JSON parser, a port of TypeScript 7.1's (tsgo) parser with its
 // error recovery, parse diagnostics and JavaScript-specific reparsing.
 //
 // ```ts
@@ -2653,7 +2653,7 @@ export class Parser extends ScannerErrorReporter {
     let body: Node | undefined;
     if (this.token() === SyntaxKind.OpenBraceToken) body = this.parseModuleBlock();
     else this.parseSemicolon();
-    const result = this.finishWithJSDoc(new ModuleDeclaration(modifiers, keyword, name, body), pos, jsdoc);
+    const result = this.finishWithJSDoc(new ModuleDeclaration(modifiers, keyword, name, undefined, body), pos, jsdoc);
     this.statementHasAwaitIdentifier = saveHasAwaitIdentifier;
     return result;
   }
@@ -2696,7 +2696,7 @@ export class Parser extends ScannerErrorReporter {
     } else {
       body = this.parseModuleBlock();
     }
-    const result = this.finishWithJSDoc(new ModuleDeclaration(modifiers, keyword, name, body), pos, jsdoc);
+    const result = this.finishWithJSDoc(new ModuleDeclaration(modifiers, keyword, name, undefined, body), pos, jsdoc);
     this.checkJSSyntax(result);
     this.statementHasAwaitIdentifier = saveHasAwaitIdentifier;
     return result;

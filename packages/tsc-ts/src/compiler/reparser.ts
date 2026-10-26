@@ -966,6 +966,7 @@ export class Reparser {
       modifiers,
       SyntaxKind.NamespaceKeyword,
       this.addDeepCloneReparse((fullName as ModuleDeclaration).name),
+      undefined,
       block,
     );
     this.finishReparsedNode(result, fullName);

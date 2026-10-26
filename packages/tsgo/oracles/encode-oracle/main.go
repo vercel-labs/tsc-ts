@@ -14,16 +14,16 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/microsoft/typescript-go/internal/api/encoder"
-	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/parser"
-	"github.com/microsoft/typescript-go/internal/tspath"
+	"github.com/microsoft/TypeScript/tsc/internal/api/encoder"
+	"github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/parser"
+	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 	"github.com/zeebo/xxh3"
 )
 
 func parse(fileName string, text string, jsx bool, force bool) *ast.SourceFile {
-	opts := ast.SourceFileParseOptions{FileName: fileName, Path: tspath.Path(fileName)}
+	opts := ast.SourceFileParseOptions{FileName: tspath.RootedFilePath(fileName), PathKey: tspath.PathKey(fileName)}
 	if !tspath.IsDeclarationFileName(fileName) {
 		// As GetExternalModuleIndicatorOptions with default compiler options.
 		opts.ExternalModuleIndicatorOptions.Force = tspath.FileExtensionIsOneOf(fileName, []string{tspath.ExtensionCjs, tspath.ExtensionCts, tspath.ExtensionMjs, tspath.ExtensionMts})
@@ -34,7 +34,7 @@ func parse(fileName string, text string, jsx bool, force bool) *ast.SourceFile {
 	if force {
 		opts.ExternalModuleIndicatorOptions.Force = true
 	}
-	file := parser.ParseSourceFile(opts, text, core.GetScriptKindFromFileName(fileName))
+	file := parser.ParseSourceFile(opts, text, core.GetScriptKindFromFileName(tspath.RootedFilePath(fileName)))
 	file.Hash = xxh3.HashString128(text)
 	return file
 }

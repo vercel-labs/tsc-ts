@@ -25,11 +25,11 @@ const modes = option('--modes', 'plain,full,rescan,jsdoc,es5').split(',');
 const valued = new Set(['--native', '--jobs', '--limit', '--modes']);
 const inputs = args.filter((a, i) => !a.startsWith('--') && !valued.has(args[i - 1]));
 if (inputs.length === 0) {
-  const cases = resolve(repo, 'upstream/TypeScript/tests/cases');
+  const cases = resolve(repo, 'upstream/TypeScript/tsc/testdata/tests/cases');
   inputs.push(
     join(cases, 'compiler'),
     join(cases, 'conformance'),
-    resolve(repo, 'upstream/typescript-go/internal/bundled/libs'),
+    resolve(repo, 'upstream/TypeScript/tsc/internal/bundled/libs'),
   );
 }
 
