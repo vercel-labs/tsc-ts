@@ -1571,17 +1571,19 @@ export class ConfigParser {
 
     const includes = specs.validatedIncludeSpecs;
     if (includes.length > 0) {
-      // Matches go to `onRootFile` a directory at a time, without those that a file of the same name
-      // with a higher priority extension leaves out below.
+      // Matches go to `onRootFile` a directory at a time, without the literal files, which it has, and those that a
+      // file of the same name with a higher priority extension leaves out below.
       let directory = '';
       let pending: string[] = [];
       const flush = (): void => {
         if (onRootFile === undefined || pending.length === 0) return;
         const siblings = new Map<string, string>();
         for (const file of pending) siblings.set(getCanonicalFileName(file, cs), file);
-        for (const file of pending)
+        for (const file of pending) {
+          if (literalFiles.has(getCanonicalFileName(file, cs))) continue;
           if (!hasFileWithHigherPriorityExtension(file, supportedExtensions, literalFiles, siblings, cs))
             onRootFile(file);
+        }
         pending = [];
       };
       const onMatch =
