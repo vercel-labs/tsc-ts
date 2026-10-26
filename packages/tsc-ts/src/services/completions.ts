@@ -327,6 +327,7 @@ export interface CompletionData {
   isRightOfDotOrQuestionDot: boolean;
   /** Whether auto-imports are prepared (completions take them from a registry). */
   autoImportsPrepared: boolean;
+  onAutoImportsNeeded: () => void;
   /** The auto-imports offered, best fix first, and the view they came from. */
   autoImports: FixAndExport[];
   autoImportView: AutoImportView | undefined;
@@ -354,6 +355,7 @@ export function newCompletionData(location: Node, contextToken: Node | undefined
     isRightOfOpenTag: false,
     isRightOfDotOrQuestionDot: false,
     autoImportsPrepared: false,
+    onAutoImportsNeeded: () => {},
     autoImports: [],
     autoImportView: undefined,
     importStatementCompletion: undefined,
@@ -373,6 +375,8 @@ export function getCompletionsAtPosition(
   triggerCharacter: string | undefined,
   includeSymbols: boolean,
   autoImports: AutoImportRegistry | undefined,
+  // Called when the list needs auto-imports, where tsc prepares them for the request.
+  onAutoImportsNeeded: () => void = () => {},
 ): CompletionList | undefined {
   const previousToken = getRelevantTokens(position, file).previousToken;
   if (
@@ -397,7 +401,7 @@ export function getCompletionsAtPosition(
       previousToken.parent.kind === SyntaxKind.ContinueStatement)
   )
     return getLabelCompletionsAtPosition(previousToken.parent, file, position);
-  const result = getCompletionData(c, program, file, position, autoImports);
+  const result = getCompletionData(c, program, file, position, autoImports, onAutoImportsNeeded);
   if (result === undefined) return undefined;
   if (result instanceof KeywordCompletionData) return { isIncomplete: false, entries: result.entries };
   if (result instanceof JSDocTagNameCompletionData) {
@@ -572,6 +576,7 @@ function getCompletionData(
   file: SourceFile,
   position: number,
   autoImports: AutoImportRegistry | undefined,
+  onAutoImportsNeeded: () => void,
 ): CompletionDataResult | undefined {
   const options = program.options;
   const inCheckedFile = isCheckedFile(file, options);
@@ -811,6 +816,7 @@ function getCompletionData(
   data.isNewIdentifierLocation = isNewIdentifierLocation;
   data.importStatementCompletion = importStatementCompletionInfo;
   data.autoImportsPrepared = autoImports !== undefined;
+  data.onAutoImportsNeeded = onAutoImportsNeeded;
 
   const search = new SymbolSearch(c, program, file, position, data, node, inCheckedFile, autoImports);
   search.isRightOfDot = isRightOfDot;
@@ -1283,6 +1289,7 @@ class SymbolSearch {
       if (!(previousToken === data.contextToken && data.importStatementCompletion !== undefined))
         lowerCaseTokenText = previousToken.text.toLowerCase();
     }
+    this.data.onAutoImportsNeeded();
     if (this.autoImports === undefined) throw new NeedsAutoImports();
     const view = new AutoImportView(
       this.autoImports,
@@ -2951,7 +2958,7 @@ function completionInfoFromData(
   if (contextToken !== undefined && !data.isRightOfOpenTag && !data.isRightOfDotOrQuestionDot) {
     const caseBlock = findAncestor(contextToken, (n) => n.kind === SyntaxKind.CaseBlock);
     if (caseBlock !== undefined) {
-      const snippet = getExhaustiveCaseSnippets(c, caseBlock as CaseBlock, file, data.autoImportsPrepared);
+      const snippet = getExhaustiveCaseSnippets(c, caseBlock as CaseBlock, file, data);
       if (snippet !== undefined) entries.push(snippet);
     }
   }
@@ -2967,11 +2974,12 @@ function getExhaustiveCaseSnippets(
   c: Checker,
   caseBlock: CaseBlock,
   file: SourceFile,
-  autoImportsPrepared: boolean,
+  data: CompletionData,
 ): CompletionEntry | undefined {
   const switchType = getTypeAtLocation(c, getExpression(caseBlock.parent!)!);
   if ((switchType.flags & TypeFlags.Union) === 0 || !typesOf(switchType).every(isLiteral)) return undefined;
-  if (!autoImportsPrepared) throw new NeedsAutoImports();
+  data.onAutoImportsNeeded();
+  if (!data.autoImportsPrepared) throw new NeedsAutoImports();
   const tracker = new CaseClauseTracker(c, caseBlock.clauses.nodes);
   const singleQuote = getQuotePreference(file) === QuotePreference.Single;
   const factory = new EmitContext();

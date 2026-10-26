@@ -413,7 +413,8 @@ export class Project {
   /**
    * Completions at a UTF-16 position. With `withAutoImports`, auto-imports come from the program's files, as tsc
    * prepares them for a request; without, or for a file with a `node_modules` directory above it, whose packages'
-   * exports are not indexed, a completion list that needs them throws `NeedsAutoImports`.
+   * exports are not indexed, a completion list that needs them throws `NeedsAutoImports`. `onAutoImportsNeeded` is
+   * called when the list needs them.
    */
   completionsAtPosition(
     file: SourceFile,
@@ -421,6 +422,7 @@ export class Project {
     triggerCharacter: string | undefined,
     includeSymbols: boolean,
     withAutoImports: boolean,
+    onAutoImportsNeeded: () => void,
   ): CompletionList | undefined {
     const autoImports = withAutoImports && !this.hasNodeModulesAbove(file) ? this.autoImportRegistry() : undefined;
     return getCompletionsAtPosition(
@@ -431,6 +433,7 @@ export class Project {
       triggerCharacter,
       includeSymbols,
       autoImports,
+      onAutoImportsNeeded,
     );
   }
 

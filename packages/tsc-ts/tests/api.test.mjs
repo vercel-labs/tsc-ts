@@ -707,6 +707,41 @@ test('tsc-ts --api completes like tsc --api', { skip, timeout: 600_000 }, async 
   }
 });
 
+// tsc prepares auto-imports for a completion request in a snapshot of its own, which takes the next snapshot ID; a
+// request with symbols, or one whose list needs no auto-imports, takes none.
+test(
+  'tsc-ts --api numbers snapshots after completions with auto-imports like tsc --api',
+  { skip, timeout: 300_000 },
+  async () => {
+    const dir = tempDir('tsc-ts-api-');
+    const config = join(dir, 'tsconfig.json');
+    writeFileSync(config, JSON.stringify({ compilerOptions: { module: 'esnext', moduleResolution: 'bundler' } }));
+    writeFileSync(join(dir, 'a.ts'), 'export const value = 1;\n');
+    const use = join(dir, 'use.ts');
+    const text = 'val\nconst o = { a: 1 };\no.\n';
+    writeFileSync(use, text);
+    const d = new Differential([realTsc], tscTs, dir, env);
+    try {
+      await d.call('initialize');
+      let update = await d.snapshot({ openProjects: [config] });
+      const project = update.projects[0].id;
+      const requests = [
+        { position: 3 },
+        { position: 3 },
+        { position: text.indexOf('o.') + 2 },
+        { position: 3, includeSymbol: true },
+      ];
+      for (const request of requests) {
+        await d.call('getCompletionsAtPosition', { snapshot: update.snapshot, project, file: use, ...request });
+        update = await d.snapshot({});
+      }
+    } finally {
+      await d.close();
+    }
+    report(d);
+  },
+);
+
 // The exports of packages in `node_modules` are not indexed yet, so a file with a `node_modules` directory above it
 // gets no auto-imports: a completion list that needs them is refused, where tsc answers.
 test('tsc-ts --api refuses auto-imports below a node_modules directory', { skip, timeout: 300_000 }, async () => {
