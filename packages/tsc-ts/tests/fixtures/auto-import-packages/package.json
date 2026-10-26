@@ -1,0 +1,7 @@
+{
+  "name": "app",
+  "type": "module",
+  "dependencies": { "pkg-main": "1.0.0", "pkg-exports": "1.0.0", "@scope/lib": "1.0.0", "untyped": "1.0.0", "reexporter": "1.0.0", "ambient-pkg": "1.0.0", "cjs-pkg": "1.0.0", "reexporter2": "1.0.0", "ambient-decl": "1.0.0", "uses-ambient": "1.0.0", "workspace-lib": "*", "linked-lib": "*", "tv-pkg": "1.0.0", "array-exports": "1.0.0", "@scope/untyped": "1.0.0" },
+  "peerDependencies": { "peer-pkg": "1.0.0" },
+  "devDependencies": { "dev-only": "1.0.0", "@types/node": "1.0.0" }
+}

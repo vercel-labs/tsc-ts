@@ -686,18 +686,31 @@ function moveAugmentation(dir) {
   writeFileSync(join(dir, 'src/augment.ts'), 'export {};\n' + augmentation);
 }
 
+// The packages fixture's linked packages: a workspace package of the project, and a package outside it.
+function linkPackages(dir) {
+  symlinkSync(join(dir, 'packages/workspace-lib'), join(dir, 'node_modules/workspace-lib'));
+  const external = tempDir('tsc-ts-api-linked-');
+  writeFileSync(join(external, 'package.json'), '{"name":"linked-lib","version":"1.0.0","types":"index.d.ts"}');
+  writeFileSync(
+    join(external, 'index.d.ts'),
+    'export declare const linkedValue: number;\nexport declare const linkedOther: number;\n',
+  );
+  symlinkSync(external, join(dir, 'node_modules/linked-lib'));
+}
+
 test('tsc-ts --api completes like tsc --api', { skip, timeout: 600_000 }, async () => {
-  for (const fixture of ['completions', 'services', 'project', 'auto-imports']) {
+  for (const fixture of ['completions', 'services', 'project', 'auto-imports', 'auto-import-packages']) {
     const dir = tempDir('tsc-ts-api-');
     cpSync(resolve('tests/fixtures', fixture), dir, { recursive: true });
     if (fixture === 'project') moveAugmentation(dir);
+    if (fixture === 'auto-import-packages') linkPackages(dir);
     const d = new Differential([realTsc], tscTs, dir, env);
     try {
       await d.call('initialize');
       const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
       const base = { snapshot: update.snapshot, project: update.projects[0].id };
       for (const file of await d.call('getSourceFileNames', base))
-        if (file.startsWith(dir)) await compareCompletions(d, base, file);
+        if (file.startsWith(dir) && !file.includes('/node_modules/')) await compareCompletions(d, base, file);
       await d.call('getCompletionsAtPosition', { ...base, file: join(dir, 'missing.ts'), position: 0 });
     } finally {
       await d.close();
@@ -742,40 +755,49 @@ test(
   },
 );
 
-// The exports of packages in `node_modules` are not indexed yet, so a file with a `node_modules` directory above it
-// gets no auto-imports: a completion list that needs them is refused, where tsc answers.
-test('tsc-ts --api refuses auto-imports below a node_modules directory', { skip, timeout: 300_000 }, async () => {
+test('tsc-ts --api offers changed packages in auto-imports like tsc --api', { skip, timeout: 300_000 }, async () => {
   const dir = tempDir('tsc-ts-api-');
-  writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }));
-  mkdirSync(join(dir, 'src'));
-  writeFileSync(join(dir, 'src/a.ts'), 'export const value = 1;\n');
-  writeFileSync(join(dir, 'src/b.ts'), 'val\n');
-  writeFileSync(join(dir, 'package.json'), '{"dependencies":{"pkg":"1.0.0"}}');
-  mkdirSync(join(dir, 'node_modules/pkg'), { recursive: true });
-  writeFileSync(join(dir, 'node_modules/pkg/package.json'), '{"name":"pkg","types":"index.d.ts"}');
-  writeFileSync(join(dir, 'node_modules/pkg/index.d.ts'), 'export declare const valuable: number;\n');
-  const servers = [new Client([realTsc], dir), new Client(tscTs, dir, env)];
+  const config = join(dir, 'tsconfig.json');
+  writeFileSync(config, JSON.stringify({ compilerOptions: { module: 'esnext', moduleResolution: 'bundler' } }));
+  const packageJson = join(dir, 'package.json');
+  writeFileSync(packageJson, '{"dependencies":{"pkg":"1.0.0"}}');
+  const use = join(dir, 'use.ts');
+  writeFileSync(use, 'val\n');
+  const addPackage = (name, text) => {
+    mkdirSync(join(dir, 'node_modules', name), { recursive: true });
+    writeFileSync(join(dir, 'node_modules', name, 'package.json'), `{"name":"${name}","types":"index.d.ts"}`);
+    writeFileSync(join(dir, 'node_modules', name, 'index.d.ts'), text);
+    return [join(dir, 'node_modules', name, 'package.json'), join(dir, 'node_modules', name, 'index.d.ts')];
+  };
+  const [, index] = addPackage('pkg', 'export declare const value: number;\n');
+  const d = new Differential([realTsc], tscTs, dir, env);
   try {
-    const replies = [];
-    for (const client of servers) {
-      await client.json('initialize');
-      const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
-      const params = {
+    await d.call('initialize');
+    let update = await d.snapshot({ openProjects: [config] });
+    const project = update.projects[0].id;
+    const names = async () => {
+      const list = await d.call('getCompletionsAtPosition', {
         snapshot: update.snapshot,
-        project: update.projects[0].id,
-        file: join(dir, 'src/b.ts'),
+        project,
+        file: use,
         position: 3,
-      };
-      replies.push(await client.request('getCompletionsAtPosition', params));
-    }
-    const [expected, actual] = replies;
-    assert.equal(expected.type, 'response');
-    assert.ok(JSON.parse(expected.payload.toString()).entries.some((e) => e.labelDetails?.description === 'pkg'));
-    assert.equal(actual.type, 'error');
-    assert.equal(actual.payload.toString(), 'completion list needs auto imports');
+      });
+      return list.entries.map((e) => e.name);
+    };
+    assert.ok((await names()).includes('value'));
+    // A package file outside the program changes.
+    writeFileSync(index, 'export declare const value: number;\nexport declare const valuable: number;\n');
+    update = await d.snapshot({ fileNotifications: { changed: [index] } });
+    assert.ok((await names()).includes('valuable'));
+    // A dependency is added.
+    const created = addPackage('other', 'export declare const validated: number;\n');
+    writeFileSync(packageJson, '{"dependencies":{"pkg":"1.0.0","other":"1.0.0"}}');
+    update = await d.snapshot({ fileNotifications: { changed: [packageJson], created } });
+    assert.ok((await names()).includes('validated'));
   } finally {
-    for (const client of servers) await client.close();
+    await d.close();
   }
+  report(d);
 });
 
 for (const fixture of ['services', 'project']) {

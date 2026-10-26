@@ -296,6 +296,11 @@ export class Program implements OutputPathsHost {
     return this.processed.redirectTargets.get(path) ?? [];
   }
 
+  /** The nearest `package.json` lookup at or above `directory`. */
+  getPackageScopeForPath(directory: string): PackageJsonInfo | undefined {
+    return this.processed.resolver.getPackageScopeForPath(directory);
+  }
+
   /** The directory of the nearest `package.json` at or above `directory`, or `''`. */
   getNearestAncestorDirectoryWithPackageJson(directory: string): string {
     const scope = this.processed.resolver.getPackageScopeForPath(directory);
