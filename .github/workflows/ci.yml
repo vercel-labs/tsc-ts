@@ -291,7 +291,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # pack.mjs takes the lib files from the pinned upstream.
+      - uses: actions/cache@v4
+        with:
+          path: upstream
+          key: upstream-${{ hashFiles('upstream.json') }}
       - run: npm ci
+      - run: npm run fetch:upstream
       - name: Pack and check
         run: |
           tarball=$(npm pack @tsc-ts/linux-x64-gnu --pack-destination "$RUNNER_TEMP" --silent)
