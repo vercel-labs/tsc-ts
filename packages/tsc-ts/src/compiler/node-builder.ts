@@ -143,15 +143,18 @@ import {
 } from './checker-symbols.js';
 import {
   createArrayType,
+  createTypeReference,
   filterType,
   getIntersectionType,
   getTypeArguments,
   getTypeReferenceArity,
   getWidenedLiteralType,
+  isArrayOrTupleType,
   isErrorType,
   isTupleType,
   inDeclarationOrder,
   newAnonymousType,
+  typeListKey,
 } from './checker-type-factory.js';
 import { getTypeFromTypeNode } from './checker-type-nodes.js';
 import {
@@ -180,6 +183,7 @@ import {
   type LiteralType,
   type MappedType,
   ObjectFlags,
+  type ReverseMappedType,
   Signature,
   SignatureFlags,
   SignatureKind,
@@ -1033,7 +1037,9 @@ export class NodeBuilder {
     }
     const objectFlags = t.objectFlags;
     if ((objectFlags & ObjectFlags.Reference) !== 0) {
-      if ((t as TypeReference).node !== undefined) return this.visitAndTransformType(t, TransformKind.TypeReference);
+      // Arrays and tuples are checked for cycles, as their element types can refer back to them.
+      if (isArrayOrTupleType(c, t) || (t as TypeReference).node !== undefined)
+        return this.visitAndTransformType(t, TransformKind.TypeReference);
       return this.typeReferenceToTypeNode(t as TypeReference);
     }
     if ((flags & TypeFlags.TypeParameter) !== 0 || (objectFlags & ObjectFlags.ClassOrInterface) !== 0) {
@@ -1142,19 +1148,28 @@ export class NodeBuilder {
 
   /** Writes `t` with `transform`, eliding its circular references; cached per enclosing declaration. */
   visitAndTransformType(t: Type, transform: TransformKind): Node | undefined {
-    const typeId = t.id;
+    if (this.checkTruncationLength()) return this.createElidedInformationPlaceholder();
+    const c = this.c;
+    let typeId = t.id;
+    const isArrayOrTuple = isArrayOrTupleType(c, t);
+    // A deferred reference and the regular reference to the same array or tuple are one cycle identity.
+    if (isArrayOrTuple) typeId = createTypeReference(c, (t as TypeReference).target!, getTypeArguments(c, t)).id;
+    if (this.visitedTypes.has(typeId)) return this.createCyclicStructurePlaceholder();
     const isConstructorObject =
       (t.objectFlags & ObjectFlags.Anonymous) !== 0 &&
       t.symbol !== undefined &&
       (t.symbol.flags & SymbolFlags.Class) !== 0;
     // Instantiations of one anonymous type share a symbol, so tracking symbols rather than
-    // types catches circular references through them.
+    // types catches circular references through them. Nesting of arrays and tuples, which share the Array
+    // symbol or a tuple target, is not bounded by it.
     let id: string | undefined = undefined;
-    if ((t.objectFlags & ObjectFlags.Reference) !== 0 && (t as TypeReference).node !== undefined)
+    if (isArrayOrTuple) id = undefined;
+    else if ((t.objectFlags & ObjectFlags.Reference) !== 0 && (t as TypeReference).node !== undefined)
       id = 'n' + getNodeId((t as TypeReference).node!);
     else if ((t.flags & TypeFlags.Conditional) !== 0) id = 'n' + getNodeId((t as ConditionalType).root.node);
     else if (t.symbol !== undefined) id = (isConstructorObject ? 'c' : 's') + getSymbolId(t.symbol);
-    const key = typeId + ':' + this.flags + ':' + this.internalFlags;
+    let key = typeId + ':' + this.flags + ':' + this.internalFlags;
+    if (this.inferTypeParameters.length !== 0) key += ':' + typeListKey(this.inferTypeParameters);
     if (this.enclosingDeclaration !== undefined) {
       const cached = this.serializedTypes.get(getNodeId(this.enclosingDeclaration))?.get(key);
       if (cached !== undefined) {
@@ -1165,10 +1180,27 @@ export class NodeBuilder {
         return this.deepCloneNode(cached.node);
       }
     }
+    // Growing type arguments can keep a reverse mapped type from repeating, so its expansion is also bounded by
+    // its mapped type's declaration.
+    let origin: string | undefined = undefined;
+    let originDepth = 0;
+    if ((t.objectFlags & ObjectFlags.ReverseMapped) !== 0) {
+      origin = 'n' + getNodeId(((t as ReverseMappedType).mappedType as MappedType).declaration!);
+      originDepth = this.symbolDepth.get(origin) ?? 0;
+      if (originDepth >= 100) {
+        this.truncating = true;
+        return this.createElidedInformationPlaceholder();
+      }
+      this.symbolDepth.set(origin, originDepth + 1);
+    }
     let depth = 0;
     if (id !== undefined) {
       depth = this.symbolDepth.get(id) ?? 0;
-      if (depth > 10) return this.createElidedInformationPlaceholder();
+      if (depth > 10) {
+        this.truncating = true;
+        if (origin !== undefined) this.symbolDepth.set(origin, originDepth);
+        return this.createElidedInformationPlaceholder();
+      }
       this.symbolDepth.set(id, depth + 1);
     }
     this.visitedTypes.add(typeId);
@@ -1207,22 +1239,26 @@ export class NodeBuilder {
     }
     this.visitedTypes.delete(typeId);
     if (id !== undefined) this.symbolDepth.set(id, depth);
+    if (origin !== undefined) this.symbolDepth.set(origin, originDepth);
     this.trackedSymbols = prevTrackedSymbols;
     return result;
   }
 
   private typeToTypeNodeOrCircularityElision(t: Type): Node | undefined {
     if ((t.flags & TypeFlags.Union) !== 0) {
-      if (this.visitedTypes.has(t.id)) {
-        if ((this.flags & NodeBuilderFlags.AllowAnonymousIdentifier) === 0) {
-          this.encounteredError = true;
-          this.tracker.reportCyclicStructureError();
-        }
-        return this.createElidedInformationPlaceholder();
-      }
+      if (this.visitedTypes.has(t.id)) return this.createCyclicStructurePlaceholder();
       return this.visitAndTransformType(t, TransformKind.Type);
     }
     return this.typeToTypeNode(t);
+  }
+
+  /** The placeholder for a circular reference; outside of display, it is an error. */
+  private createCyclicStructurePlaceholder(): Node {
+    if ((this.flags & NodeBuilderFlags.AllowAnonymousIdentifier) === 0) {
+      this.encounteredError = true;
+      this.tracker.reportCyclicStructureError();
+    }
+    return this.createElidedInformationPlaceholder();
   }
 
   private conditionalTypeToTypeNode(t: ConditionalType): Node | undefined {
@@ -1525,8 +1561,18 @@ export class NodeBuilder {
     const c = this.c;
     const typeId = t.id;
     const symbol = t.symbol;
-    // Anonymous types without a symbol are never circular.
-    if (symbol === undefined) return this.createTypeNodeFromObjectType(t);
+    if (symbol === undefined) {
+      // In declaration emit a reverse mapped type is written out, so it can be circular; for display, its
+      // properties and index signatures use placeholders.
+      if (
+        (t.objectFlags & ObjectFlags.ReverseMapped) !== 0 &&
+        (this.flags & NodeBuilderFlags.AllowAnonymousIdentifier) === 0
+      ) {
+        if (this.visitedTypes.has(typeId)) return this.createCyclicStructurePlaceholder();
+        return this.visitAndTransformType(t, TransformKind.ObjectType);
+      }
+      return this.createTypeNodeFromObjectType(t);
+    }
     if ((t.objectFlags & ObjectFlags.InstantiationExpressionType) !== 0) {
       const existing = (t as InstantiationExpressionType).node;
       // The node is unreliable for members of unions and intersections, so it's checked.
@@ -1535,13 +1581,13 @@ export class NodeBuilder {
         existing.kind === SyntaxKind.TypeQuery &&
         this.getTypeFromTypeNode(existing, false) === t
       ) {
-        if (this.visitedTypes.has(typeId)) return this.createElidedInformationPlaceholder();
+        if (this.visitedTypes.has(typeId)) return this.createCyclicStructurePlaceholder();
         this.visitedTypes.add(typeId);
         const typeNode = this.tryReuseExistingNonParameterTypeNode(existing, t, undefined, undefined);
         this.visitedTypes.delete(typeId);
         if (typeNode !== undefined) return typeNode;
       }
-      if (this.visitedTypes.has(typeId)) return this.createElidedInformationPlaceholder();
+      if (this.visitedTypes.has(typeId)) return this.createCyclicStructurePlaceholder();
       return this.visitAndTransformType(t, TransformKind.ObjectType);
     }
     const isInstanceType = isClassInstanceSide(c, t) ? SymbolFlags.Type : SymbolFlags.Value;
@@ -1557,7 +1603,7 @@ export class NodeBuilder {
       // An anonymous type literal in a type alias is written as the alias.
       const typeAlias = getTypeAliasForTypeLiteral(c, t);
       if (typeAlias !== undefined) return symbolToTypeNode(this, typeAlias, SymbolFlags.Type, undefined);
-      return this.createElidedInformationPlaceholder();
+      return this.createCyclicStructurePlaceholder();
     }
     return this.visitAndTransformType(t, TransformKind.ObjectType);
   }
@@ -1640,7 +1686,11 @@ export class NodeBuilder {
     for (const info of resolved.indexInfos) {
       // tsgo creates the placeholder for every index signature, and its length counts toward truncation.
       const placeholder = this.createElidedInformationPlaceholder();
-      const typeNode = (t.objectFlags & ObjectFlags.ReverseMapped) !== 0 ? placeholder : undefined;
+      const typeNode =
+        (t.objectFlags & ObjectFlags.ReverseMapped) !== 0 &&
+        (this.flags & NodeBuilderFlags.AllowAnonymousIdentifier) !== 0
+          ? placeholder
+          : undefined;
       for (const element of this.indexInfoToObjectComputedNamesOrSignatureDeclaration(info, typeNode))
         typeElements.push(element);
     }
@@ -1691,7 +1741,9 @@ export class NodeBuilder {
 
   private shouldUsePlaceholderForProperty(propertySymbol: Symbol): boolean {
     // Placeholders for reverse mapped types (1) already being written, (2) nested in a mapping
-    // over a non-anonymous type, or (3) nested deeply in the same mapped type.
+    // over a non-anonymous type, or (3) nested deeply in the same mapped type. They are for display only:
+    // declaration emit writes the types.
+    if ((this.flags & NodeBuilderFlags.AllowAnonymousIdentifier) === 0) return false;
     if ((propertySymbol.checkFlags & CheckFlags.ReverseMapped) === 0) return false;
     const stack = this.reverseMappedStack;
     if (stack.indexOf(propertySymbol) >= 0) return true;
