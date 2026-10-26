@@ -458,6 +458,30 @@ const cases = [
     differsFromOracle: true,
   },
   {
+    // The protected-base check reads the type of the containing class with getTypeOfNode, which gives a class
+    // expression's constructor type, not its instance type. As in tsgo, `new Base()` in the class expression is an
+    // error, and in the class declaration it is not.
+    name: 'protected base constructors called in a class expression and in a class declaration',
+    source: [
+      'class Base {',
+      '  protected constructor() {}',
+      '}',
+      'const Derived = class extends Base {',
+      '  make() {',
+      '    return new Base();',
+      '  }',
+      '};',
+      'class Declared extends Base {',
+      '  make() {',
+      '    return new Base();',
+      '  }',
+      '}',
+    ],
+    expected: [
+      "/input.ts 2674 103 10 Constructor of class 'Base' is protected and only accessible within the class declaration.",
+    ],
+  },
+  {
     // 70 type parameters: the mappers of the tuple reference and of the call look their sources up in an index.
     name: 'instantiation with more than 64 type parameters',
     source: [
