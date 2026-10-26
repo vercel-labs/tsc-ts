@@ -420,7 +420,7 @@ function createAccessFromSymbolChain(
       return b.created(new IndexedAccessTypeNode(b.created(new TypeReferenceNode(lhs, typeParameterNodes)), literal));
     }
   }
-  const identifier = b.identifier(symbolName);
+  const identifier = b.symbolIdentifier(symbolName, symbol);
   b.context.addEmitFlags(identifier, EmitFlags.NoAsciiEscaping);
   if (index > stopper) {
     const lhs = createAccessFromSymbolChain(b, chain, index - 1, stopper, overrideTypeArguments);
@@ -532,7 +532,7 @@ function createEntityNameFromSymbolChain(b: NodeBuilder, chain: Symbol[], index:
   if (index === 0) b.flags |= NodeBuilderFlags.InInitialEntityName;
   const symbolName = getNameOfSymbolAsWritten(b, symbol);
   if (index === 0) b.flags ^= NodeBuilderFlags.InInitialEntityName;
-  const identifier = b.identifier(symbolName);
+  const identifier = b.symbolIdentifier(symbolName, symbol);
   b.context.addEmitFlags(identifier, EmitFlags.NoAsciiEscaping);
   if (index > 0) return b.created(new QualifiedName(createEntityNameFromSymbolChain(b, chain, index - 1), identifier));
   return identifier;

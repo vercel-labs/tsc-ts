@@ -1,6 +1,6 @@
-// Completions at a position, like tsgo's language service. Completions that need auto imports (global identifiers and
-// import statements) take them from an auto-import registry; without one, and for exhaustive switch cases, they
-// report `NeedsAutoImports`, as `tsc --api` does before auto-imports are prepared.
+// Completions at a position, like tsgo's language service. Completions that need auto imports (global identifiers,
+// import statements and exhaustive switch cases) take them from an auto-import registry; without one they report
+// `NeedsAutoImports`, as `tsc --api` does before auto-imports are prepared.
 import {
   BindingElement,
   getTypeArguments,
@@ -62,6 +62,15 @@ import {
   getLabel,
   ParameterDeclaration,
   CallExpression,
+  ElementAccessExpression,
+  IndexedAccessTypeNode,
+  LiteralTypeNode,
+  NumericLiteral,
+  ParenthesizedExpression,
+  ParenthesizedTypeNode,
+  StringLiteral,
+  TypeQueryNode,
+  TypeReferenceNode,
 } from '../compiler/ast.js';
 import {
   findChildOfKind,
@@ -208,7 +217,15 @@ import { getGlobalSymbol, getSymbolFlags } from '../compiler/checker-symbols.js'
 import { isFunctionLikeDeclarationKind } from '../compiler/ast-utilities.js';
 import { isClassLike as isClassLikeNode } from '../compiler/binder-utilities.js';
 import { getJSDocSnippetCompletion } from './jsdoc-snippet.js';
-import { declarationCount, getDeclarations, getSymbolId, type Symbol, SymbolFlags } from '../compiler/symbol.js';
+import {
+  declarationCount,
+  getDeclarations,
+  getSymbolId,
+  InternalSymbolName,
+  type Symbol,
+  SymbolFlags,
+  tryGetAmbientModuleNameFromSymbolName,
+} from '../compiler/symbol.js';
 
 /** Thrown where tsgo needs its auto-import registry. */
 /** A completion request tsgo can't answer. */
@@ -1716,6 +1733,9 @@ export function getPropertiesForCompletion(c: Checker, t: Type): Symbol[] {
 
 import { getNameOfDeclaration } from '../compiler/binder-utilities.js';
 import { typeToTypeNode } from '../compiler/node-builder.js';
+import { NodeBuilderInternalFlags } from '../compiler/transformers/declarations-resolver.js';
+import { getFirstIdentifier } from '../compiler/checker-symbols.js';
+import { getDefaultLikeExportNameFromDeclaration, moduleSpecifierToValidIdentifier } from './auto-import-exports.js';
 import { NodeBuilderFlags } from '../compiler/transformers/declarations-resolver.js';
 import { EmitContext } from '../compiler/printer/emit-context.js';
 import { EmitFlags } from '../compiler/printer/emit-flags.js';
@@ -2967,9 +2987,8 @@ function completionInfoFromData(
 }
 
 /**
- * For a switch over a union of literals, the `case` clauses of the values without one, as one snippet. It needs
- * prepared auto-imports, and enum members, which may need an import, are not written yet: both throw
- * `NeedsAutoImports`.
+ * For a switch over a union of literals and enum members, the `case` clauses of the values without one, as one
+ * snippet. It needs prepared auto-imports, and throws `NeedsAutoImports` without them.
  */
 function getExhaustiveCaseSnippets(
   c: Checker,
@@ -2986,7 +3005,24 @@ function getExhaustiveCaseSnippets(
   const factory = new EmitContext();
   const elements: Node[] = [];
   for (const t of typesOf(switchType)) {
-    if ((t.flags & TypeFlags.EnumLiteral) !== 0) throw new NeedsAutoImports();
+    if ((t.flags & TypeFlags.EnumLiteral) !== 0) {
+      // An enum member, unless a clause has its value, written as tsc writes its type.
+      const declaration = t.symbol?.valueDeclaration;
+      const value = declaration === undefined ? undefined : getConstantValue(c, declaration);
+      if (typeof value === 'string') {
+        if (tracker.hasString(value)) continue;
+        tracker.addString(value);
+      } else if (typeof value === 'number') {
+        if (tracker.hasNumber(value)) continue;
+        tracker.addNumber(value);
+      }
+      const typeNode = typeToAutoImportableTypeNode(c, t, caseBlock, factory);
+      if (typeNode === undefined) return undefined;
+      const expression = typeNodeToExpression(typeNode, singleQuote, factory);
+      if (expression === undefined) return undefined;
+      elements.push(expression);
+      continue;
+    }
     const literal = literalValueOf(t);
     if (trackerHasLiteral(tracker, literal)) continue;
     switch (literal.kind) {
@@ -3026,6 +3062,106 @@ function getExhaustiveCaseSnippets(
     sortText: SortText.GlobalsOrKeywords,
     insertText: clauses.join('\n'),
   };
+}
+
+/**
+ * The type node of `t` with import types (`import("./a").E.A`) written as references to the names they import
+ * (`E.A`), as tsgo's TypeToAutoImportableTypeNode writes them. The imports it adds for those names are text edits,
+ * which completion answers do not include.
+ */
+function typeToAutoImportableTypeNode(c: Checker, t: Type, contextNode: Node, factory: EmitContext): Node | undefined {
+  const idToSymbol = new Map<Node, Symbol>();
+  const typeNode = typeToTypeNode(c, t, contextNode, 0, NodeBuilderInternalFlags.None, undefined, idToSymbol);
+  return typeNode === undefined ? undefined : toImportableReference(typeNode, idToSymbol, factory);
+}
+
+// The import types of a type node, where an expression can be made of it, as references.
+function toImportableReference(node: Node, idToSymbol: ReadonlyMap<Node, Symbol>, factory: EmitContext): Node {
+  if (node instanceof ImportTypeNode && node.qualifier !== undefined && isLiteralImportTypeArgument(node.argument)) {
+    const first = getFirstIdentifier(node.qualifier);
+    const symbol = idToSymbol.get(first);
+    // An import type the builder copied from source names what it imports itself.
+    if (symbol === undefined) return node;
+    const name = getNameForExportedSymbol(symbol);
+    const qualifier =
+      name !== first.text
+        ? replaceFirstIdentifier(node.qualifier, factory.createIdentifier(name), factory)
+        : node.qualifier;
+    return factory.created(new TypeReferenceNode(qualifier, node.typeArguments));
+  }
+  if (node instanceof IndexedAccessTypeNode) {
+    return factory.created(
+      new IndexedAccessTypeNode(
+        toImportableReference(node.objectType, idToSymbol, factory),
+        toImportableReference(node.indexType, idToSymbol, factory),
+      ),
+    );
+  }
+  if (node instanceof ParenthesizedTypeNode) {
+    return factory.created(new ParenthesizedTypeNode(toImportableReference(node.type, idToSymbol, factory)));
+  }
+  return node;
+}
+
+function isLiteralImportTypeArgument(argument: Node): boolean {
+  return argument instanceof LiteralTypeNode && argument.literal.kind === SyntaxKind.StringLiteral;
+}
+
+function replaceFirstIdentifier(name: Node, identifier: Identifier, factory: EmitContext): Node {
+  if (name instanceof QualifiedName) {
+    return factory.created(new QualifiedName(replaceFirstIdentifier(name.left, identifier, factory), name.right));
+  }
+  return identifier;
+}
+
+/** The name an exported symbol is imported by: a default export's local or file name, else its own. */
+function getNameForExportedSymbol(symbol: Symbol): string {
+  if (symbol.name === InternalSymbolName.ExportEquals || symbol.name === InternalSymbolName.Default) {
+    const name = getDefaultLikeExportNameFromDeclaration(symbol);
+    if (name !== '') return name;
+    const moduleName = symbol.parent!.name;
+    return moduleSpecifierToValidIdentifier(tryGetAmbientModuleNameFromSymbolName(moduleName) ?? moduleName, false);
+  }
+  return symbol.name;
+}
+
+/** The expression a type node names: `E.A`, `E['a-b']`, a literal, or undefined for other type nodes. */
+function typeNodeToExpression(typeNode: Node, singleQuote: boolean, factory: EmitContext): Node | undefined {
+  switch (typeNode.kind) {
+    case SyntaxKind.TypeReference:
+      return entityNameToExpression((typeNode as TypeReferenceNode).typeName, factory);
+    case SyntaxKind.IndexedAccessType: {
+      const object = typeNodeToExpression((typeNode as IndexedAccessTypeNode).objectType, singleQuote, factory);
+      const index = typeNodeToExpression((typeNode as IndexedAccessTypeNode).indexType, singleQuote, factory);
+      if (object === undefined || index === undefined) return undefined;
+      return factory.created(new ElementAccessExpression(object, undefined, index, NodeFlags.None));
+    }
+    case SyntaxKind.LiteralType: {
+      const literal = (typeNode as LiteralTypeNode).literal;
+      if (literal instanceof StringLiteral)
+        return factory.createStringLiteral(literal.text, singleQuote ? TokenFlags.SingleQuote : TokenFlags.None);
+      if (literal instanceof NumericLiteral)
+        return factory.created(new NumericLiteral(literal.text, literal.tokenFlags));
+      return undefined;
+    }
+    case SyntaxKind.ParenthesizedType: {
+      const expression = typeNodeToExpression((typeNode as ParenthesizedTypeNode).type, singleQuote, factory);
+      if (expression === undefined) return undefined;
+      return expression instanceof Identifier ? expression : factory.created(new ParenthesizedExpression(expression));
+    }
+    case SyntaxKind.TypeQuery:
+      return entityNameToExpression((typeNode as TypeQueryNode).exprName, factory);
+  }
+  return undefined;
+}
+
+function entityNameToExpression(name: Node, factory: EmitContext): Node {
+  if (name instanceof QualifiedName) {
+    return factory.created(
+      new PropertyAccessExpression(entityNameToExpression(name.left, factory), undefined, name.right, NodeFlags.None),
+    );
+  }
+  return name;
 }
 
 function trackerHasLiteral(tracker: CaseClauseTracker, literal: LiteralValue): boolean {

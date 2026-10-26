@@ -883,6 +883,14 @@ export class CaseClauseTracker {
   hasBigInt(value: string): boolean {
     return this.bigInts.has(value);
   }
+
+  addString(value: string): void {
+    this.strings.add(value);
+  }
+
+  addNumber(value: number): void {
+    this.numbers.add(value);
+  }
 }
 
 function literalText(node: Node): string {
