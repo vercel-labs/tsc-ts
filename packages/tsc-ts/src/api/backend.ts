@@ -2,12 +2,16 @@
 // an opaque reference that callers pass back in.
 import {
   type ExternalModuleIndicatorOptions,
+  getLocals,
+  getLocalSymbol,
+  getSymbol,
   type Node as AstNode,
   ParseOptions,
   ScriptKind,
   type SourceFile as AstSourceFile,
 } from '../compiler/ast.js';
 import { getTouchingPropertyName } from '../compiler/astnav.js';
+import { hash128String, toHex } from '../compiler/xxh3.js';
 import { getSourceFileOfNode } from '../compiler/binder-utilities.js';
 import type { Checker } from '../compiler/checker.js';
 import {
@@ -56,13 +60,21 @@ import {
   isTupleType as checkerIsTupleType,
 } from '../compiler/checker-type-factory.js';
 import { getTypeFromTypeNode } from '../compiler/checker-type-nodes.js';
-import { getFalseTypeFromConditionalType, getTrueTypeFromConditionalType } from '../compiler/checker-type-operators.js';
+import {
+  getConstraintTypeFromMappedType,
+  getFalseTypeFromConditionalType,
+  getNameTypeFromMappedType,
+  getTemplateTypeFromMappedType,
+  getTrueTypeFromConditionalType,
+  getTypeParameterFromMappedType,
+} from '../compiler/checker-type-operators.js';
 import {
   type ConditionalType,
   type IndexedAccessType,
   type InterfaceType,
   type IntrinsicType,
   type LiteralType,
+  type MappedType,
   ObjectFlags,
   type Signature as CheckerSignature,
   SignatureKind as CheckerSignatureKind,
@@ -78,7 +90,7 @@ import {
   type UnionOrIntersectionType,
 } from '../compiler/checker-types.js';
 import { decodeNodes } from '../compiler/decoder.js';
-import type { Diagnostic as CompilerDiagnostic } from '../compiler/diagnostics.js';
+import { type Diagnostic as CompilerDiagnostic, Locale } from '../compiler/diagnostics.js';
 import { encodeNode, encodeSourceFile as encodeFile, NodeIndexTable } from '../compiler/encoder.js';
 import { CompilerHost } from '../compiler/file-loader.js';
 import { CachedFileSystem, DirectoryEntries, FileSystem } from '../compiler/file-system.js';
@@ -96,17 +108,17 @@ import { Printer, PrinterOptions } from '../compiler/printer/printer.js';
 import { Program } from '../compiler/program.js';
 import { CheckedProgram } from '../compiler/program-checker.js';
 import { type ApiCompilerOptions as CompilerOptions, compilerOptionsOf } from '../library/options.js';
-import type { Diagnostic } from '../library/types.js';
 export type { ApiCompilerOptions as CompilerOptions } from '../library/options.js';
+import { checkedFileDiagnostics, type DiagnosticKind, programDiagnostics } from '../library/diagnostics.js';
 import {
-  checkedFileDiagnostics,
-  type DiagnosticKind,
-  diagnosticOf,
-  programDiagnostics,
-} from '../library/diagnostics.js';
-import { getDeclarations, getSymbolId, type Symbol as CompilerSymbol, type SymbolTable } from '../compiler/symbol.js';
+  getDeclarations,
+  getSymbolId,
+  type Symbol as CompilerSymbol,
+  SymbolFlags,
+  type SymbolTable,
+} from '../compiler/symbol.js';
 import type { SyntaxKind } from '../compiler/syntax-kind.js';
-import { ConfigParser, ParsedCommandLine } from '../compiler/tsconfig.js';
+import { ConfigParser, JsonArray, JsonObject, type JsonValue, ParsedCommandLine } from '../compiler/tsconfig.js';
 import { isTypeAssignableTo } from '../compiler/relations.js';
 import { typeToString } from '../compiler/type-printer.js';
 import { type CompletionList, getCompletionsAtPosition } from '../services/completions.js';
@@ -165,7 +177,36 @@ export interface SourceFileMetadata {
   impliedNodeFormat: number;
 }
 
-export type { Diagnostic } from '../library/types.js';
+/**
+ * A diagnostic as the API answers it. One in a file also has the zero-based lines and UTF-16 characters of `pos` and
+ * `end`, and the source lines to show it with: each from the first to the last, or the first two and the last two
+ * of five or more, as TypeScript 7.1 sends them.
+ */
+export interface Diagnostic {
+  readonly fileName: string | undefined;
+  readonly pos: number;
+  readonly end: number;
+  readonly startPosition: DiagnosticPosition | undefined;
+  readonly endPosition: DiagnosticPosition | undefined;
+  readonly sourceLines: readonly DiagnosticSourceLine[];
+  readonly code: number;
+  readonly category: number;
+  readonly text: string;
+  readonly reportsUnnecessary: boolean;
+  readonly reportsDeprecated: boolean;
+  readonly messageChain: readonly Diagnostic[];
+  readonly relatedInformation: readonly Diagnostic[];
+}
+
+export interface DiagnosticPosition {
+  readonly line: number;
+  readonly character: number;
+}
+
+export interface DiagnosticSourceLine {
+  readonly line: number;
+  readonly text: string;
+}
 
 export type { DiagnosticKind } from '../library/diagnostics.js';
 
@@ -318,6 +359,16 @@ export class Project {
     return compilerOptionsOf(this.config.options);
   }
 
+  /** The project's parsed config, as projects in snapshot answers have it (parsedCommandLine). */
+  configFileData(): ConfigFileData {
+    return configFileDataOf(this.config);
+  }
+
+  /** The directory the project's file names are relative to: its config's, or the session's for the inferred one. */
+  currentDirectory(): string {
+    return this.config.currentDirectory;
+  }
+
   sourceFiles(): SourceFile[] {
     return this.program.getSourceFiles().slice();
   }
@@ -343,13 +394,16 @@ export class Project {
   }
 
   diagnostics(kind: DiagnosticKind, file: SourceFile | undefined): Diagnostic[] {
-    return programDiagnostics(this.checked, kind, file).map(diagnosticOf);
+    return programDiagnostics(this.checked, kind, file).map(apiDiagnosticOf);
   }
 
   /** The semantic diagnostics of each of `files` and the global diagnostics, after checking only them. */
   checkedFileDiagnostics(files: readonly SourceFile[]): { files: Diagnostic[][]; global: Diagnostic[] } {
     const result = checkedFileDiagnostics(this.checked, files);
-    return { files: result.files.map((list) => list.map(diagnosticOf)), global: result.global.map(diagnosticOf) };
+    return {
+      files: result.files.map((list) => list.map(apiDiagnosticOf)),
+      global: result.global.map(apiDiagnosticOf),
+    };
   }
 
   /** Completions at a UTF-16 position; throws `NeedsAutoImports` where tsgo needs its auto-import registry. */
@@ -642,6 +696,23 @@ export class Project {
     return this.checker.argumentsSymbol;
   }
 
+  /** A mapped type's type parameter, constraint, name and template types, resolved as tsc resolves them. */
+  mappedTypeComponents(type: Type): {
+    typeParameter: Type;
+    constraintType: Type;
+    nameType: Type | undefined;
+    templateType: Type;
+  } {
+    const c = this.checker;
+    const mapped = type as MappedType;
+    return {
+      typeParameter: getTypeParameterFromMappedType(c, mapped),
+      constraintType: getConstraintTypeFromMappedType(c, mapped),
+      nameType: getNameTypeFromMappedType(c, mapped),
+      templateType: getTemplateTypeFromMappedType(c, mapped),
+    };
+  }
+
   // Sorts symbols in the checker's declaration order.
   sortSymbols(symbols: Symbol[]): Symbol[] {
     const c = this.checker;
@@ -649,22 +720,77 @@ export class Project {
   }
 }
 
-export interface ParsedConfig {
+/** A parsed config as the API answers it (ConfigFileResponse). */
+export interface ConfigFileData {
   fileNames: string[];
   options: CompilerOptions;
+  projectReferences: ProjectReferenceData[];
+  typeAcquisition: TypeAcquisitionData | undefined;
+  /** For a config file: its `compileOnSave`, or false. */
+  compileOnSave: boolean | undefined;
+  /** The config file's JSON, or undefined without one. */
+  raw: unknown;
+  /** The errors of its options, without those of its syntax. */
+  errors: Diagnostic[];
+}
+
+export interface ProjectReferenceData {
+  path: string;
+  originalPath: string;
+  circular: boolean;
+}
+
+export interface TypeAcquisitionData {
+  enable?: boolean;
+  include?: string[];
+  exclude?: string[];
+  disableFilenameBasedTypeAcquisition?: boolean;
+}
+
+function configFileDataOf(config: ParsedCommandLine): ConfigFileData {
+  const raw = config.raw;
+  const rawObject = raw instanceof JsonObject ? raw : undefined;
+  const compileOnSave = rawObject?.entries.get('compileOnSave');
+  const typeAcquisition = config.typeAcquisition;
+  return {
+    fileNames: config.fileNames.slice(),
+    options: compilerOptionsOf(config.options),
+    projectReferences: config.projectReferences.map((reference) => ({
+      path: reference.path,
+      originalPath: reference.originalPath,
+      circular: reference.circular,
+    })),
+    typeAcquisition:
+      rawObject?.entries.has('typeAcquisition') === true && typeAcquisition !== undefined
+        ? { ...typeAcquisition }
+        : undefined,
+    compileOnSave: config.configFile === undefined ? undefined : typeof compileOnSave === 'boolean' && compileOnSave,
+    raw: raw === undefined ? undefined : plainJson(raw),
+    errors: config.errors.map(apiDiagnosticOf),
+  };
+}
+
+/** A config file's JSON as plain values, in source order. */
+function plainJson(value: JsonValue): unknown {
+  if (value instanceof JsonArray) return value.items.map(plainJson);
+  if (value instanceof JsonObject) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of value.entries) out[key] = plainJson(item);
+    return out;
+  }
+  return value;
 }
 
 // Parses a config file without loading its program; undefined if it can't
 // be read.
-export function parseConfigFile(host: ProjectHost, configFileName: string): ParsedConfig | undefined {
+export function parseConfigFile(host: ProjectHost, configFileName: string): ConfigFileData | undefined {
   const config = new ConfigParser(new HostFileSystem(host), host.currentDirectory).parseConfigFile(
     configFileName,
     undefined,
     undefined,
     [],
   );
-  if (config === undefined) return undefined;
-  return { fileNames: config.fileNames.slice(), options: compilerOptionsOf(config.options) };
+  return config === undefined ? undefined : configFileDataOf(config);
 }
 
 /**
@@ -685,6 +811,10 @@ export class SessionFiles {
   // Paths `realpath` returned, which are their own real paths.
   private readonly realPaths = new Set<string>();
   private readonly parsed = new Map<string, SourceFile>();
+  // The node IDs of the files the client was told about, assigned on first use. A file parsed again gets a new one,
+  // as tsc's node IDs do; a client of `--listen` sees the IDs a new server would give.
+  private readonly nodeIds = new Map<SourceFile, number>();
+  private nextNodeId = 1;
 
   constructor(
     private readonly toPath: (fileName: string) => string,
@@ -758,6 +888,18 @@ export class SessionFiles {
     this.invalidateAll();
     this.linkedPaths.clear();
     this.realPaths.clear();
+    this.nodeIds.clear();
+    this.nextNodeId = 1;
+  }
+
+  /** The node ID of a parsed file, which names it in API answers (SourceFileDescriptor, getSourceFile). */
+  nodeId(file: SourceFile): number {
+    let id = this.nodeIds.get(file);
+    if (id === undefined) {
+      id = this.nextNodeId++;
+      this.nodeIds.set(file, id);
+    }
+    return id;
   }
 
   /** The parsed file of `text`, reused from an earlier parse with the same inputs. */
@@ -767,12 +909,7 @@ export class SessionFiles {
     externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
     text: string,
   ): SourceFile {
-    const key =
-      fileName +
-      '\u0000' +
-      path +
-      (externalModuleIndicatorOptions.jsx ? '\u0000j' : '\u0000') +
-      (externalModuleIndicatorOptions.force ? 'f' : '');
+    const key = parsedKey(fileName, path, externalModuleIndicatorOptions.jsx, externalModuleIndicatorOptions.force);
     const cached = this.parsed.get(key);
     if (cached !== undefined && cached.text === text) return cached;
     const file = parseSourceFile(
@@ -784,14 +921,29 @@ export class SessionFiles {
     return file;
   }
 
-  /** Keeps only the parsed files of `projects`, the projects of the latest snapshot. */
-  retain(projects: readonly Project[]): void {
-    const used = new Set<SourceFile>();
+  /**
+   * The file last parsed with these inputs, which the session still keeps. `parseOptionsKey` holds the module
+   * detection options as `sourceFileParseOptionsKey` gives them.
+   */
+  cachedSourceFile(fileName: string, path: string, parseOptionsKey: number): SourceFile | undefined {
+    return this.parsed.get(parsedKey(fileName, path, (parseOptionsKey & 1) !== 0, (parseOptionsKey & 2) !== 0));
+  }
+
+  /** Keeps only the parsed files of `projects`, the projects of live snapshots, and `files`. */
+  retain(projects: readonly Project[], files: readonly SourceFile[]): void {
+    const used = new Set<SourceFile>(files);
     for (const project of projects) for (const file of project.sourceFiles()) used.add(file);
     const unused: string[] = [];
     for (const [key, file] of this.parsed) if (!used.has(file)) unused.push(key);
     for (const key of unused) this.parsed.delete(key);
+    const unnamed: SourceFile[] = [];
+    for (const file of this.nodeIds.keys()) if (!used.has(file)) unnamed.push(file);
+    for (const file of unnamed) this.nodeIds.delete(file);
   }
+}
+
+function parsedKey(fileName: string, path: string, jsx: boolean, force: boolean): string {
+  return fileName + '\u0000' + path + (jsx ? '\u0000j' : '\u0000') + (force ? 'f' : '');
 }
 
 function projectCompilerHost(fs: CachedFileSystem, host: ProjectHost): ProjectCompilerHost {
@@ -892,15 +1044,24 @@ export function sameFileContent(a: SourceFile, b: SourceFile): boolean {
   return a === b || a.text === b.text;
 }
 
-// Encodes a source file in the API's binary AST format.
-export function encodeSourceFile(file: SourceFile): Uint8Array {
-  return encodeFile(file);
+// Encodes a source file in the API's binary AST format. The encoding's header names the file by its node ID
+// (`SessionFiles.nodeId`), as tsc's getSourceFile answer does.
+export function encodeSourceFile(file: SourceFile, nodeId: number): Uint8Array {
+  return withSourceFileId(encodeFile(file), nodeId);
 }
 
 // The file's encoding, made on first use and kept on the file. A parsed file's encoding does not change: lazily
-// parsed JSDoc encodes the same whenever it is parsed.
-export function keptEncodingOf(file: SourceFile): Uint8Array {
-  return (file.apiEncoding ??= encodeFile(file));
+// parsed JSDoc encodes the same whenever it is parsed, and its node ID stays.
+export function keptEncodingOf(file: SourceFile, nodeId: number): Uint8Array {
+  return withSourceFileId((file.apiEncoding ??= encodeFile(file)), nodeId);
+}
+
+// Header bytes 44 to 51: the source file ID, a little-endian u64.
+function withSourceFileId(data: Uint8Array, id: number): Uint8Array {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  view.setUint32(44, id >>> 0, true);
+  view.setUint32(48, Math.floor(id / 0x100000000), true);
+  return data;
 }
 
 // Decodes a node from the API's binary AST format; throws on malformed data.
@@ -928,6 +1089,10 @@ export function nodeKind(node: Node): number {
   return node.kind;
 }
 
+export function nodePos(node: Node): number {
+  return node.pos;
+}
+
 export function sourceFileOfNode(node: Node): SourceFile {
   return getSourceFileOfNode(node);
 }
@@ -951,6 +1116,73 @@ export function nodeIndex(node: Node): number {
 export function nodeAtIndex(file: SourceFile, index: number): Node | undefined {
   const nodes = nodeIndexTable(file).nodes;
   return index < nodes.length ? nodes[index] : undefined;
+}
+
+// Source files as API references name them (SourceFileDescriptor).
+
+/** The xxh3-128 hash of the file's text, as 32 hexadecimal digits. */
+export function sourceFileHash(file: SourceFile): string {
+  return toHex(hash128String(file.text));
+}
+
+/** The file's module detection options as tsc encodes them: 1 for `jsx`, 2 for `force`. */
+export function sourceFileParseOptionsKey(file: SourceFile): number {
+  const options = file.externalModuleIndicatorOptions;
+  return (options.jsx ? 1 : 0) | (options.force ? 2 : 0);
+}
+
+export function sourceFileScriptKind(file: SourceFile): number {
+  return file.scriptKind;
+}
+
+/**
+ * The source file that owns a symbol's identity for clients, or undefined when its snapshot owns it: a transient
+ * symbol (a merged or checker-made one), or one without a declaring file. A class's prototype, which has no
+ * declaration, belongs to its class's file.
+ */
+export function symbolOwnerFile(symbol: Symbol): SourceFile | undefined {
+  if ((symbol.flags & SymbolFlags.Transient) !== 0) return undefined;
+  let declaring: Symbol | undefined = symbol;
+  if (getDeclarations(symbol).length === 0) {
+    if ((symbol.flags & SymbolFlags.Prototype) === 0) return undefined;
+    declaring = symbol.parent;
+    if (declaring === undefined || (declaring.flags & SymbolFlags.Transient) !== 0) return undefined;
+  }
+  const declarations = getDeclarations(declaring);
+  return declarations.length === 0 ? undefined : getSourceFileOfNode(declarations[0]);
+}
+
+/**
+ * The symbols a file owns, by id: those of its nodes (their symbols, local symbols and locals), their parents,
+ * export symbols, members and exports, its global exports and its pattern ambient modules, as tsc indexes them to
+ * resolve file references.
+ */
+export function fileSymbolIndex(file: SourceFile): Map<number, Symbol> {
+  const index = file.apiSymbolIndex;
+  if (index !== undefined) return index;
+  const symbols = new Map<number, Symbol>();
+  const add = (symbol: Symbol | undefined): void => {
+    if (symbol === undefined || (symbol.flags & SymbolFlags.Transient) !== 0) return;
+    if (symbolOwnerFile(symbol) !== file) return;
+    const id = getSymbolId(symbol);
+    if (symbols.has(id)) return;
+    symbols.set(id, symbol);
+    add(symbol.parent);
+    add(symbol.exportSymbol);
+    if (symbol.members !== undefined) for (const member of symbol.members.values()) add(member);
+    if (symbol.exports !== undefined) for (const exported of symbol.exports.values()) add(exported);
+  };
+  for (const node of nodeIndexTable(file).nodes) {
+    if (node === undefined) continue;
+    add(getSymbol(node));
+    add(getLocalSymbol(node));
+    const locals = getLocals(node);
+    if (locals !== undefined) for (const local of locals.values()) add(local);
+  }
+  if (file.globalExports !== undefined) for (const exported of file.globalExports.values()) add(exported);
+  for (const module of file.patternAmbientModules) add(module.symbol);
+  file.apiSymbolIndex = symbols;
+  return symbols;
 }
 
 // Symbols.
@@ -1134,6 +1366,24 @@ export function isTupleType(type: Type): boolean {
   return checkerIsTupleType(type);
 }
 
+/** Whether `type` is a tuple type itself, the target of the references to it. */
+export function isTupleTypeTarget(type: Type): boolean {
+  return checkerIsTupleType(type) && (type as TypeReference).target === type;
+}
+
+/** The declarations of a tuple type's labeled elements, by element; undefined for an element without a label. */
+export function tupleLabeledDeclarations(type: Type): (Node | undefined)[] {
+  return (type as TupleType).elementInfos.map((info) => info.labeledDeclaration);
+}
+
+export function interfaceThisType(type: Type): Type | undefined {
+  return (type as InterfaceType).thisType;
+}
+
+export function isMappedType(type: Type): boolean {
+  return (type.objectFlags & ObjectFlags.Mapped) !== 0;
+}
+
 // Signatures.
 
 export function signatureId(signature: Signature): number {
@@ -1169,4 +1419,68 @@ export function signatureTarget(signature: Signature): Signature | undefined {
 // Describes an exception thrown by the compiler, like a Go panic message.
 export function panicMessage(e: unknown): string {
   return 'panic: ' + (e instanceof Error ? e.message : String(e));
+}
+
+// Diagnostics.
+
+function apiDiagnosticOf(d: CompilerDiagnostic): Diagnostic {
+  const file = d.file;
+  let pos = d.pos;
+  let end = d.end;
+  let startPosition: DiagnosticPosition | undefined = undefined;
+  let endPosition: DiagnosticPosition | undefined = undefined;
+  let sourceLines: DiagnosticSourceLine[] = [];
+  if (file !== undefined) {
+    const length = file.text.length;
+    pos = Math.max(0, Math.min(pos, length));
+    end = Math.max(pos, Math.min(end, length));
+    const lineStarts = file.getLineStarts();
+    const startLine = lineOfPosition(lineStarts, pos);
+    const endLine = lineOfPosition(lineStarts, end);
+    startPosition = { line: startLine, character: pos - lineStarts[startLine] };
+    endPosition = { line: endLine, character: end - lineStarts[endLine] };
+    sourceLines = diagnosticSourceLines(file.text, lineStarts, startLine, endLine);
+  }
+  return {
+    fileName: file?.fileName,
+    pos,
+    end,
+    startPosition,
+    endPosition,
+    sourceLines,
+    code: d.code,
+    category: d.category,
+    text: d.localize(Locale.Default),
+    reportsUnnecessary: d.reportsUnnecessary,
+    reportsDeprecated: d.reportsDeprecated,
+    messageChain: d.messageChain.map(apiDiagnosticOf),
+    relatedInformation: d.relatedInformation.map(apiDiagnosticOf),
+  };
+}
+
+/** The line of `position`: the last line starting at or before it. */
+function lineOfPosition(lineStarts: readonly number[], position: number): number {
+  let low = 0;
+  let high = lineStarts.length - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >>> 1;
+    if (lineStarts[middle] <= position) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
+function diagnosticSourceLines(
+  text: string,
+  lineStarts: readonly number[],
+  firstLine: number,
+  lastLine: number,
+): DiagnosticSourceLine[] {
+  const lines: number[] = [];
+  if (lastLine - firstLine >= 4) lines.push(firstLine, firstLine + 1, lastLine - 1, lastLine);
+  else for (let line = firstLine; line <= lastLine; line++) lines.push(line);
+  return lines.map((line) => ({
+    line,
+    text: text.slice(lineStarts[line], line + 1 < lineStarts.length ? lineStarts[line + 1] : text.length),
+  }));
 }

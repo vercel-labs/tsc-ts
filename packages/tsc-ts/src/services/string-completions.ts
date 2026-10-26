@@ -88,8 +88,10 @@ export function getStringLiteralCompletions(
   contextToken: Node | undefined,
   includeSymbols: boolean,
 ): CompletionList | undefined {
-  if (isInReferenceComment(file, position))
-    return convertPathCompletions(getTripleSlashReferenceCompletions(program, file, position), file, position);
+  if (isInReferenceComment(file, position)) {
+    const completions = getTripleSlashReferenceCompletions(program, file, position);
+    return completions === undefined ? undefined : convertPathCompletions(completions, file, position);
+  }
   if (!isInString(file, position, contextToken)) return undefined;
   if (contextToken === undefined || !isStringLiteralLike(contextToken)) return undefined;
   const entries = getStringLiteralCompletionEntries(c, program, file, contextToken, position);
@@ -106,9 +108,7 @@ function convertStringLiteralCompletions(
   includeSymbols: boolean,
 ): CompletionList | undefined {
   if (completion === undefined) return undefined;
-  // An empty path list is no completion list, as in tsgo.
-  if (completion.fromPaths !== undefined && completion.fromPaths.length > 0)
-    return convertPathCompletions(completion.fromPaths, file, position);
+  if (completion.fromPaths !== undefined) return convertPathCompletions(completion.fromPaths, file, position);
   if (completion.fromProperties !== undefined) {
     const data = newCompletionData(file, contextToken);
     data.symbols = completion.fromProperties.symbols;

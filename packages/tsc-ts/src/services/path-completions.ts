@@ -996,14 +996,14 @@ export function getTripleSlashReferenceCompletions(
   program: Program,
   file: SourceFile,
   position: number,
-): PathCompletion[] {
+): PathCompletion[] | undefined {
   const token = getTokenAtPosition(file, position);
-  if (token === undefined) return [];
+  if (token === undefined) return undefined;
   const ranges = getLeadingCommentRanges(file.text, token.pos) ?? [];
   const range = ranges.find((r) => position >= r.pos && position <= r.end);
-  if (range === undefined) return [];
+  if (range === undefined) return undefined;
   const fragment = parseTripleSlashDirectiveFragment(file.text.substring(range.pos, position));
-  if (fragment === undefined) return [];
+  if (fragment === undefined) return undefined;
   const scriptPath = getDirectoryPath(file.path);
   const completions = new PathCompletions(program, undefined);
   if (fragment.kind === 'path') {

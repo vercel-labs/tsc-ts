@@ -8273,6 +8273,8 @@ export class SourceFile extends Node {
   textCount: number;
   /** The API's binary encoding of this file, when an API server keeps it (`keptEncodingOf`). */
   apiEncoding: Uint8Array | undefined;
+  /** The symbols the file owns, by id, as API file symbol references resolve them; made on first use. */
+  apiSymbolIndex: Map<number, Symbol> | undefined;
   /** Module specifiers of imports, exports, `require` calls and `import()` types, in source order. */
   imports: Node[];
   /** Names of `declare module "x"` augmentations and `declare global` blocks in modules. */
@@ -8339,6 +8341,7 @@ export class SourceFile extends Node {
     this.nodeCount = 0;
     this.textCount = 0;
     this.apiEncoding = undefined;
+    this.apiSymbolIndex = undefined;
     this.imports = [];
     this.moduleAugmentations = emptyNodes;
     this.ambientModuleNames = emptyStrings;

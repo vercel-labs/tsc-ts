@@ -901,9 +901,10 @@ export const enum QuotePreference {
   Single,
 }
 
+// The quotes of the file's first module specifier, without the import of tslib that importHelpers adds.
 export function getQuotePreference(file: SourceFile): QuotePreference {
   for (const specifier of file.imports) {
-    if (specifier instanceof StringLiteral)
+    if (specifier instanceof StringLiteral && specifier.parent!.pos >= 0)
       return (specifier.tokenFlags & TokenFlags.SingleQuote) !== 0 ? QuotePreference.Single : QuotePreference.Double;
   }
   return QuotePreference.Double;
@@ -941,7 +942,7 @@ function stripQuotes(name: string): string {
 export function quote(file: SourceFile, text: string): string {
   const quoted = stringifyJson(text);
   if (getQuotePreference(file) === QuotePreference.Single)
-    return stripQuotes(quoted).replaceAll("'", "\\'").replaceAll('\\"', '"');
+    return "'" + stripQuotes(quoted).replaceAll("'", "\\'").replaceAll('\\"', '"') + "'";
   return quoted;
 }
 

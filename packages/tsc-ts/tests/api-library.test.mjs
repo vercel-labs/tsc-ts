@@ -1,4 +1,4 @@
-// tsc-ts/api in process against TypeScript 7.0.2's `tsc --api` (the reference the --api tests use): the
+// tsc-ts/api in process against TypeScript's `tsc --api` at the pinned upstream (the reference the --api tests use): the
 // same program, diagnostics, symbols, types, signatures and parsed files for the same queries. Answers are
 // compared by what identifies them across processes: names, flags, node handles (index, kind and path)
 // and the text of types.
@@ -41,7 +41,7 @@ async function open(fixture) {
   const program = api.createProgramFromConfigFile(config, hostFor(dir));
   const tsgo = new Client([realTsc], dir);
   await tsgo.json('initialize');
-  const update = await tsgo.json('updateSnapshot', { openProjects: [config] });
+  const update = await tsgo.snapshot({ openProjects: [config] });
   const base = { snapshot: update.snapshot, project: update.projects[0].id };
   const tables = new Map();
   const handle = (node) => {
@@ -114,6 +114,17 @@ const withoutSymbolId = (name) => (name.startsWith('__@') ? name.replace(/@\d+$/
  * Diagnostics as tsgo's API writes them: without the fields that are undefined, false or empty, which the
  * library always sets.
  */
+/** tsgo's diagnostics without the line and character positions and source lines, which the library does not give. */
+function withoutPositions(diagnostics) {
+  return diagnostics.map((diagnostic) => {
+    const d = { ...diagnostic };
+    for (const key of ['startPosition', 'endPosition', 'sourceLines']) delete d[key];
+    if (d.messageChain !== undefined) d.messageChain = withoutPositions(d.messageChain);
+    if (d.relatedInformation !== undefined) d.relatedInformation = withoutPositions(d.relatedInformation);
+    return d;
+  });
+}
+
 function wire(diagnostics) {
   return diagnostics.map((d) => {
     const result = {};
@@ -146,14 +157,22 @@ test('programs and diagnostics are those of tsc --api', { skip, timeout: 300_000
       ['getProgramDiagnostics', 'Program'],
       ['getGlobalDiagnostics', 'Global'],
     ])
-      assert.deepEqual(wire(program[`get${kind}Diagnostics`]()), await tsgo.json(method, base), method);
+      assert.deepEqual(
+        wire(program[`get${kind}Diagnostics`]()),
+        withoutPositions(await tsgo.json(method, base)),
+        method,
+      );
     for (const kind of ['Syntactic', 'Bind', 'Semantic', 'Suggestion', 'Declaration']) {
-      assert.deepEqual(wire(program[`get${kind}Diagnostics`]()), await tsgo.json(`get${kind}Diagnostics`, base), kind);
+      assert.deepEqual(
+        wire(program[`get${kind}Diagnostics`]()),
+        withoutPositions(await tsgo.json(`get${kind}Diagnostics`, base)),
+        kind,
+      );
       for (const file of program.getSourceFiles())
         if (file.fileName.startsWith(dir))
           assert.deepEqual(
             wire(program[`get${kind}Diagnostics`](file)),
-            await tsgo.json(`get${kind}Diagnostics`, { ...base, file: file.fileName }),
+            withoutPositions(await tsgo.json(`get${kind}Diagnostics`, { ...base, files: [file.fileName] })),
             `${kind} ${file.fileName}`,
           );
     }
@@ -259,7 +278,7 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
         visitType(contextual, refContextual, `contextual type at ${location}`);
         expect(
           checker.getConstantValue(node) ?? null,
-          await tsgo.json('getConstantValue', { ...base, location }),
+          (await tsgo.json('getConstantValue', { ...base, location }))?.value ?? null,
           `constant value at ${location}`,
         );
         expect(
@@ -306,7 +325,7 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
           if (symbol !== undefined && refSymbol !== null)
             visitType(
               checker.getTypeOfSymbolAtLocation(symbol, node),
-              await tsgo.json('getTypeOfSymbolAtLocation', { ...base, symbol: refSymbol.id, location }),
+              await tsgo.json('getTypeOfSymbolAtLocation', { ...base, symbol: refSymbol.reference, location }),
               `type of symbol at location ${location}`,
             );
         }
@@ -326,50 +345,48 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
     for (const [symbol, ref, location] of symbols.slice(0, 600)) {
       visitType(
         checker.getTypeOfSymbol(symbol),
-        await tsgo.json('getTypeOfSymbol', { ...base, symbol: ref.id }),
+        await tsgo.json('getTypeOfSymbol', { ...base, symbol: ref.reference }),
         `type of symbol at ${location}`,
       );
       visitType(
         checker.getDeclaredTypeOfSymbol(symbol),
-        await tsgo.json('getDeclaredTypeOfSymbol', { ...base, symbol: ref.id }),
+        await tsgo.json('getDeclaredTypeOfSymbol', { ...base, symbol: ref.reference }),
         `declared type of symbol at ${location}`,
       );
       // getAliasedSymbol takes an alias; tsgo panics on any other symbol, and the library throws.
       if ((symbol.flags & api.SymbolFlags.Alias) !== 0)
         expect(
           describeSymbol(checker.getAliasedSymbol(symbol)),
-          describeTsgoSymbol(await tsgo.json('getAliasedSymbol', { ...base, symbol: ref.id })),
+          describeTsgoSymbol(await tsgo.json('getAliasedSymbol', { ...base, symbol: ref.reference })),
           `aliased symbol at ${location}`,
         );
       else if (!nonAliasChecked) {
         nonAliasChecked = true;
         assert.throws(() => checker.getAliasedSymbol(symbol), api.InternalCompilerError);
-        await assert.rejects(tsgo.json('getAliasedSymbol', { ...base, symbol: ref.id }), /panic/);
+        await assert.rejects(tsgo.json('getAliasedSymbol', { ...base, symbol: ref.reference }), /panic/);
       }
       expect(
         describeSymbol(symbol.getParent()),
         describeTsgoSymbol(
-          ref.parent === undefined ? null : await tsgo.json('getParentOfSymbol', { ...base, objectId: ref.id }),
+          ref.parent === undefined ? null : await tsgo.json('getParentOfSymbol', { symbol: ref.reference }),
         ),
         `parent at ${location}`,
       );
       expect(
         describeSymbol(symbol.getExportSymbol()),
         describeTsgoSymbol(
-          ref.exportSymbol === undefined
-            ? ref
-            : await tsgo.json('getExportSymbolOfSymbol', { ...base, objectId: ref.id }),
+          ref.exportSymbol === undefined ? ref : await tsgo.json('getExportSymbolOfSymbol', { symbol: ref.reference }),
         ),
         `export symbol at ${location}`,
       );
       expect(
         [...symbol.getMembers().keys()].sort(),
-        (await tsgo.json('getMembersOfSymbol', { ...base, objectId: ref.id })).map((m) => m.name).sort(),
+        (await tsgo.json('getMembersOfSymbol', { symbol: ref.reference })).map((m) => m.name).sort(),
         `members at ${location}`,
       );
       expect(
         [...symbol.getExports().keys()].sort(),
-        (await tsgo.json('getExportsOfSymbol', { ...base, objectId: ref.id })).map((m) => m.name).sort(),
+        (await tsgo.json('getExportsOfSymbol', { symbol: ref.reference })).map((m) => m.name).sort(),
         `exports at ${location}`,
       );
     }
@@ -509,7 +526,7 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
             );
             visitType(
               checker.getReturnTypeOfSignature(sig),
-              await tsgo.json('getReturnTypeOfSignature', { ...base, signature: refSig.id }),
+              await tsgo.json('getReturnTypeOfSignature', { ...base, objectId: refSig.id }),
               `return type of ${where}`,
             );
             const predicate = checker.getTypePredicateOfSignature(sig);
@@ -554,12 +571,9 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
           describeTsgoSymbol(await tsgo.json('getPropertyOfType', { ...base, type: ref.id, name: 'missing' })),
           `property missing of ${what}`,
         );
-        for (const [name, method] of [
-          ['isArrayType', 'isArrayType'],
-          ['isTupleType', 'isTupleType'],
-          ['isArrayLikeType', 'isArrayLikeType'],
-        ])
-          expect(checker[name](lib), await tsgo.json(method, { ...base, type: ref.id }), `${name} ${what}`);
+        for (const name of ['isArrayType', 'isArrayLikeType'])
+          expect(checker[name](lib), await tsgo.json(name, { ...base, type: ref.id }), `${name} ${what}`);
+        expect(checker.isTupleType(lib), ref.isTupleType, `isTupleType ${what}`);
         visitType(
           checker.getBaseTypeOfLiteralType(lib),
           await tsgo.json('getBaseTypeOfLiteralType', { ...base, type: ref.id }),
@@ -567,7 +581,7 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
         );
         visitType(
           checker.getNonNullableType(lib),
-          await tsgo.json('getNonNullableType', { ...base, type: ref.id }),
+          await tsgo.json('getNonNullableType', { ...base, objectId: ref.id }),
           `non-nullable ${what}`,
         );
       }
@@ -640,7 +654,7 @@ test('parseSourceFile parses as a one-file project of tsc --api', { skip, timeou
           files: [fileName],
         }),
       );
-      const update = await tsgo.json('updateSnapshot', { openProjects: [config] });
+      const update = await tsgo.snapshot({ openProjects: [config] });
       const reply = await tsgo.request('getSourceFile', {
         snapshot: update.snapshot,
         project: update.projects.find((p) => p.configFileName === config)?.id ?? config,
@@ -650,7 +664,10 @@ test('parseSourceFile parses as a one-file project of tsc --api', { skip, timeou
         compilerOptions: options,
         host: hostFor(dir),
       });
-      assert.deepEqual(Buffer.from(encodeSourceFile(parsed)), Buffer.from(reply.payload), name);
+      // tsgo's encoding names the file by its node id (bytes 44 to 51), where the library's has none.
+      const expected = Buffer.from(reply.payload);
+      expected.fill(0, 44, 52);
+      assert.deepEqual(Buffer.from(encodeSourceFile(parsed)), expected, name);
     }
   } finally {
     await tsgo.close();
@@ -732,7 +749,7 @@ test('getPreEmitDiagnostics gives the diagnostics tsc --api gives, sorted', { sk
       for (const method of methods) {
         const perFile =
           file !== undefined && (method === 'getSyntacticDiagnostics' || method === 'getSemanticDiagnostics');
-        all.push(...(await tsgo.json(method, perFile ? { ...base, file: file.fileName } : base)));
+        all.push(...withoutPositions(await tsgo.json(method, perFile ? { ...base, files: [file.fileName] } : base)));
       }
       return sortedUnique(all);
     };

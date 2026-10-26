@@ -184,7 +184,6 @@ import {
   positionIsASICandidate,
   quote,
   quotePropertyName,
-  stringifyJson,
   isJsxOpeningLikeElement,
 } from './completion-utilities.js';
 import { CompletionItemKind, getCompletionsSymbolKind, getSymbolKind, ScriptElementKind } from './symbol-kinds.js';
@@ -2879,6 +2878,7 @@ export function getCompletionEntriesFromSymbols(
     const symbol = data.symbols[index];
     const origin = data.symbolToOriginInfoMap.get(index);
     const display = getCompletionEntryDisplayNameForSymbol(
+      file,
       symbol,
       origin,
       data.completionKind,
@@ -2939,6 +2939,7 @@ interface DisplayName {
 }
 
 function getCompletionEntryDisplayNameForSymbol(
+  file: SourceFile,
   symbol: Symbol,
   origin: SymbolOriginInfo | undefined,
   completionKind: CompletionKind,
@@ -2968,7 +2969,7 @@ function getCompletionEntryDisplayNameForSymbol(
     case CompletionKind.MemberLike:
       return isComputed ? { name: origin.symbolName, needsConvertPropertyAccess: false } : none;
     case CompletionKind.ObjectPropertyDeclaration:
-      return { name: stringifyJson(name), needsConvertPropertyAccess: false };
+      return { name: quote(file, name), needsConvertPropertyAccess: false };
     case CompletionKind.PropertyAccess:
     case CompletionKind.Global:
       // Names starting with a space aren't offered.
@@ -3058,7 +3059,12 @@ function createCompletionItem(
     }
   }
   const elementKind = getSymbolKind(c, symbol, data.location);
-  const isOptional = (symbol.flags & SymbolFlags.Optional) !== 0;
+  // A member's optional marker: the label of an optional member completion ends with `?`.
+  const isMemberCompletion =
+    data.completionKind === CompletionKind.ObjectPropertyDeclaration ||
+    data.completionKind === CompletionKind.MemberLike ||
+    data.completionKind === CompletionKind.PropertyAccess;
+  const isOptional = isMemberCompletion && (symbol.flags & SymbolFlags.Optional) !== 0;
   return createEntry(name, insertText, '', sortText, elementKind, isOptional, file, position);
 }
 

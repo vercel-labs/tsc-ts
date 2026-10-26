@@ -5,6 +5,7 @@ import { cpSync, existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { Client } from './client.mjs';
+import { symbolKey } from './compare.mjs';
 import { nodeHandles } from './differential.mjs';
 import { tempDir } from './temp.mjs';
 import { typescriptLib as bundledLib, tscTs, tscTsMissing } from './toolchain.mjs';
@@ -30,7 +31,7 @@ async function open() {
   cpSync(resolve('tests/fixtures/project'), dir, { recursive: true });
   const client = new Client(tscTs, dir, env);
   await client.json('initialize');
-  const update = await client.json('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+  const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
   const base = { snapshot: update.snapshot, project: update.projects[0].id };
   // The handles of the copy's nodes, relative to the copy's directory.
   const located = [];
@@ -124,18 +125,26 @@ test(
     const servers = [];
     try {
       const located = probe.located;
+      // Each server's aliases are its own references, which name its copy's files.
       const prelude = async (server) => {
         const locations = located.map((relative) => inCopy(server, relative));
         const params = { ...server.base, locations };
+        const symbols = await server.client.request('getSymbolsAtLocations', params);
+        const aliases = new Map();
+        for (const symbol of JSON.parse(symbols.payload.toString())) {
+          if (symbol !== null && (symbol.flags & 2097152) !== 0)
+            aliases.set(symbolKey(symbol.reference), symbol.reference);
+        }
+        server.aliases = [...aliases.values()];
         return {
           types: answer(server, await server.client.request('getTypeAtLocations', params)),
-          symbols: answer(server, await server.client.request('getSymbolsAtLocations', params)),
+          symbols: answer(server, symbols),
         };
       };
       const seen = await prelude(probe);
       const distinct = (items) => [...new Set(items.filter((item) => item !== null).map((item) => item.id))];
       const types = distinct(seen.types);
-      const aliases = distinct(seen.symbols.filter((symbol) => symbol !== null && (symbol.flags & 2097152) !== 0));
+      const aliases = probe.aliases;
       assert.ok(types.length > 50, `${types.length} types`);
       assert.ok(aliases.length > 3, `${aliases.length} aliases`);
       const succeeds = async (method, params) =>
@@ -175,7 +184,7 @@ test(
       const signatureIds = distinct(signatures);
       assert.deepEqual(
         await many('getReturnTypesOfSignatures', { signatures: signatureIds }),
-        await each(signatureIds, (signature) => one('getReturnTypeOfSignature', { signature })),
+        await each(signatureIds, (signature) => one('getReturnTypeOfSignature', { objectId: signature })),
       );
       for (const kind of [0, 1]) {
         assert.deepEqual(
@@ -187,21 +196,13 @@ test(
         await many('getPropertiesOfTypes', { types }),
         await each(types, (type) => one('getPropertiesOfType', { type })),
       );
-      for (const [batch, method] of [
-        ['isArrayTypes', 'isArrayType'],
-        ['isTupleTypes', 'isTupleType'],
-      ]) {
-        const expected = await each(types, (type) => one(method, { type }));
-        assert.ok(expected.includes(true), method);
-        assert.deepEqual(await many(batch, { types }), expected);
-      }
       assert.deepEqual(
         await many('getBaseTypesOfLiteralTypes', { types: literalTypes }),
         await each(literalTypes, (type) => one('getBaseTypeOfLiteralType', { type })),
       );
       assert.deepEqual(
-        await many('getAliasedSymbols', { symbols: aliases }),
-        await each(aliases, (symbol) => one('getAliasedSymbol', { symbol })),
+        await many('getAliasedSymbols', { symbols: batched.aliases }),
+        await each(single.aliases, (symbol) => one('getAliasedSymbol', { symbol })),
       );
       const values = await each(constants, (relative) =>
         one('getConstantValue', { location: inCopy(single, relative) }),
@@ -219,8 +220,6 @@ test(
         ['getReturnTypesOfSignatures', 'signatures'],
         ['getSignaturesOfTypes', 'types'],
         ['getPropertiesOfTypes', 'types'],
-        ['isArrayTypes', 'types'],
-        ['isTupleTypes', 'types'],
         ['getBaseTypesOfLiteralTypes', 'types'],
         ['getAliasedSymbols', 'symbols'],
         ['getConstantValues', 'locations'],
@@ -230,22 +229,30 @@ test(
         assert.deepEqual(await probe.client.json(method, base), [], method);
       }
       const missing = `1.0.${join(probe.dir, 'missing.ts')}`;
-      for (const [singleMethod, batch, field, good, bad] of [
+      const missingSymbol = { kind: 1, snapshot: base.snapshot, project: base.project, id: 999999999 };
+      for (const [singleMethod, batch, field, plural, good, bad] of [
         [
           'getSignatureFromDeclaration',
           'getSignaturesFromDeclarations',
           'location',
+          'locations',
           inCopy(probe, declarations[0]),
           missing,
         ],
-        ['getConstantValue', 'getConstantValues', 'location', inCopy(probe, constants[0]), missing],
-        ['getReturnTypeOfSignature', 'getReturnTypesOfSignatures', 'signature', signatureIds[0], 999999999],
-        ['getPropertiesOfType', 'getPropertiesOfTypes', 'type', types[0], 999999999],
-        ['getAliasedSymbol', 'getAliasedSymbols', 'symbol', aliases[0], 999999999],
+        ['getConstantValue', 'getConstantValues', 'location', 'locations', inCopy(probe, constants[0]), missing],
+        [
+          'getReturnTypeOfSignature',
+          'getReturnTypesOfSignatures',
+          'objectId',
+          'signatures',
+          signatureIds[0],
+          999999999,
+        ],
+        ['getPropertiesOfType', 'getPropertiesOfTypes', 'type', 'types', types[0], 999999999],
+        ['getAliasedSymbol', 'getAliasedSymbols', 'symbol', 'symbols', aliases[0], missingSymbol],
       ]) {
         const refused = await probe.client.request(singleMethod, { ...base, [field]: bad });
         assert.equal(refused.type, 'error', singleMethod);
-        const plural = field === 'location' ? 'locations' : `${field}s`;
         const refusedBatch = await probe.client.request(batch, { ...base, [plural]: [good, bad] });
         assert.equal(refusedBatch.type, 'error', batch);
         assert.equal(refusedBatch.payload.toString(), refused.payload.toString(), batch);

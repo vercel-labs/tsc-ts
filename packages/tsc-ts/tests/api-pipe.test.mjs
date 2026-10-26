@@ -36,7 +36,7 @@ async function session(client, dir) {
   await call('ping');
   const config = join(dir, 'tsconfig.json');
   await call('parseConfigFile', { file: config });
-  const update = await call('updateSnapshot', { openProjects: [config] });
+  const update = await call('createSnapshot', { openProjects: [config], ensurePrograms: true });
   const base = { snapshot: update.snapshot, project: update.projects[0].id };
   const files = await call('getSourceFileNames', base);
   for (const file of files) if (file.startsWith(dir)) await call('getSourceFile', { ...base, file });
