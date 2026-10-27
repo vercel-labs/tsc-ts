@@ -5,7 +5,9 @@ import { pathToFileURL } from 'node:url';
 import { compileSources } from './temp.mjs';
 
 const out = compileSources('tsc-ts-link-tables-', ['compiler/link-tables.ts']);
-const { CompactLinkTable, PagedIdSet } = await import(pathToFileURL(join(out, 'compiler/link-tables.js')).href);
+const { CompactIntLinkTable, CompactLinkTable, PagedIdSet } = await import(
+  pathToFileURL(join(out, 'compiler/link-tables.js')).href
+);
 
 /** A pseudo-random sequence that is the same in every run. */
 function random(seed) {
@@ -48,6 +50,40 @@ test('CompactLinkTable keeps the values of every id of a full page', () => {
   assert.equal(table.size, 128);
   assert.equal(table.get(0), undefined);
   assert.equal(table.get(1 << 20), undefined);
+});
+
+test('CompactIntLinkTable stores, replaces and clears int32 values like a Map', () => {
+  const next = random(9);
+  for (const span of [64, 300, 5000, 100000]) {
+    const table = new CompactIntLinkTable();
+    const expected = new Map();
+    for (let step = 0; step < 20000; step++) {
+      const id = Math.floor(next() * span);
+      const r = next();
+      if (r < 0.6) {
+        // Values include negative ones and the sign bit, as SymbolFlags can.
+        const value = (step * 2654435761) | 0 || 1;
+        table.set(id, value);
+        expected.set(id, value);
+      } else if (r < 0.8) {
+        table.set(id, 0);
+        expected.delete(id);
+      } else assert.equal(table.get(id), expected.get(id) ?? 0, `span ${span}, step ${step}, id ${id}`);
+    }
+    for (let id = 0; id < Math.min(span, 20000); id++) assert.equal(table.get(id), expected.get(id) ?? 0, `id ${id}`);
+    table.clear();
+    assert.equal(table.get(0), 0);
+  }
+});
+
+test('CompactIntLinkTable keeps the values of every id of a full page', () => {
+  const table = new CompactIntLinkTable();
+  for (let id = 511; id >= 256; id--) table.set(id, id | 0x80000000);
+  for (let id = 256; id < 512; id++) assert.equal(table.get(id), id | 0x80000000);
+  for (let id = 256; id < 512; id += 2) table.set(id, 0);
+  for (let id = 256; id < 512; id++) assert.equal(table.get(id), id % 2 === 0 ? 0 : id | 0x80000000);
+  assert.equal(table.get(0), 0);
+  assert.equal(table.get(1 << 20), 0);
 });
 
 test('PagedIdSet has the ids added to it', () => {
