@@ -1552,13 +1552,15 @@ export class FileLoader {
             includeProcessor.addProcessingDiagnostic(diagnostic);
           continue;
         }
-        const path = task.path;
         for (const diagnostic of task.processingDiagnostics ?? noProcessingDiagnostics)
           includeProcessor.addProcessingDiagnostic(diagnostic);
         if (file === undefined) {
           missingFiles.push(task.normalizedFilePath);
           continue;
         }
+        // The program's maps of the file are keyed by the file's own path: lookups by `file.path` then find
+        // the same string, also for a file a parse thread created, whose path is another string than the task's.
+        const path = file.path === task.path ? file.path : task.path;
         if (task.libFile !== undefined) {
           libFiles.push(file);
           libData.set(file, data);
