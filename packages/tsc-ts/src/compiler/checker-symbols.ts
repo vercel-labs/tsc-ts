@@ -332,6 +332,13 @@ function isES2015OrLaterConstructorName(name: string): boolean {
   );
 }
 
+/**
+ * The name-not-found message of an identifier resolved from its own location, chosen only once the name
+ * isn't found (`onFailedToResolveSymbol`). Choosing it up front, as tsgo does, compares every resolved
+ * identifier's text with the list of names `getCannotFindNameDiagnosticForName` has messages for.
+ */
+export const cannotFindNameAtLocation = -1 as DiagnosticMessage;
+
 function onFailedToResolveSymbol(
   c: Checker,
   location: Node | undefined,
@@ -339,6 +346,7 @@ function onFailedToResolveSymbol(
   meaning: SymbolFlags,
   message: DiagnosticMessage,
 ): void {
+  if (message === cannotFindNameAtLocation) message = getCannotFindNameDiagnosticForName(c, location!);
   let declarationName = name;
   if (location !== undefined) {
     if (location.parent !== undefined && location.parent.kind === SyntaxKind.JSDocLink) return;
@@ -1821,7 +1829,9 @@ export function resolveEntityName(
       ? undefined
       : meaning === SymbolFlags.Namespace || (name.flags & NodeFlags.Synthesized) !== 0
         ? Diagnostics.Cannot_find_namespace_0
-        : getCannotFindNameDiagnosticForName(c, getFirstIdentifier(name));
+        : location === undefined
+          ? cannotFindNameAtLocation
+          : getCannotFindNameDiagnosticForName(c, getFirstIdentifier(name));
     const resolveLocation = location ?? name;
     const text = getText(name);
     if (meaning === SymbolFlags.Namespace) {

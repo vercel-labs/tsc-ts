@@ -723,7 +723,7 @@ export class FileLoader {
 
   private walk(): void {
     for (let work = this.work.pop(); work !== undefined; work = this.work.pop()) {
-      if (this.walkingAhead && this.parsesUnprepared(work.tasks[work.index], work.data)) {
+      if (this.walkingAhead && !this.elides(work) && this.parsesUnprepared(work.tasks[work.index], work.data)) {
         this.work.push(work);
         return;
       }
@@ -1120,6 +1120,15 @@ export class FileLoader {
       }
     }
     data.settled = true;
+  }
+
+  /**
+   * Whether `run` drops `work` without loading its file: a JavaScript file past `maxNodeModuleJsDepth`,
+   * which no parse thread prepares, so the walk ahead does not wait for it.
+   */
+  private elides(work: ParseWork): boolean {
+    const task = work.tasks[work.index];
+    return task.elideOnDepth && (task.increaseDepth ? work.depth + 1 : work.depth) > this.maxNodeModuleJsDepth;
   }
 
   /**
