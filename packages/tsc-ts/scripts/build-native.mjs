@@ -4,26 +4,33 @@
 // native/listen-posix.c, the Unix socket server of `tsc-ts --api --listen`, with clang, or with zig for the
 // SCRIPTC_TARGET that scriptc links for, and links it through native/listen-posix.ffi.json.
 //
-// Optimized builds use profiles/tsc-ts.profdata and check how well it matches the code they compile
-// (profile-match.mjs): below 95% of the functions the profile describes they warn, and below 90% a build in CI
-// (the CI environment variable is set) fails. Windows builds print the match without checking it. Other arguments go
-// to `scriptc build`, except:
+// Optimized builds use a committed profile (profile-phases.mjs): profiles/tsc-ts.cs.profdata, collected in two phases,
+// when the scriptc accepts a second profile phase, and profiles/tsc-ts.profdata, collected in one phase, otherwise.
+// They check how well the profile matches the code they compile (profile-match.mjs): below 95% of the functions the
+// profile describes they warn, and below 90% a build in CI (the CI environment variable is set) fails. Windows builds
+// print the match without checking it. Other arguments go to `scriptc build`, except:
 //   --output <path>          writes the executable there instead of dist/tsc
 //   --profile-generate=<p>   builds the instrumented tsc-ts refresh-profile.mjs runs, without the profile
-//   --profile-use=<p>        optimizes with <p> instead of profiles/tsc-ts.profdata; with --profile-generate, builds
-//                            the second instrumented tsc-ts refresh-profile.mjs runs, which is optimized by <p> and
-//                            counts the code again after inlining
-//   --record-profile         writes the number of functions the profile describes to profiles/tsc-ts.json
+//   --profile-use=<p>        optimizes with <p> instead of a committed profile; with --profile-generate, builds the
+//                            second instrumented tsc-ts refresh-profile.mjs runs, which is optimized by <p> and counts
+//                            the code again after inlining
+//   --record-profile         writes the number of functions the profile describes beside it (tsc-ts.json or
+//                            tsc-ts.cs.json)
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { judgeProfileMatch, parseProfileReport } from './profile-match.mjs';
+import {
+  SINGLE_PHASE_PROFILE,
+  TWO_PHASE_PROFILE,
+  profileInfoPath,
+  supportsSecondProfilePhase,
+} from './profile-phases.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const windows = process.platform === 'win32';
-const profileInfo = join(root, 'profiles/tsc-ts.json');
 
 const { values, tokens } = parseArgs({
   options: {
@@ -55,13 +62,15 @@ const scriptc =
   process.env.SCRIPTC ?? join(dirname(scriptcPackage), JSON.parse(readFileSync(scriptcPackage, 'utf8')).bin.scriptc);
 
 const generate = values['profile-generate'];
-const profile = values['profile-use'];
 const useProfile = !values.dev && generate === undefined;
+const profile = values['profile-use'] ?? (useProfile ? committedProfile() : undefined);
+const info = profile === undefined ? undefined : profileInfoPath(profile);
+const profileInfo = info === undefined ? undefined : join(root, info);
 const args = ['build', 'src/main.ts'];
 if (values.dev) args.push('--optimization=dev');
 else {
   args.push('--optimization=speed', '--detached-exit');
-  if (generate === undefined) args.push(`--profile-use=${profile ?? 'profiles/tsc-ts.profdata'}`);
+  if (generate === undefined) args.push(`--profile-use=${profile}`);
   else args.push(...(profile === undefined ? [] : [`--profile-use=${profile}`]), `--profile-generate=${generate}`);
 }
 mkdirSync(join(root, 'dist'), { recursive: true });
@@ -95,11 +104,20 @@ else {
   else checkProfile(report);
 }
 
+// The committed profile for this scriptc: the two-phase one when scriptc accepts a second profile phase.
+function committedProfile() {
+  const twoPhase = existsSync(join(root, TWO_PHASE_PROFILE));
+  return twoPhase && supportsSecondProfilePhase(scriptc, join(root, SINGLE_PHASE_PROFILE))
+    ? TWO_PHASE_PROFILE
+    : SINGLE_PHASE_PROFILE;
+}
+
 function checkProfile(report) {
-  const info = JSON.parse(readFileSync(profileInfo, 'utf8'));
+  const info = profileInfo === undefined ? {} : JSON.parse(readFileSync(profileInfo, 'utf8'));
   const verdict = judgeProfileMatch(report, info.functions ?? undefined, {
     ci: Boolean(process.env.CI),
     checked: !windows,
+    profile,
   });
   const prefix = { ok: 'tsc-ts:', note: 'tsc-ts: note:', warn: 'tsc-ts: warning:', fail: 'tsc-ts: error:' }[
     verdict.level
@@ -110,6 +128,7 @@ function checkProfile(report) {
 
 // A build right after the profile was collected annotates every function the profile describes.
 function recordProfile(report) {
+  if (profileInfo === undefined) throw new Error(`--record-profile needs a committed profile, not ${profile}`);
   const info = JSON.parse(readFileSync(profileInfo, 'utf8'));
   if (report !== undefined && report.mismatched > 0)
     throw new Error(`${report.mismatched} functions changed since the profile was collected; collect it again`);
@@ -117,8 +136,8 @@ function recordProfile(report) {
   writeFileSync(profileInfo, `${JSON.stringify(info, null, 2)}\n`);
   console.error(
     info.functions === null
-      ? 'tsc-ts: note: scriptc printed no profile report, so profiles/tsc-ts.json records no function count'
-      : `tsc-ts: profiles/tsc-ts.profdata describes ${info.functions} functions`,
+      ? `tsc-ts: note: scriptc printed no profile report, so ${profileInfoPath(profile)} records no function count`
+      : `tsc-ts: ${profile} describes ${info.functions} functions`,
   );
 }
 

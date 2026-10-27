@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { FAIL_BELOW, WARN_BELOW, judgeProfileMatch, parseProfileReport } from '../scripts/profile-match.mjs';
+import { SINGLE_PHASE_PROFILE, TWO_PHASE_PROFILE, profileInfoPath } from '../scripts/profile-phases.mjs';
 
 // build:native optimizes with profiles/tsc-ts.profdata. Functions whose generated code differs between scriptc
 // versions lose their profile data, so the profile is collected again when the pinned scriptc changes
@@ -67,4 +68,13 @@ test('the profile match is not checked without a report, a function count or eve
   assert.equal(judgeProfileMatch(undefined, 1000, { ci: true }).level, 'note');
   assert.equal(judgeProfileMatch(report, undefined, { ci: true }).level, 'note');
   assert.equal(judgeProfileMatch({ ...report, withoutCounts: 2 }, 1000, { ci: true }).level, 'note');
+});
+
+test('each committed profile records the scriptc that collected it beside it', () => {
+  for (const profile of [SINGLE_PHASE_PROFILE, TWO_PHASE_PROFILE]) {
+    if (!existsSync(profile)) continue;
+    const info = JSON.parse(readFileSync(profileInfoPath(profile), 'utf8'));
+    assert.match(info.scriptc, /^\d+\.\d+\.\d+/, profile);
+  }
+  assert.equal(profileInfoPath('elsewhere.profdata'), undefined);
 });
