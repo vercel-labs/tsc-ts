@@ -57,6 +57,7 @@ import {
   IntrinsicType,
   LiteralType,
   MemberNames,
+  NamedMemberOrder,
   NodeLinks,
   ObjectFlags,
   ObjectType,
@@ -400,6 +401,8 @@ export class Checker implements TypeChecking {
   readonly memberPositionsInLists = new Map<Symbol[], Map<string, number>>();
   /** The property names of the last instantiation of each such list whose table is built on demand. */
   readonly memberNamesOfLists = new Map<Symbol[], MemberNames>();
+  /** The property order of the instantiations of each such list (`NamedMemberOrder`); null where it has none. */
+  readonly namedMemberOrdersOfLists = new Map<Symbol[], NamedMemberOrder | null>();
   /** Long lists of inherited properties, by name. */
   readonly propertiesByName = new Map<Symbol[], Map<string, Symbol>>();
   /** Number of `typeToString` calls in progress. */
@@ -1193,6 +1196,7 @@ export function disposeChecker(c: Checker): void {
   c.sharedSymbolCopies.clear();
   c.memberPositionsInLists.clear();
   c.memberNamesOfLists.clear();
+  c.namedMemberOrdersOfLists.clear();
   c.propertiesByName.clear();
   c.symbolAccessibilityCaches = undefined;
   c.unresolvedSymbols.clear();

@@ -850,10 +850,19 @@ export function instantiateSymbol(c: Checker, symbol: Symbol, mapper: TypeMapper
  * is resolved yet, so lazily instantiated members record it when tsgo would instantiate them.
  */
 export function keepsSymbolUnderInstantiation(c: Checker, symbol: Symbol, mapper: TypeMapper): boolean {
-  const symbolId = getSymbolId(symbol);
-  if (mapper.mapsThisOnly() && isThisless(symbol)) return true;
-  // A resolved type that can't change under instantiation keeps the symbol.
-  const type = c.symbolTypes.get(symbolId);
+  if (mapper.mapsThisOnly() && isThisless(symbol)) {
+    getSymbolId(symbol);
+    return true;
+  }
+  return keepsSymbolTypeUnderInstantiation(c, symbol);
+}
+
+/**
+ * Whether the resolved type of `symbol` (and its write type) can't change under instantiation, so that
+ * `instantiateSymbol` keeps it whatever the mapper. Once true, it stays true: types are resolved once.
+ */
+export function keepsSymbolTypeUnderInstantiation(c: Checker, symbol: Symbol): boolean {
+  const type = c.symbolTypes.get(getSymbolId(symbol));
   if (type !== undefined && !couldContainTypeVariables(c, type)) {
     if ((symbol.flags & SymbolFlags.SetAccessor) === 0) return true;
     const writeType = c.existingSymbolLinks(symbol)?.writeType;
