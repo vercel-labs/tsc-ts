@@ -541,6 +541,10 @@ class InferenceState {
    */
   visited: Map<number, Map<number, InferencePriority>> | undefined = undefined;
   visitedSpelled: Map<string, InferencePriority> | undefined = undefined;
+  /** The mode `visitedPairs` belongs to, or -1 before the first `visitedOf`. */
+  visitedMode = -1;
+  /** `visited`'s map for `visitedMode`; a walk mostly stays in one mode. */
+  visitedPairs: Map<number, InferencePriority> | undefined = undefined;
   /** invokeOnce's recursion stacks; the first `stackDepth` entries of each are live. */
   readonly sourceStack: Type[] = [];
   readonly targetStack: Type[] = [];
@@ -789,13 +793,16 @@ class InferenceState {
     // As in tsc, a pair is visited once for each priority and variance it is inferred with.
     const mode = visitMode(this.priority, this.contravariant, this.bivariant);
     const key = visitKey(source, target);
+    // One map lookup for the pair, and the same map for both of its updates below.
+    const pairs = key >= 0 ? this.visitedOf(mode) : undefined;
     const status =
-      key >= 0 ? this.visited?.get(mode)?.get(key) : this.visitedSpelled?.get(source.id + ',' + target.id + ',' + mode);
+      pairs !== undefined ? pairs.get(key) : this.visitedSpelled?.get(source.id + ',' + target.id + ',' + mode);
     if (status !== undefined) {
       this.inferencePriority = Math.min(this.inferencePriority, status);
       return;
     }
-    this.setVisited(source, target, key, mode, InferencePriority.Circularity);
+    if (pairs !== undefined) pairs.set(key, InferencePriority.Circularity);
+    else this.setVisitedSpelled(source, target, mode, InferencePriority.Circularity);
     const saveInferencePriority = this.inferencePriority;
     this.inferencePriority = InferencePriority.MaxValue;
     // Duplicate recursion identities on both sides mean a circularity.
@@ -829,7 +836,8 @@ class InferenceState {
     } else this.inferencePriority = InferencePriority.Circularity;
     this.stackDepth = stackDepth;
     this.expandingFlags = saveExpandingFlags;
-    this.setVisited(source, target, key, mode, this.inferencePriority);
+    if (pairs !== undefined) pairs.set(key, this.inferencePriority);
+    else this.setVisitedSpelled(source, target, mode, this.inferencePriority);
     this.inferencePriority = Math.min(this.inferencePriority, saveInferencePriority);
   }
 
@@ -850,27 +858,32 @@ class InferenceState {
     );
   }
 
-  setVisited(source: Type, target: Type, key: number, mode: number, status: InferencePriority): void {
-    if (key >= 0) {
-      let modes = this.visited;
-      if (modes === undefined) {
-        modes = new Map<number, Map<number, InferencePriority>>();
-        this.visited = modes;
-      }
-      let visited = modes.get(mode);
-      if (visited === undefined) {
-        visited = new Map<number, InferencePriority>();
-        modes.set(mode, visited);
-      }
-      visited.set(key, status);
-    } else {
-      let visited = this.visitedSpelled;
-      if (visited === undefined) {
-        visited = new Map<string, InferencePriority>();
-        this.visitedSpelled = visited;
-      }
-      visited.set(source.id + ',' + target.id + ',' + mode, status);
+  /** The visited pairs of `mode` (`visited`), created on first use. */
+  visitedOf(mode: number): Map<number, InferencePriority> {
+    if (mode === this.visitedMode) return this.visitedPairs!;
+    let modes = this.visited;
+    if (modes === undefined) {
+      modes = new Map<number, Map<number, InferencePriority>>();
+      this.visited = modes;
     }
+    let pairs = modes.get(mode);
+    if (pairs === undefined) {
+      pairs = new Map<number, InferencePriority>();
+      modes.set(mode, pairs);
+    }
+    this.visitedMode = mode;
+    this.visitedPairs = pairs;
+    return pairs;
+  }
+
+  /** Records the status of a pair whose ids are too large for `visitKey`. */
+  setVisitedSpelled(source: Type, target: Type, mode: number, status: InferencePriority): void {
+    let visited = this.visitedSpelled;
+    if (visited === undefined) {
+      visited = new Map<string, InferencePriority>();
+      this.visitedSpelled = visited;
+    }
+    visited.set(source.id + ',' + target.id + ',' + mode, status);
   }
 
   inferFromMatchingTypes(sources: Type[], targets: Type[], kind: MatchKind): MatchedTypes {
