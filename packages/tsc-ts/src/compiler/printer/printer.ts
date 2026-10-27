@@ -3427,12 +3427,17 @@ export class Printer extends NameGeneratorHost {
       this.emitBindingIdentifier(bindings.name);
       this.exitNode(bindings, bindingsState);
     } else if (bindings instanceof NamedImports) {
-      const bindingsState = this.enterNode(bindings);
-      this.write1('{');
-      this.emitList(ListItem.ImportSpecifier, bindings, bindings.elements, ListFormat.NamedImportsOrExportsElements);
-      this.write1('}');
-      this.exitNode(bindings, bindingsState);
+      this.emitNamedImports(bindings);
     }
+    this.exitNode(node, state);
+    return true;
+  }
+
+  private emitNamedImports(node: NamedImports): boolean {
+    const state = this.enterNode(node);
+    this.write1('{');
+    this.emitList(ListItem.ImportSpecifier, node, node.elements, ListFormat.NamedImportsOrExportsElements);
+    this.write1('}');
     this.exitNode(node, state);
     return true;
   }
@@ -4402,6 +4407,9 @@ export class Printer extends NameGeneratorHost {
         break;
       case SyntaxKind.ImportClause:
         if (node instanceof ImportClause) return this.emitImportClause(node);
+        break;
+      case SyntaxKind.NamedImports:
+        if (node instanceof NamedImports) return this.emitNamedImports(node);
         break;
       case SyntaxKind.ImportSpecifier:
         return this.emitListItem(ListItem.ImportSpecifier, node);

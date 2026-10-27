@@ -205,8 +205,18 @@ export class AutoImportView {
 
   /** The exports with a word starting with `prefix`'s first character and `prefix`'s characters in order. */
   search(prefix: string): Export[] {
+    return this.searchIndexes((index) => index.searchWordPrefix(prefix));
+  }
+
+  /** The exports with the export key `key` (module id and export name) the importing file can use. */
+  searchByExportKey(key: string): Export[] {
+    return this.searchIndexes((index) => index.entries.filter((e) => e.exportKey() === key));
+  }
+
+  // What `find` gives from the project's index and the node_modules buckets the importing file can use.
+  private searchIndexes(find: (index: ExportIndex) => readonly Export[]): Export[] {
     const results: Export[] = [];
-    for (const exported of this.registry.index.searchWordPrefix(prefix)) {
+    for (const exported of find(this.registry.index)) {
       // Nothing is imported from the importing file itself.
       if (modulePathOfId(exported.moduleId) === this.importingFile.path) continue;
       results.push(exported);
@@ -231,7 +241,7 @@ export class AutoImportView {
     for (const directory of directories) {
       const bucket = packages.nodeModules.get(directory);
       if (bucket === undefined) continue;
-      for (const exported of bucket.index.searchWordPrefix(prefix)) {
+      for (const exported of find(bucket.index)) {
         if (excludedPackages.has(exported.packageName)) continue;
         if (allowedPackages !== undefined && !allowedPackages.has(exported.packageName)) continue;
         results.push(exported);
@@ -297,9 +307,10 @@ export class AutoImportView {
   }
 
   /** The fixes that import `e`: through an existing namespace import, an existing import, or a new import. */
-  getFixes(e: Export, forJSX: boolean, isValidTypeOnlyUseSite: boolean): AutoImportFix[] {
+  getFixes(e: Export, forJSX: boolean, isValidTypeOnlyUseSite: boolean, hasUsagePosition = true): AutoImportFix[] {
     const fixes: AutoImportFix[] = [];
-    const namespaceFix = this.tryUseExistingNamespaceImport(e);
+    // Using a namespace import or a JSDoc import type writes at the usage, so they need its position.
+    const namespaceFix = hasUsagePosition ? this.tryUseExistingNamespaceImport(e) : undefined;
     if (namespaceFix !== undefined) fixes.push(namespaceFix);
     const existingFix = this.tryAddToExistingImport(e, isValidTypeOnlyUseSite);
     if (existingFix !== undefined) {
@@ -311,7 +322,7 @@ export class AutoImportView {
     const isReExport = e.targetModuleId !== e.moduleId;
     // A pure type in a JavaScript file is imported with a JSDoc import type.
     const importedSymbolHasValueMeaning = (e.flags & SymbolFlags.Value) !== 0 || e.isUnresolvedAlias();
-    if (!importedSymbolHasValueMeaning && hasJSFileExtension(this.importingFile.fileName)) {
+    if (!importedSymbolHasValueMeaning && hasJSFileExtension(this.importingFile.fileName) && hasUsagePosition) {
       const fix = new AutoImportFix(AutoImportFixKind.JsdocTypeImport, specifier, e.name());
       fix.moduleSpecifierKind = kind;
       fix.isReExport = isReExport;

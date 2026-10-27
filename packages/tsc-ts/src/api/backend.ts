@@ -122,7 +122,10 @@ import { ConfigParser, JsonArray, JsonObject, type JsonValue, ParsedCommandLine 
 import { isTypeAssignableTo } from '../compiler/relations.js';
 import { typeToString } from '../compiler/type-printer.js';
 import { type CompletionList, getCompletionsAtPosition } from '../services/completions.js';
-import { type AutoImportRegistry, buildAutoImportRegistry } from '../services/auto-import-view.js';
+import { type AutoImportRegistry, AutoImportView, buildAutoImportRegistry } from '../services/auto-import-view.js';
+import { ImportAdder } from '../services/import-adder.js';
+import { ModuleSpecifierPreferences } from '../compiler/module-specifiers.js';
+import type { TextEdit } from '../services/text-changes.js';
 import { buildPackageBuckets, type PackageBuckets, type PackageHost } from '../services/auto-import-packages.js';
 import { getDirectoryPath } from '../compiler/path.js';
 import {
@@ -448,6 +451,28 @@ export class Project {
       withAutoImports ? this.autoImportRegistry() : undefined,
       onAutoImportsNeeded,
     );
+  }
+
+  /**
+   * The text edits that import each symbol into `file` with its best fix, as tsc's getImportAdderEdits writes them;
+   * none when no symbol has an export the file can import.
+   */
+  importAdderEdits(
+    file: SourceFile,
+    actions: readonly { symbol: Symbol; isValidTypeOnlyUseSite: boolean }[],
+  ): readonly TextEdit[] {
+    const registry = this.autoImportRegistry();
+    const view = new AutoImportView(
+      registry,
+      registry.packagesFor(file),
+      file,
+      this.program,
+      this.checker,
+      new ModuleSpecifierPreferences('', ''),
+    );
+    const adder = new ImportAdder(view, this.program, this.checker, file);
+    for (const action of actions) adder.addImportFromExportedSymbol(action.symbol, action.isValidTypeOnlyUseSite);
+    return adder.hasFixes() ? adder.edits() : [];
   }
 
   private autoImportRegistry(): AutoImportRegistry {

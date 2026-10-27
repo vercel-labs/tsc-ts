@@ -73,6 +73,24 @@ export interface CompletionsParams extends ProjectFileParams {
   includeSymbol?: boolean;
 }
 
+/** An action of getImportAdderEdits: import a symbol, in a position where a type-only import is valid or not. */
+export interface ImportAdderAction {
+  kind?: string;
+  symbol?: SymbolReference | null;
+  isValidTypeOnlyUseSite?: boolean | null;
+}
+
+export interface ImportAdderEditsParams extends ProjectFileParams {
+  actions?: ImportAdderAction[] | null;
+}
+
+/** A text edit: `newText` in place of the UTF-16 range from `pos` to `end`. */
+export interface TextEditResponse {
+  pos: number;
+  end: number;
+  newText: string;
+}
+
 export interface CompletionEntryResponse {
   name: string;
   kind?: number;

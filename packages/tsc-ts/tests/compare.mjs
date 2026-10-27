@@ -138,6 +138,9 @@ export class IdMap {
     if (Array.isArray(out.types)) out.types = out.types.map((id) => map('type', id));
     if (out.symbol !== undefined) out.symbol = this.reference(out.symbol);
     if (Array.isArray(out.symbols)) out.symbols = out.symbols.map((ref) => this.reference(ref));
+    if (Array.isArray(out.actions)) {
+      out.actions = out.actions.map((a) => (a?.symbol == null ? a : { ...a, symbol: this.reference(a.symbol) }));
+    }
     if (typeof out.signature === 'number') out.signature = map('signature', out.signature);
     if (Array.isArray(out.signatures)) out.signatures = out.signatures.map((id) => map('signature', id));
     if (typeof out.objectId === 'number') out.objectId = map(objectKind(method), out.objectId);

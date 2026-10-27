@@ -511,6 +511,8 @@ export class Session {
         return JSON.stringify(this.projectDiagnostics('global', JSON.parse(params) as proto.ProjectParams));
       case 'getCompletionsAtPosition':
         return JSON.stringify(this.completionsAtPosition(JSON.parse(params) as proto.CompletionsParams));
+      case 'getImportAdderEdits':
+        return JSON.stringify(this.importAdderEdits(JSON.parse(params) as proto.ImportAdderEditsParams));
       case 'getJsDocTags':
         return JSON.stringify(this.jsDocTags(JSON.parse(params) as proto.SymbolParams));
       case 'getDocumentationComment':
@@ -933,6 +935,24 @@ export class Session {
   private typeAtLocations(params: proto.LocationsParams): (proto.TypeResponse | null)[] {
     const q = this.query(params);
     return (params.locations ?? []).map((handle) => q.typeResponse(q.project.typeAtLocation(q.node(handle))));
+  }
+
+  // The edits that import the actions' symbols into a file, as tsc's getImportAdderEdits writes them.
+  private importAdderEdits(params: proto.ImportAdderEditsParams): proto.TextEditResponse[] {
+    const q = this.query(params);
+    const file = q.sourceFile(params.file ?? '');
+    // tsc prepares auto-imports for the request in a snapshot of its own, which takes the next snapshot ID.
+    this.nextSnapshotId++;
+    const actions = (params.actions ?? []).map((action, i) => {
+      if (action.kind !== 'importSymbol') {
+        throw new ClientError(`unknown import adder action kind ${JSON.stringify(action.kind ?? '')}`);
+      }
+      if (action.symbol === undefined || action.symbol === null) {
+        throw new ClientError(`import adder action ${i} missing symbol`);
+      }
+      return { symbol: q.symbol(action.symbol), isValidTypeOnlyUseSite: action.isValidTypeOnlyUseSite ?? true };
+    });
+    return q.project.importAdderEdits(file, actions).map((e) => ({ pos: e.pos, end: e.end, newText: e.newText }));
   }
 
   private completionsAtPosition(params: proto.CompletionsParams): proto.CompletionInfoResponse | null {

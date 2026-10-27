@@ -22,13 +22,14 @@ The implementation is in [the API package](https://github.com/vercel-labs/tsc-ts
 Supported methods include:
 
 - `getCompletionsAtPosition`
+- `getImportAdderEdits`
 - `getJsDocTags`
 - `getDocumentationComment`
 - `getReferencesToSymbolInFile`
 - `getReferencedSymbolsForNode`
 - `getSignatureUsages`
 
-Completion requests that require auto imports report `completion list needs auto imports`, as in the pinned upstream server. This includes global identifier completions, import statements, and exhaustive `switch` cases that need auto imports.
+Completions include auto imports from the project and its dependencies. `getImportAdderEdits` returns the text edits that import symbols into a file, as in the upstream server.
 
 ## Limitations
 
