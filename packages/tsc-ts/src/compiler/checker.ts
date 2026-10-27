@@ -404,6 +404,13 @@ export class Checker implements TypeChecking {
   readonly propertiesByName = new Map<Symbol[], Map<string, Symbol>>();
   /** Number of `typeToString` calls in progress. */
   serializationLevel = 0;
+  /**
+   * `typeToString` results by type, enclosing declaration and flags: the prints that created no types, which a
+   * later print with the same inputs repeats exactly (`typeToString`).
+   */
+  readonly typeStrings = new Map<string, string>();
+  /** `symbolToString` results by symbol, then by enclosing declaration and flags, kept as `typeStrings` are. */
+  readonly symbolStrings = new Map<Symbol, Map<string, string>>();
   /** Whether `globalObjectType` is set; global type lookups before it can't suggest `typeof`. */
   hasGlobalObjectType = false;
   /** The node being checked, for errors with no better location. */

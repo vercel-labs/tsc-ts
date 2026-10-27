@@ -29,7 +29,22 @@ export function typeToString(c: Checker, t: Type, enclosingDeclaration?: Node, f
   // Without explicit flags, unique symbols print as such and aliases from other scopes are used.
   const formatFlags =
     flags ?? NodeBuilderFlags.AllowUniqueESSymbolType | NodeBuilderFlags.UseAliasDefinedOutsideCurrentScope;
-  return typeToStringFromTypeNode(c, t, enclosingDeclaration, formatFlags) ?? '';
+  // Prints nested in a serialization depend on its depth (typeToStringFromTypeNode), so only the others are kept.
+  if (c.serializationLevel !== 0) return typeToStringFromTypeNode(c, t, enclosingDeclaration, formatFlags) ?? '';
+  const key =
+    String(t.id) +
+    ',' +
+    String(enclosingDeclaration === undefined ? 0 : enclosingDeclaration.id) +
+    ',' +
+    String(formatFlags);
+  const cached = c.typeStrings.get(key);
+  if (cached !== undefined) return cached;
+  // A print that creates no types reads only types that exist and settled state, so printing again gives the same
+  // text and creates nothing; prints that create types run each time, as in tsgo, so type ids stay in tsgo's order.
+  const typeCount = c.typeCount;
+  const text = typeToStringFromTypeNode(c, t, enclosingDeclaration, formatFlags) ?? '';
+  if (c.typeCount === typeCount) c.typeStrings.set(key, text);
+  return text;
 }
 
 /** `symbol` as text: the expression naming it, as seen from `enclosingDeclaration` if given. */
@@ -39,12 +54,27 @@ export function symbolToString(
   enclosingDeclaration?: Node,
   internalFlags: NodeBuilderInternalFlags = NodeBuilderInternalFlags.None,
 ): string {
+  // Kept as typeToString keeps type prints: outside serializations, when printing created no types.
+  const key = String(enclosingDeclaration === undefined ? 0 : enclosingDeclaration.id) + ',' + String(internalFlags);
+  const kept = c.serializationLevel === 0 ? c.symbolStrings.get(symbol) : undefined;
+  const cached = kept?.get(key);
+  if (cached !== undefined) return cached;
+  const typeCount = c.typeCount;
   const b = new NodeBuilder(c, enclosingDeclaration, NodeBuilderFlags.IgnoreErrors, internalFlags, undefined);
-  return printSingleLine(
+  const text = printSingleLine(
     b,
     symbolToExpression(b, symbol, SymbolFlags.All),
     enclosingDeclaration !== undefined && enclosingDeclaration.kind === SyntaxKind.SourceFile,
   );
+  if (c.serializationLevel === 0 && c.typeCount === typeCount) {
+    let byKey = kept;
+    if (byKey === undefined) {
+      byKey = new Map<string, string>();
+      c.symbolStrings.set(symbol, byKey);
+    }
+    byKey.set(key, text);
+  }
+  return text;
 }
 
 /** `signature` as text: a call or construct signature without its trailing semicolon. */
