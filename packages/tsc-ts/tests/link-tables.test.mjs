@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { compileSources } from './temp.mjs';
 
 const out = compileSources('tsc-ts-link-tables-', ['compiler/link-tables.ts']);
-const { CompactSymbolLinkTable, PagedIdSet } = await import(pathToFileURL(join(out, 'compiler/link-tables.js')).href);
+const { CompactLinkTable, PagedIdSet } = await import(pathToFileURL(join(out, 'compiler/link-tables.js')).href);
 
 /** A pseudo-random sequence that is the same in every run. */
 function random(seed) {
@@ -15,10 +15,10 @@ function random(seed) {
   };
 }
 
-test('CompactSymbolLinkTable stores, replaces and deletes values like a Map', () => {
+test('CompactLinkTable stores, replaces and deletes values like a Map', () => {
   const next = random(7);
   for (const span of [64, 300, 5000, 100000]) {
-    const table = new CompactSymbolLinkTable();
+    const table = new CompactLinkTable();
     const expected = new Map();
     for (let step = 0; step < 20000; step++) {
       const id = Math.floor(next() * span);
@@ -39,8 +39,8 @@ test('CompactSymbolLinkTable stores, replaces and deletes values like a Map', ()
   }
 });
 
-test('CompactSymbolLinkTable keeps the values of every id of a full page', () => {
-  const table = new CompactSymbolLinkTable();
+test('CompactLinkTable keeps the values of every id of a full page', () => {
+  const table = new CompactLinkTable();
   for (let id = 511; id >= 256; id--) table.set(id, id * 2);
   for (let id = 256; id < 512; id++) assert.equal(table.get(id), id * 2);
   for (let id = 256; id < 512; id += 2) table.set(id, undefined);

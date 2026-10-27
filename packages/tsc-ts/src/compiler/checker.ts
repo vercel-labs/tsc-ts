@@ -33,7 +33,7 @@ import type { ModuleSpecifierResult } from './node-builder-names.js';
 import type { EmitHelperFileLinks } from './checker-emit-helpers.js';
 import { sideOf } from './side-state.js';
 import type { Node, PatternAmbientModule, SourceFile } from './ast.js';
-import { CompactSymbolLinkTable, IntLinkTable, LinkTable, PagedIdSet, SparseLinkTable } from './link-tables.js';
+import { CompactLinkTable, IntLinkTable, LinkTable, PagedIdSet, SparseLinkTable } from './link-tables.js';
 import { getErrorRangeForNode, getSourceFileOfNode } from './binder-utilities.js';
 import {
   Diagnostic,
@@ -470,11 +470,11 @@ export class Checker implements TypeChecking {
   /** Bits of SymbolFlags for the meanings in which a symbol was referenced. */
   readonly symbolReferenceKinds = new IntLinkTable();
   /** The resolved symbol of an identifier, entity name or call. */
-  readonly resolvedSymbols = new CompactSymbolLinkTable();
+  readonly resolvedSymbols = new CompactLinkTable<Symbol>();
   /** The resolved type of a type node or expression. */
-  readonly resolvedTypes = new SparseLinkTable<Type>();
+  readonly resolvedTypes = new CompactLinkTable<Type>();
   /** The resolved signature of a call-like node or a signature declaration. */
-  readonly resolvedSignatures = new SparseLinkTable<Signature>();
+  readonly resolvedSignatures = new CompactLinkTable<Signature>();
   /** Merged symbols, indexed by the id of the symbol merged into them. */
   readonly mergedSymbols: Map<number, Symbol>;
   /**
