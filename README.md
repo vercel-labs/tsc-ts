@@ -107,7 +107,7 @@ TSC_TS_LIB_DIR=upstream/TypeScript/tsc/internal/bundled/libs packages/tsc-ts/dis
 
 The server is checked against `tsc --api` 7.0.2 response by response, and scriptc builds the same programs with either. It runs on the tsc-ts compiler, natively or under Node.
 
-Language service methods are supported: `getCompletionsAtPosition`, `getJsDocTags`, `getDocumentationComment`, `getReferencesToSymbolInFile`, `getReferencedSymbolsForNode` and `getSignatureUsages`. Like `tsc --api`, completions that need auto imports (global identifiers, import statements, exhaustive `switch` cases) report `completion list needs auto imports`. The profiling methods (`startCPUProfile`, `stopCPUProfile`, `saveHeapProfile`) are not supported.
+Language service methods are supported: `getCompletionsAtPosition`, `getImportAdderEdits`, `getJsDocTags`, `getDocumentationComment`, `getReferencesToSymbolInFile`, `getReferencedSymbolsForNode` and `getSignatureUsages`. Completions include auto imports from the project and its dependencies, and `getImportAdderEdits` returns the edits that import symbols into a file, as in `tsc --api`. The profiling methods (`startCPUProfile`, `stopCPUProfile`, `saveHeapProfile`) are not supported.
 
 ## Testing
 

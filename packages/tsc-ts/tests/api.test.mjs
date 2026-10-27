@@ -846,6 +846,110 @@ test(
   },
 );
 
+// Import adder actions in the import-adder fixture's projects: the file to add imports to, then the symbols to
+// import, each named by the first occurrence of its text in a file, and whether its use site may be type-only.
+const importAdderCases = {
+  esm: [
+    ['src/empty.ts', ['src/a.ts', 'foo']],
+    ['src/empty.ts', ['src/a.ts', 'foo'], ['src/a.ts', 'bar'], ['src/z.ts', 'zed']],
+    ['src/empty.ts', ['src/a.ts', 'Shape', true], ['src/a.ts', 'Kind', true]],
+    ['src/empty.ts', ['src/single.ts', 'single']],
+    ['src/existing.ts', ['src/a.ts', 'foo']],
+    ['src/existing.ts', ['src/a.ts', 'Def']],
+    ['src/existing.ts', ['src/a.ts', 'Shape', true]],
+    ['src/existing.ts', ['src/a.ts', 'Def'], ['src/a.ts', 'foo'], ['src/z.ts', 'zed'], ['src/c.ts', 'c = 1']],
+    ['src/nosemi.ts', ['src/a.ts', 'foo']],
+    ['src/nosemi.ts', ['src/z.ts', 'zed']],
+    ['src/nosemi2.ts', ['src/a.ts', 'foo']],
+    ['src/nosemi3.ts', ['src/a.ts', 'foo']],
+    ['src/aliased.ts', ['src/a.ts', 'Shape', true]],
+    ['src/aliased.ts', ['src/a.ts', 'bar', false]],
+    ['src/multi.ts', ['src/a.ts', 'Def'], ['src/z.ts', 'zed']],
+    ['src/multi.ts', ['src/a.ts', 'Kind', true]],
+    ['src/req.js', ['src/a.ts', 'foo']],
+    ['src/req.js', ['src/a.ts', 'Def']],
+    ['src/plain.js', ['src/a.ts', 'foo'], ['src/a.ts', 'Def']],
+    ['src/plain.js', ['src/a.ts', 'Shape', true]],
+    ['src/prologue.ts', ['src/a.ts', 'foo']],
+    ['src/shebang.ts', ['src/a.ts', 'foo']],
+    ['src/triple.ts', ['src/a.ts', 'foo']],
+    ['src/unsorted.ts', ['src/a.ts', 'foo'], ['src/c.ts', 'c = 1']],
+    ['src/cased.ts', ['src/a.ts', 'foo']],
+    ['src/defonly.ts', ['src/a.ts', 'foo']],
+    ['src/ns.ts', ['src/a.ts', 'bar']],
+    ['src/typeonly.ts', ['src/a.ts', 'foo', false]],
+    ['src/typeonly.ts', ['src/a.ts', 'Shape', true]],
+    ['src/typeonly.ts', ['src/a.ts', 'Def', false]],
+  ],
+  commonjs: [
+    ['src/crlf.ts', ['src/uses.ts', 'pkgVal']],
+    ['src/crlf.ts', ['src/a.ts', 'foo'], ['src/a.ts', 'Def']],
+    ['src/crlfempty.ts', ['src/a.ts', 'foo'], ['src/uses.ts', 'pkgVal']],
+    ['src/crlfmulti.ts', ['src/a.ts', 'Def'], ['src/a.ts', 'Shape', true]],
+    ['src/eq.ts', ['src/a.ts', 'foo']],
+    ['src/plain.ts', ['src/single.ts', 'single']],
+    ['src/plain.ts', ['src/single.ts', 'single'], ['src/a.ts', 'Kind', true], ['src/a.ts', 'Def']],
+    ['src/plain.ts', ['src/uses.ts', 'pkgVal'], ['src/z.ts', 'zed']],
+  ],
+  verbatim: [
+    ['src/v.ts', ['src/a.ts', 'Shape', true]],
+    ['src/v.ts', ['src/a.ts', 'Shape', false]],
+    ['src/plain.ts', ['src/a.ts', 'Shape', true], ['src/a.ts', 'Kind', true], ['src/a.ts', 'bar']],
+    ['src/plain.ts', ['src/a.ts', 'Def', true]],
+  ],
+};
+
+test('tsc-ts --api adds imports like tsc --api', { skip, timeout: 300_000 }, async () => {
+  for (const [fixture, cases] of Object.entries(importAdderCases)) {
+    const dir = tempDir('tsc-ts-api-');
+    cpSync(resolve('tests/fixtures/import-adder', fixture), dir, { recursive: true });
+    if (fixture === 'commonjs') {
+      mkdirSync(join(dir, 'node_modules/pkg'), { recursive: true });
+      writeFileSync(
+        join(dir, 'node_modules/pkg/package.json'),
+        '{"name":"pkg","version":"1.0.0","types":"index.d.ts"}',
+      );
+      writeFileSync(
+        join(dir, 'node_modules/pkg/index.d.ts'),
+        'export declare function pkgFn(): void;\nexport declare const pkgVal: number;\n',
+      );
+    }
+    const d = new Differential([realTsc], tscTs, dir, env);
+    try {
+      await d.call('initialize');
+      let update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+      const project = update.projects[0].id;
+      let edits = 0;
+      for (const [file, ...symbols] of cases) {
+        const base = { snapshot: update.snapshot, project };
+        const actions = [];
+        for (const [from, text, isValidTypeOnlyUseSite] of symbols) {
+          const position = readFileSync(join(dir, from), 'utf8').indexOf(text);
+          const symbol = await d.call('getSymbolAtPosition', { ...base, file: join(dir, from), position });
+          assert.ok(symbol, `a symbol at ${text} in ${from}`);
+          actions.push({ kind: 'importSymbol', symbol: symbol.reference, isValidTypeOnlyUseSite });
+        }
+        edits += (await d.call('getImportAdderEdits', { ...base, file: join(dir, file), actions }))?.length ?? 0;
+        // tsc makes a snapshot for the edits, which the next snapshot's id follows.
+        update = await d.snapshot({});
+      }
+      assert.ok(edits >= cases.length, `${edits} edits in ${fixture}`);
+      const base = { snapshot: update.snapshot, project };
+      const symbol = await d.call('getSymbolAtPosition', { ...base, file: join(dir, 'src/a.ts'), position: 13 });
+      const file = join(dir, cases[0][0]);
+      await d.call('getImportAdderEdits', { ...base, file, actions: [] });
+      await d.call('getImportAdderEdits', { ...base, file: join(dir, 'src/missing.ts'), actions: [] });
+      await d.call('getImportAdderEdits', { ...base, file, actions: [{ kind: 'importSymbol' }] });
+      await d.call('getImportAdderEdits', { ...base, file, actions: [{ kind: 'other', symbol: symbol.reference }] });
+      await d.call('getImportAdderEdits', { ...base, file, actions: [{ kind: 'importSymbol', symbol: { id: 1e6 } }] });
+      await d.snapshot({});
+    } finally {
+      await d.close();
+    }
+    report(d);
+  }
+});
+
 for (const fixture of ['services', 'project']) {
   test(
     `tsc-ts --api answers language service queries like tsc --api (${fixture})`,
