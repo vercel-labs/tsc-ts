@@ -12,6 +12,7 @@ import {
   type TypeParameterDeclaration,
   type ConditionalTypeNode,
 } from './ast.js';
+import { isInJSFile } from './ast-utilities.js';
 import { hasSyntacticModifier } from './binder-utilities.js';
 import { SyntaxKind } from './syntax-kind.js';
 import type { Checker } from './checker.js';
@@ -489,9 +490,11 @@ export function inferTypes(
 }
 
 const enum InferenceAction {
+  AliasTypeArguments,
   ConditionalType,
   GenericMappedTypes,
   ObjectTypes,
+  ReferenceTypeArguments,
 }
 
 const enum MatchKind {
@@ -532,8 +535,11 @@ class InferenceState {
   bivariant = false;
   expandingFlags: ExpandingFlags = ExpandingFlags.None;
   propagationType: Type | undefined = undefined;
-  /** invokeOnce's pairs by packed type ids (`visitKey`), or spelled when an id is too large to pack. */
-  visited: Map<number, InferencePriority> | undefined = undefined;
+  /**
+   * invokeOnce's pairs, for each priority and variance of the walk (`visitMode`), by packed type ids (`visitKey`),
+   * or spelled when an id is too large to pack.
+   */
+  visited: Map<number, Map<number, InferencePriority>> | undefined = undefined;
   visitedSpelled: Map<string, InferencePriority> | undefined = undefined;
   /** invokeOnce's recursion stacks; the first `stackDepth` entries of each are live. */
   readonly sourceStack: Type[] = [];
@@ -572,18 +578,9 @@ class InferenceState {
     const sourceAlias = source.alias;
     const targetAlias = target.alias;
     if (sourceAlias !== undefined && targetAlias !== undefined && sourceAlias.symbol === targetAlias.symbol) {
-      if (sourceAlias.typeArguments.length !== 0 || targetAlias.typeArguments.length !== 0) {
-        // Instantiations of the same alias: infer between the type arguments, with defaults applied.
-        const params = c.symbolLinks(sourceAlias.symbol).typeParameters ?? [];
-        const minParams = getMinTypeArgumentCount(c, params);
-        const sourceTypes = fillMissingTypeArguments(c, sourceAlias.typeArguments, params, minParams, false);
-        const targetTypes = fillMissingTypeArguments(c, targetAlias.typeArguments, params, minParams, false);
-        this.inferFromTypeArguments(
-          sourceTypes,
-          targetTypes,
-          someTypeCouldHoldInference(c, targetTypes) ? getAliasVariances(c, sourceAlias.symbol) : noVariances,
-        );
-      }
+      // Instantiations of the same alias infer between their type arguments, once for each pair of types, as tsc does.
+      if (sourceAlias.typeArguments.length !== 0 || targetAlias.typeArguments.length !== 0)
+        this.invokeOnce(source, target, InferenceAction.AliasTypeArguments);
       return;
     }
     if (source === target && (source.flags & TypeFlags.UnionOrIntersection) !== 0) {
@@ -646,7 +643,7 @@ class InferenceState {
       (referenceTarget(source) === referenceTarget(target) || (isArrayType(c, source) && isArrayType(c, target))) &&
       !(referenceNode(source) !== undefined && referenceNode(target) !== undefined)
     ) {
-      this.inferFromReferenceTypeArguments(source, target);
+      this.invokeOnce(source, target, InferenceAction.ReferenceTypeArguments);
     } else if ((source.flags & TypeFlags.Index) !== 0 && (target.flags & TypeFlags.Index) !== 0) {
       this.inferFromContravariantTypes((source as IndexType).target, (target as IndexType).target);
     } else if (
@@ -789,13 +786,16 @@ class InferenceState {
 
   /** Runs `action` once per source and target pair, stopping at circularities. */
   invokeOnce(source: Type, target: Type, action: InferenceAction): void {
+    // As in tsc, a pair is visited once for each priority and variance it is inferred with.
+    const mode = visitMode(this.priority, this.contravariant, this.bivariant);
     const key = visitKey(source, target);
-    const status = key >= 0 ? this.visited?.get(key) : this.visitedSpelled?.get(source.id + ',' + target.id);
+    const status =
+      key >= 0 ? this.visited?.get(mode)?.get(key) : this.visitedSpelled?.get(source.id + ',' + target.id + ',' + mode);
     if (status !== undefined) {
       this.inferencePriority = Math.min(this.inferencePriority, status);
       return;
     }
-    this.setVisited(source, target, key, InferencePriority.Circularity);
+    this.setVisited(source, target, key, mode, InferencePriority.Circularity);
     const saveInferencePriority = this.inferencePriority;
     this.inferencePriority = InferencePriority.MaxValue;
     // Duplicate recursion identities on both sides mean a circularity.
@@ -810,6 +810,9 @@ class InferenceState {
       this.expandingFlags |= ExpandingFlags.Target;
     if (this.expandingFlags !== ExpandingFlags.Both) {
       switch (action) {
+        case InferenceAction.AliasTypeArguments:
+          this.inferFromAliasTypeArguments(source, target);
+          break;
         case InferenceAction.ConditionalType:
           this.inferToConditionalType(source, target as ConditionalType);
           break;
@@ -819,20 +822,45 @@ class InferenceState {
         case InferenceAction.ObjectTypes:
           this.inferFromObjectTypes(source, target);
           break;
+        case InferenceAction.ReferenceTypeArguments:
+          this.inferFromReferenceTypeArguments(source, target);
+          break;
       }
     } else this.inferencePriority = InferencePriority.Circularity;
     this.stackDepth = stackDepth;
     this.expandingFlags = saveExpandingFlags;
-    this.setVisited(source, target, key, this.inferencePriority);
+    this.setVisited(source, target, key, mode, this.inferencePriority);
     this.inferencePriority = Math.min(this.inferencePriority, saveInferencePriority);
   }
 
-  setVisited(source: Type, target: Type, key: number, status: InferencePriority): void {
+  // Source and target are instantiations of the same type alias: infers between the type arguments, with defaults
+  // applied.
+  inferFromAliasTypeArguments(source: Type, target: Type): void {
+    const c = this.c;
+    const sourceAlias = source.alias!;
+    const params = c.symbolLinks(sourceAlias.symbol).typeParameters ?? [];
+    const minParams = getMinTypeArgumentCount(c, params);
+    const isJavaScript = isInJSFile(sourceAlias.symbol.valueDeclaration);
+    const sourceTypes = fillMissingTypeArguments(c, sourceAlias.typeArguments, params, minParams, isJavaScript);
+    const targetTypes = fillMissingTypeArguments(c, target.alias!.typeArguments, params, minParams, isJavaScript);
+    this.inferFromTypeArguments(
+      sourceTypes,
+      targetTypes,
+      someTypeCouldHoldInference(c, targetTypes) ? getAliasVariances(c, sourceAlias.symbol) : noVariances,
+    );
+  }
+
+  setVisited(source: Type, target: Type, key: number, mode: number, status: InferencePriority): void {
     if (key >= 0) {
-      let visited = this.visited;
+      let modes = this.visited;
+      if (modes === undefined) {
+        modes = new Map<number, Map<number, InferencePriority>>();
+        this.visited = modes;
+      }
+      let visited = modes.get(mode);
       if (visited === undefined) {
         visited = new Map<number, InferencePriority>();
-        this.visited = visited;
+        modes.set(mode, visited);
       }
       visited.set(key, status);
     } else {
@@ -841,7 +869,7 @@ class InferenceState {
         visited = new Map<string, InferencePriority>();
         this.visitedSpelled = visited;
       }
-      visited.set(source.id + ',' + target.id, status);
+      visited.set(source.id + ',' + target.id + ',' + mode, status);
     }
   }
 
@@ -2285,6 +2313,11 @@ function clearActiveMapperCaches(c: Checker): void {
 const VisitKeyIdLimit = 1 << 26;
 
 /** invokeOnce's key for a pair of types: both ids in one number, or -1 when an id is too large. */
+/** The priority and variance of an inference walk, packed. */
+function visitMode(priority: number, contravariant: boolean, bivariant: boolean): number {
+  return priority * 4 + (contravariant ? 2 : 0) + (bivariant ? 1 : 0);
+}
+
 function visitKey(source: Type, target: Type): number {
   const s = source.id;
   const t = target.id;
