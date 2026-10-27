@@ -679,10 +679,10 @@ export class PackageJsonInfoCache {
 
   /**
    * Called before the cache is shared with other threads, which makes it immutable: from then on,
-   * each thread keeps the lookups it adds in a table of its own.
+   * each thread keeps the lookups it adds in a table of its own. A cache already shared is immutable.
    */
   prepareForSharing(): void {
-    this.shared = true;
+    if (!this.shared) this.shared = true;
   }
 
   get(packageJsonPath: string): PackageJsonInfo | undefined {

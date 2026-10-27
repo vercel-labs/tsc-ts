@@ -306,9 +306,11 @@ export class Resolver {
   /**
    * Called before the resolver is shared with other threads, which makes it immutable
    * (parallel-check.ts): from then on, each thread caches the results and `package.json` lookups the
-   * resolver did not have yet in tables of its own.
+   * resolver did not have yet in tables of its own. A resolver already shared (by an earlier program of
+   * a watch, which a rebuild updates: `Program.updateFile`) is immutable and stays as it is.
    */
   prepareForSharing(): void {
+    if (this.shared) return;
     this.getPathPatterns();
     this.packageJsonInfoCache.prepareForSharing();
     this.shared = true;
