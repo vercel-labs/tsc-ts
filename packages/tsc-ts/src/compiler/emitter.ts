@@ -33,7 +33,7 @@ import { RuntimeSyntax } from './transformers/runtime-syntax.js';
 import { ConstEnumInliner } from './transformers/const-enum-inliner.js';
 import { addDownlevelTransformers } from './transformers/downlevel.js';
 import { JsxTransformer } from './transformers/jsx.js';
-import { SyntaxFacts } from './transformers/syntax-facts.js';
+import { SubtreeFacts, SyntaxFacts } from './transformers/syntax-facts.js';
 import { LegacyDecorators } from './transformers/legacy-decorators.js';
 import { DecoratorMetadata } from './transformers/decorator-metadata.js';
 
@@ -143,6 +143,12 @@ export const enum EmitOnly {
    * signature of incremental builds; it is written with its errors and without a map.
    */
   ForcedDts,
+  /**
+   * The declaration file of a file whose JavaScript this build emits in a separate request, such as on another
+   * thread. tsgo emits both with one emit context, so the emit flags its JavaScript transforms set on the file's
+   * own nodes also apply to its declarations; this replays those transforms first.
+   */
+  DtsAfterJs,
 }
 
 export function emitFiles(host: EmitHost, files: readonly SourceFile[], emitOnly: EmitOnly = EmitOnly.All): EmitResult {
@@ -166,11 +172,29 @@ export function emitFiles(host: EmitHost, files: readonly SourceFile[], emitOnly
     }
     if (paths.declarationFilePath !== '' && emitOnly !== EmitOnly.Js) {
       if (!forced && host.isEmitBlocked(paths.declarationFilePath)) result.emitSkipped = true;
-      else
+      else {
+        if (emitOnly === EmitOnly.DtsAfterJs && paths.jsFilePath !== '') replayScriptTransforms(host, context, file);
         emitDeclarationFile(host, context, file, paths.declarationFilePath, paths.declarationMapPath, result, forced);
+      }
     }
   }
   return result;
+}
+
+/**
+ * Runs the JavaScript transforms of `file` in `context` without printing, for the emit flags they set on the
+ * file's own nodes. Only the decorator transforms set any that declaration emit prints (on decorated parameters'
+ * names), so files without decorators are skipped.
+ */
+function replayScriptTransforms(host: EmitHost, context: EmitContext, file: SourceFile): void {
+  if (!new SyntaxFacts().has(file, SubtreeFacts.ContainsDecorators)) return;
+  let transformed = file;
+  const transformers = getScriptTransformers(host, context, file);
+  for (let i = 0; i < transformers.length; i++) {
+    const transformer = transformers[i];
+    if (transformer.unsupported !== '') return;
+    transformed = transformer.transformSourceFile(transformed);
+  }
 }
 
 /** Emits a declaration file; the host's resolver must be a `DeclarationEmitResolver`. */

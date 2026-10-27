@@ -2015,7 +2015,7 @@ class EmitFilesHandler {
       results.push(
         declarations !== undefined
           ? this.writeThreadOutputs(file, declarations, writer)
-          : program.emitter.emit([file], EmitOnly.Dts, wrapped),
+          : program.emitter.emit([file], emitOnly === EmitOnly.Dts ? EmitOnly.Dts : EmitOnly.DtsAfterJs, wrapped),
       );
     return combineEmitResults(results);
   }

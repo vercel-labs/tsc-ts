@@ -247,7 +247,7 @@ export function startDeclarationThread(
     let declarations: boolean;
     if (emitKinds === undefined) declarations = sourceFileMayBeEmitted(files[i]!, options);
     else declarations = emitKinds[i] === EmitOnly.All || emitKinds[i] === EmitOnly.Dts;
-    kinds.push(declarations ? EmitOnly.Dts : -1);
+    kinds.push(declarations ? (emitsJavaScript(program, emitKinds, i) ? EmitOnly.DtsAfterJs : EmitOnly.Dts) : -1);
     results.push(undefined);
   }
   for (const i of metadata) kinds[i] = emitKinds === undefined ? EmitOnly.All : emitKinds[i]!;
