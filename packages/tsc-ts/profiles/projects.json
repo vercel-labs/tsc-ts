@@ -1,0 +1,77 @@
+{
+  "projects": [
+    {
+      "name": "trpc",
+      "repository": "https://github.com/trpc/trpc",
+      "commit": "10e2ef98f7842b94eb3026e4f9bcfe62cc39b088",
+      "install": ["corepack", "pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
+      "directory": "packages/server",
+      "config": "tsconfig.json"
+    },
+    {
+      "name": "playwright",
+      "repository": "https://github.com/microsoft/playwright",
+      "commit": "321e5f281e3c51b1891337f3f099a64e6b23aaeb",
+      "install": ["npm", "ci", "--ignore-scripts"],
+      "directory": ".",
+      "config": "tsconfig.json"
+    },
+    {
+      "name": "typeorm",
+      "repository": "https://github.com/typeorm/typeorm",
+      "commit": "fe92394287516feeada6e9c308ebe22deca2458e",
+      "install": ["corepack", "pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
+      "directory": "packages/typeorm",
+      "config": "tsconfig.bench.json",
+      "writeConfig": {
+        "extends": "./tsconfig.json",
+        "compilerOptions": { "module": "node16", "moduleResolution": "node16" }
+      }
+    },
+    {
+      "name": "excalidraw",
+      "repository": "https://github.com/excalidraw/excalidraw",
+      "commit": "4c37956ba5f04ec342a9d9d5891a38f22c5b7b4e",
+      "install": ["corepack", "yarn", "install", "--frozen-lockfile", "--ignore-scripts"],
+      "directory": ".",
+      "config": "tsconfig.bench.json",
+      "copyConfig": { "from": "tsconfig.json", "removeCompilerOptions": ["baseUrl"] }
+    },
+    {
+      "name": "sentry",
+      "repository": "https://github.com/getsentry/sentry",
+      "commit": "4e8867b3606a01e571d970bcdebff5e175235e55",
+      "install": ["corepack", "pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
+      "directory": ".",
+      "config": "tsconfig.json"
+    },
+    {
+      "name": "vscode",
+      "repository": "https://github.com/microsoft/vscode",
+      "commit": "9ebdca5c15f666ab336ca0b0421f5ee25bf1cbe0",
+      "install": ["npm", "ci", "--ignore-scripts"],
+      "after": [["node", "build/npm/electronTypes.ts"]],
+      "directory": "src",
+      "config": "tsconfig.bench.json",
+      "writeConfig": { "extends": "./tsconfig.json" }
+    },
+    {
+      "name": "t3code-server",
+      "repository": "https://github.com/pingdotgg/t3code",
+      "commit": "339179f50a84dc599cce373dbb48f172f182f44e",
+      "install": ["corepack", "pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
+      "directory": "apps/server",
+      "config": "tsconfig.bench.json",
+      "writeConfig": { "extends": "./tsconfig.json" }
+    },
+    {
+      "name": "t3code-web",
+      "repository": "https://github.com/pingdotgg/t3code",
+      "commit": "339179f50a84dc599cce373dbb48f172f182f44e",
+      "install": ["corepack", "pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
+      "directory": "apps/web",
+      "config": "tsconfig.bench.json",
+      "writeConfig": { "extends": "./tsconfig.json", "compilerOptions": { "composite": false } }
+    }
+  ]
+}

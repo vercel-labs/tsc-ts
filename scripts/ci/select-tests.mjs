@@ -46,7 +46,7 @@ const rules = [
   [/^packages\/[^/]+\/(package\.json|tsconfig\.json)$/, 'full'],
   [/^packages\/tsc-ts\/src\//, 'source'],
   [/^packages\/[^/]+\/tests\//, 'tests'],
-  [/^packages\/tsc-ts\/scripts\/(pack|build-native)\.mjs$/, 'full'],
+  [/^packages\/tsc-ts\/scripts\/(pack|build-native|profile-match)\.mjs$/, 'full'],
   // Code generators (their output is checked in) and corpus and benchmark tools, which CI does not run.
   [/^packages\/tsc-ts\/scripts\//, 'nothing'],
   // CI configuration, root scripts and manifests, the lockfile, upstream.json, and anything else.
