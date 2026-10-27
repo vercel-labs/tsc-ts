@@ -666,3 +666,24 @@ test(
     assert.equal(actual, expected);
   },
 );
+
+test(
+  'declaration maps leave reused and checker-written types unmapped, as tsgo does',
+  { skip: !existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo' },
+  async () => {
+    const files = {
+      // The second declaration reuses the type serialized for the first.
+      'chained.js': ['/** @param {number} n */', 'exports.f = exports.g = function fg(n) { return n + 1; };'],
+      'binding.ts': [
+        'export const { fn1 = (x: number) => 0, fn2 = fn1 } = { fn1: (x: number) => x + 1, fn2: (x: any) => x };',
+      ],
+      // The checker's type of the returned literal is not the one rechecked for its syntax.
+      'computed.ts': ['export const thing = {', '  doit() {', '    return { [this.a]: "" };', '  },', '};'],
+    };
+    const flags = [...baseFlags, '--declarationMap'];
+    for (const name of ['chained.d.ts.map', 'binding.d.ts.map', 'computed.d.ts', 'computed.d.ts.map']) {
+      const { expected, actual } = await emitBoth(files, name, flags);
+      assert.equal(actual, expected, name);
+    }
+  },
+);

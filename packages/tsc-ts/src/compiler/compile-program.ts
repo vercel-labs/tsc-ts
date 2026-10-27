@@ -480,7 +480,9 @@ export class PlainProgram extends CompilerProgram {
               const emitted = parallel[i];
               // The declaration thread emitted the declarations of the files it could (parallel-emit.ts).
               const ahead = this.checked.declarationsEmittedAhead;
-              const declarations = (): EmitResult => ahead?.[i] ?? this.emitter.emit([file], EmitOnly.Dts, writer);
+              // The file's JavaScript is emitted too, here or on an emit thread.
+              const declarations = (): EmitResult =>
+                ahead?.[i] ?? this.emitter.emit([file], EmitOnly.DtsAfterJs, writer);
               if (emitted === undefined)
                 return ahead !== undefined
                   ? combineEmitResults([this.emitter.emit([file], EmitOnly.Js, writer), declarations()])
