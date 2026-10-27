@@ -474,14 +474,6 @@ class Watcher {
 
   start(): void {
     const sys = this.sys;
-    if (this.config.options.incremental === true || this.config.options.composite === true) {
-      this.snapshot = readBuildInfoProgram(
-        this.config,
-        new FileBuildInfoReader(new SystemFileSystem(sys)),
-        sys.defaultLibraryPath,
-        sys.currentDirectory,
-      );
-    }
     this.status.report(
       watchRestart.resumed
         ? Diagnostics.File_change_detected_Starting_incremental_compilation
@@ -491,59 +483,86 @@ class Watcher {
       watchRestart.firstBuildDone();
       this.changes.watch([this.stamps, this.configStamps]);
     };
-    // A program shared with checker threads is never written: symbols get their ids when created.
     const options = this.config.options;
-    if (parallelParse.spawn !== undefined && checkerThreads(options.checkers, options.singleThreaded) > 1)
+    if (parallelParse.spawn !== undefined && options.singleThreaded !== true) {
+      // Parse threads load the first program, as they load a compile's (`parsesAhead`, tsc-cli.ts), and
+      // it is shared with them: its symbols get their ids when they are created.
       assignSymbolIdsAtCreation();
-    const threads = this.firstBuildThreads();
-    if (threads > 1) this.buildOnThreads(threads, watchChanges);
-    else this.build(watchChanges);
+      this.buildOnThreads(watchChanges);
+      return;
+    }
+    if (isIncremental(options))
+      this.snapshot = readBuildInfoProgram(
+        this.config,
+        new FileBuildInfoReader(new SystemFileSystem(sys)),
+        sys.defaultLibraryPath,
+        sys.currentDirectory,
+      );
+    this.build(watchChanges);
   }
 
   /**
-   * The checker threads of the first build: those of a compile (`compileThreads`), or 1 to build on this
-   * thread. A first build without old state checks every file, as a compile does; rebuilds check what a
-   * change affects (`rebuildThreads`). With build info (`--incremental`), the first build stays here.
+   * Builds the first program as a compile does: parse threads load its files while this thread reads the
+   * build info (`--incremental`), and checker threads check it (parallel-check.ts) unless it checks little.
+   * Without old state, every file is checked, as a compile does; with build info, the files the changes
+   * since affect are, as a rebuild checks them (`recheckOnThreads`). The program is shared with the
+   * threads, so it gets its own copy of the config and a host of its own. Its files go to the watch's
+   * file maps for rebuilds to take, and are never written again: rebuilds check them with the checker's
+   * side tables. Calls `done` once the build is reported.
    */
-  private firstBuildThreads(): number {
-    const options = this.config.options;
-    if (this.snapshot !== undefined || isIncremental(options) || parallelParse.spawn === undefined) return 1;
-    return checkerThreads(options.checkers, options.singleThreaded);
-  }
-
-  /**
-   * Builds the first program as a compile does: parse threads load its files, and checker threads check
-   * it (parallel-check.ts) unless it checks little. The program is shared with them, so it gets its own
-   * copy of the config and a host of its own. Its files go to the watch's file maps for rebuilds to take,
-   * and are never written again: rebuilds check them with the checker's side tables. Calls `done` once
-   * the build is reported.
-   */
-  private buildOnThreads(threads: number, done: () => void): void {
+  private buildOnThreads(done: () => void): void {
     releaseProgramCaches();
     const sys = this.sys;
     const config = copyCommandLine(this.config);
     const options = config.options;
+    const incremental = isIncremental(options);
     const session = new ParseSession(
-      parseThreads(threads),
+      parseThreads(checkerThreads(options.checkers, options.singleThreaded)),
       options,
       sys.currentDirectory,
       config.configName,
       config.fileNames.length > 0,
     );
-    const host = new WatchCompilerHost(
-      sys,
-      new CachedFileSystem(new SystemFileSystem(sys)),
-      this.locale,
-      new WatchSourceFiles(),
-    );
+    const fs = new CachedFileSystem(new SystemFileSystem(sys));
+    const host = new WatchCompilerHost(sys, fs, this.locale, new WatchSourceFiles());
     const loader = new FileLoader(host, config);
     let rootFilesAdded = false;
+    // The build info lists the real paths of the `package.json` files module resolution looked up, as
+    // a compile's does (tsc-cli.ts): those of the threads' lookups are resolved into the file system's cache.
+    const resolvesPackageJsons = incremental && config.configName !== '' && config.buildInfoFileName() !== '';
     session.onIdle = (batch) => {
       if (!rootFilesAdded) rootFilesAdded = loader.addRootFiles(rootFilesPerChunk);
       loader.walkAhead(batch.files);
+      if (resolvesPackageJsons) {
+        const lookups = batch.packageJsons;
+        for (let k = 0; k < lookups.directories.length; k++)
+          if (lookups.exists[k]! || lookups.directoryExists[k]!)
+            fs.realpath(combinePaths(lookups.directories[k]!, 'package.json'));
+      }
+    };
+    // The build info is read while the threads parse, as a compile reads it, or here if they are done first.
+    let buildInfoRead = !incremental;
+    const readBuildInfo = (): void => {
+      if (buildInfoRead) return;
+      buildInfoRead = true;
+      this.snapshot = readBuildInfoProgram(
+        config,
+        new FileBuildInfoReader(new SystemFileSystem(sys)),
+        sys.defaultLibraryPath,
+        sys.currentDirectory,
+      );
+      mark('build info read');
     };
     session.start(config.fileNames, () => {
-      const program = new Program(config, host, loader);
+      readBuildInfo();
+      let program = new Program(config, host, loader);
+      // Where the threads' lookups may miss some `package.json` files of the build info, the program is
+      // loaded again, resolving every file's imports and references itself, as a compile does.
+      if (incremental && !program.hasAllPackageJsonLookups()) {
+        const own = new FileLoader(host, config);
+        own.takesPreparedResolutions = false;
+        program = new Program(config, host, own);
+      }
       // The session's callbacks keep the loader: its tasks go once checking has started.
       releaseLater(loader);
       this.files = this.files.next();
@@ -556,15 +575,21 @@ class Watcher {
       // with the file.
       checked.globalsInFileDiagnostics = true;
       const finish = (): void => {
-        this.finishBuild(checked);
         // Rebuilds parse what changed themselves.
         clearPreparedFiles();
         done();
       };
-      const count = checkerThreads(options.checkers, options.singleThreaded, program);
-      if (count > 1) startParallelCheck(checked, count, finish);
-      else finish();
+      const threads = checkerThreads(options.checkers, options.singleThreaded, program);
+      if (this.snapshot !== undefined && threads > 1) return this.recheckOnThreads(checked, threads, new Map(), finish);
+      const report = (): void => {
+        this.finishBuild(checked);
+        finish();
+      };
+      if (this.snapshot === undefined && threads > 1) startParallelCheck(checked, threads, report);
+      else report();
     });
+    if (incremental && sys.fileExists(config.buildInfoFileName())) session.queueAhead();
+    readBuildInfo();
   }
 
   private configFiles(): string[] {
@@ -694,9 +719,9 @@ class Watcher {
    * affects the global scope. A changed file whose declaration file keeps the signature of the last
    * build affects only itself (`getFilesAffectedBy`); its signature is computed with `checked`'s checker
    * and added to `signatures`. That is what the change affects at most; `recheckOnThreads` then takes
-   * what it does affect. A watch whose first config kept it on one thread gave its symbols no ids at
-   * creation (`start`), so its rebuilds, which take the unchanged files of earlier builds, stay on this
-   * thread after a config edit turns checker threads on.
+   * what it does affect. A watch that started without parse threads (`--singleThreaded`) gave its symbols
+   * no ids at creation (`start`), so its rebuilds, which take the unchanged files of earlier builds, stay on
+   * this thread after a config edit turns checker threads on.
    */
   private rebuildThreads(checked: CheckedProgram, signatures: Map<string, string>): number {
     const program = checked.program;
