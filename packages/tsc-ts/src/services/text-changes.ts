@@ -189,9 +189,14 @@ export class ChangeTracker {
     }
     const separatorString = tokenToString(separator)!;
     if (multilineList) {
-      // The separator right after the element, keeping its trailing comments, then the new element on its own
-      // line with the element's indentation.
-      this.replaceRange(end, end, this.context.created(new Token(separator)), new NodeOptions());
+      // The separator right after the element, then the new element on its own line with the element's
+      // indentation. The separator takes the source position after the element, so the printer writes the
+      // element's trailing comment after it, as tsc does.
+      const separatorToken = this.context.created(new Token(separator));
+      separatorToken.pos = end;
+      separatorToken.end = end + separatorString.length;
+      separatorToken.parent = after.parent;
+      this.replaceRange(end, end, separatorToken, new NodeOptions());
       const indentation = this.findFirstNonWhitespaceColumn(afterStartLinePosition, afterStart);
       let insertPos = skipTrivia(text, end, true, false);
       while (insertPos !== end && isLineBreak(text.charCodeAt(insertPos - 1))) insertPos--;

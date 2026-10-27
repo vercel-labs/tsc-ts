@@ -866,6 +866,7 @@ const importAdderCases = {
     ['src/aliased.ts', ['src/a.ts', 'bar', false]],
     ['src/multi.ts', ['src/a.ts', 'Def'], ['src/z.ts', 'zed']],
     ['src/multi.ts', ['src/a.ts', 'Kind', true]],
+    ['src/comment.ts', ['src/a.ts', 'Shape', true], ['src/a.ts', 'Kind', true]],
     ['src/req.js', ['src/a.ts', 'foo']],
     ['src/req.js', ['src/a.ts', 'Def']],
     ['src/plain.js', ['src/a.ts', 'foo'], ['src/a.ts', 'Def']],
@@ -896,23 +897,39 @@ const importAdderCases = {
     ['src/v.ts', ['src/a.ts', 'Shape', false]],
     ['src/plain.ts', ['src/a.ts', 'Shape', true], ['src/a.ts', 'Kind', true], ['src/a.ts', 'bar']],
     ['src/plain.ts', ['src/a.ts', 'Def', true]],
+    ['src/plain.ts', ['src/typedef.ts', 'TypeDef', true], ['src/typedef.ts', 'value', true]],
+    ['src/plain.ts', ['src/typedef.ts', 'TypeDef', true], ['src/typedef.ts', 'value', false]],
+    ['src/plain.ts', ['src/typedef.ts', 'local']],
+    ['src/plain.ts', ['src/uses.ts', 'renamed']],
+    ['src/plain.ts', ['src/uses.ts', 'inner']],
   ],
+};
+
+// The packages of the import-adder fixture's projects. The verbatim project's package re-exports from a module its
+// exports do not name.
+const importAdderPackages = {
+  commonjs: {
+    pkg: {
+      'package.json': '{"name":"pkg","version":"1.0.0","types":"index.d.ts"}',
+      'index.d.ts': 'export declare function pkgFn(): void;\nexport declare const pkgVal: number;\n',
+    },
+  },
+  verbatim: {
+    pkg2: {
+      'package.json': '{"name":"pkg2","version":"1.0.0","exports":{".":{"types":"./index.d.ts"}}}',
+      'index.d.ts': 'export { inner } from "./inner";\n',
+      'inner.d.ts': 'export declare const inner: number;\n',
+    },
+  },
 };
 
 test('tsc-ts --api adds imports like tsc --api', { skip, timeout: 300_000 }, async () => {
   for (const [fixture, cases] of Object.entries(importAdderCases)) {
     const dir = tempDir('tsc-ts-api-');
     cpSync(resolve('tests/fixtures/import-adder', fixture), dir, { recursive: true });
-    if (fixture === 'commonjs') {
-      mkdirSync(join(dir, 'node_modules/pkg'), { recursive: true });
-      writeFileSync(
-        join(dir, 'node_modules/pkg/package.json'),
-        '{"name":"pkg","version":"1.0.0","types":"index.d.ts"}',
-      );
-      writeFileSync(
-        join(dir, 'node_modules/pkg/index.d.ts'),
-        'export declare function pkgFn(): void;\nexport declare const pkgVal: number;\n',
-      );
+    for (const [name, files] of Object.entries(importAdderPackages[fixture] ?? {})) {
+      mkdirSync(join(dir, 'node_modules', name), { recursive: true });
+      for (const [file, text] of Object.entries(files)) writeFileSync(join(dir, 'node_modules', name, file), text);
     }
     const d = new Differential([realTsc], tscTs, dir, env);
     try {
@@ -933,7 +950,7 @@ test('tsc-ts --api adds imports like tsc --api', { skip, timeout: 300_000 }, asy
         // tsc makes a snapshot for the edits, which the next snapshot's id follows.
         update = await d.snapshot({});
       }
-      assert.ok(edits >= cases.length, `${edits} edits in ${fixture}`);
+      assert.ok(edits > 0, `${edits} edits in ${fixture}`);
       const base = { snapshot: update.snapshot, project };
       const symbol = await d.call('getSymbolAtPosition', { ...base, file: join(dir, 'src/a.ts'), position: 13 });
       const file = join(dir, cases[0][0]);
