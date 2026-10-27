@@ -33,7 +33,14 @@ import type { ModuleSpecifierResult } from './node-builder-names.js';
 import type { EmitHelperFileLinks } from './checker-emit-helpers.js';
 import { sideOf } from './side-state.js';
 import type { Node, PatternAmbientModule, SourceFile } from './ast.js';
-import { CompactLinkTable, IntLinkTable, LinkTable, PagedIdSet, SparseLinkTable } from './link-tables.js';
+import {
+  CompactIntLinkTable,
+  CompactLinkTable,
+  IntLinkTable,
+  LinkTable,
+  PagedIdSet,
+  SparseLinkTable,
+} from './link-tables.js';
 import { getErrorRangeForNode, getSourceFileOfNode } from './binder-utilities.js';
 import {
   Diagnostic,
@@ -450,6 +457,9 @@ export class Checker implements TypeChecking {
    * so far; null where a list repeats a name.
    */
   readonly propertyListIndexes = new Map<Symbol[], PropertyListIndex | number | null>();
+  // Types, targets and mappers of symbols keep a slot per id: they are dense enough, and read on hot
+  // paths. The other symbol columns, which most symbols leave empty, keep only their values
+  // (CompactLinkTable).
   /** The type of a value symbol. */
   readonly symbolTypes = new LinkTable<Type>();
   /** For instantiated and synthetic symbols, the symbol they come from. */
@@ -457,18 +467,18 @@ export class Checker implements TypeChecking {
   /** The mapper of an instantiated symbol or a mapped type property. */
   readonly symbolMappers = new LinkTable<TypeMapper>();
   /** The literal type of a property name. */
-  readonly symbolNameTypes = new LinkTable<Type>();
+  readonly symbolNameTypes = new CompactLinkTable<Type>();
   /** The mapped type of a mapped type property, or the union/intersection of a synthetic property. */
-  readonly symbolContainingTypes = new LinkTable<Type>();
+  readonly symbolContainingTypes = new CompactLinkTable<Type>();
   /** The key type of a mapped type property. */
-  readonly symbolKeyTypes = new LinkTable<Type>();
+  readonly symbolKeyTypes = new CompactLinkTable<Type>();
   /** The property a mapped, spread or synthetic property comes from. */
-  readonly symbolSyntheticOrigins = new LinkTable<Symbol>();
+  readonly symbolSyntheticOrigins = new CompactLinkTable<Symbol>();
   /** The left and right properties a spread property combines. */
-  readonly symbolLeftSpreads = new LinkTable<Symbol>();
-  readonly symbolRightSpreads = new LinkTable<Symbol>();
+  readonly symbolLeftSpreads = new CompactLinkTable<Symbol>();
+  readonly symbolRightSpreads = new CompactLinkTable<Symbol>();
   /** Bits of SymbolFlags for the meanings in which a symbol was referenced. */
-  readonly symbolReferenceKinds = new IntLinkTable();
+  readonly symbolReferenceKinds = new CompactIntLinkTable();
   /** The resolved symbol of an identifier, entity name or call. */
   readonly resolvedSymbols = new CompactLinkTable<Symbol>();
   /** The resolved type of a type node or expression. */
@@ -680,10 +690,10 @@ export class Checker implements TypeChecking {
   /** Empty lists for type arguments that are compared with cached instantiations before any is kept. */
   readonly freeTypeLists: Type[][] = [];
   /**
-   * 1 by type id for the anonymous and mapped types whose declaration has no outer type parameters
+   * The ids of the anonymous and mapped types whose declaration has no outer type parameters
    * to instantiate (`getObjectTypeInstantiation`).
    */
-  readonly withoutOuterTypeParameters = new IntLinkTable();
+  readonly withoutOuterTypeParameters = new PagedIdSet();
   conditionalConstraintDepth = 0;
 
   readonly suggestionResolver: SuggestionNameResolver;

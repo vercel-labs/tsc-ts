@@ -314,14 +314,16 @@ class CompactLinkPage {
 }
 
 /**
- * Values by node id, for ids a checker stores a value for in more than about one in sixteen of the
- * ids of the pages it touches: the symbols it resolves for the identifiers and names of the files it
- * checks (one in four to one in eight), and the types and signatures it resolves for their type
- * nodes and calls (one in twelve to one in seventeen). Pages of `LinkPaging.Size` ids keep a presence
- * bit per id and only the values stored, so a value costs about one array slot. A `LinkTable` page
- * costs a slot for every id, and a `Map` entry also stores its key and a share of the hash buckets.
- * At fewer values per page than that, the page's own allocations outweigh what it saves, and a
- * `SparseLinkTable` costs less.
+ * Values by node or symbol id, for ids a checker stores a value for in more than about one in
+ * sixteen of the ids of the pages it touches: the symbols it resolves for the identifiers and names
+ * of the files it checks (one in four to one in eight), the types and signatures it resolves for
+ * their type nodes and calls (one in twelve to one in seventeen), and the symbol columns most
+ * symbols leave empty, such as the name type of a property (one in ten to one in three with
+ * `--checkers 16`, where every checker touches symbols across the whole program). Pages of
+ * `LinkPaging.Size` ids keep a presence bit per id and only the values stored, so a value costs
+ * about one array slot. A `LinkTable` page costs a slot for every id, and a `Map` entry also stores
+ * its key and a share of the hash buckets. At fewer values per page than that, the page's own
+ * allocations outweigh what it saves, and a `SparseLinkTable` costs less.
  */
 export class CompactLinkTable<T> {
   readonly pages: (CompactLinkPage | undefined)[] = [];
@@ -384,5 +386,29 @@ export class CompactLinkTable<T> {
     this.pages.length = 0;
     this.values.length = 0;
     this.size = 0;
+  }
+}
+
+/**
+ * Int32 values by id, zero where none is stored, in a `CompactLinkTable`: pages of
+ * `LinkPaging.Size` ids keep a presence bit per id and only the nonzero values. For columns where a
+ * checker stores a value for fewer than about one in three of the ids of the pages it touches, such
+ * as the reference kinds of the symbols its files reference: an `IntLinkTable` page costs four bytes
+ * for every id.
+ */
+export class CompactIntLinkTable {
+  private readonly table = new CompactLinkTable<number>();
+
+  get(id: number): number {
+    return this.table.get(id) ?? 0;
+  }
+
+  set(id: number, value: number): void {
+    value = value | 0;
+    this.table.set(id, value === 0 ? undefined : value);
+  }
+
+  clear(): void {
+    this.table.clear();
   }
 }

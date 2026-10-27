@@ -493,7 +493,7 @@ function getObjectTypeInstantiation(
   mapper: TypeMapper,
   alias: TypeAlias | undefined,
 ): Type {
-  if ((type.objectFlags & ObjectFlags.Reference) === 0 && c.withoutOuterTypeParameters.get(type.id) !== 0) return type;
+  if ((type.objectFlags & ObjectFlags.Reference) === 0 && c.withoutOuterTypeParameters.has(type.id)) return type;
   let declaration: Node;
   if ((type.objectFlags & ObjectFlags.Reference) !== 0) declaration = (type as TypeReference).node!;
   else if ((type.objectFlags & ObjectFlags.InstantiationExpressionType) !== 0)
@@ -529,7 +529,7 @@ function getObjectTypeInstantiation(
     links.outerTypeParameters = typeParameters;
   }
   if (typeParameters.length === 0) {
-    if ((type.objectFlags & ObjectFlags.Reference) === 0) c.withoutOuterTypeParameters.set(type.id, 1);
+    if ((type.objectFlags & ObjectFlags.Reference) === 0) c.withoutOuterTypeParameters.add(type.id);
     return type;
   }
   // The type arguments, mapped as `combineTypeMappers(c, type.mapper, mapper)` maps them, into a
