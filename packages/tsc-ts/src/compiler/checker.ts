@@ -405,8 +405,9 @@ export class Checker implements TypeChecking {
   /** Number of `typeToString` calls in progress. */
   serializationLevel = 0;
   /**
-   * `typeToString` results by type, enclosing declaration and flags: the prints that created no types, which a
-   * later print with the same inputs repeats exactly (`typeToString`).
+   * `typeToString` results by type, enclosing declaration, flags and the type parameter of the variance check in
+   * progress: the prints that created no types, which a later print with the same inputs repeats exactly
+   * (`typeToString`).
    */
   readonly typeStrings = new Map<string, string>();
   /** `symbolToString` results by symbol, then by enclosing declaration and flags, kept as `typeStrings` are. */

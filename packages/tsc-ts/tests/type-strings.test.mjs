@@ -108,3 +108,29 @@ test('symbol prints are kept by symbol, declaration and flags', () => {
   }
   assert.equal(checker.symbolStrings.get(symbol).size, 1, 'prints nested in a serialization are not kept');
 });
+
+// Variance checks print their marker types after the type parameter being checked (`sub-T`, `super-T`): the same
+// marker type prints differently for each annotation.
+const varianceDir = tempDir('tsc-ts-type-strings-variance-');
+writeFileSync(
+  join(varianceDir, 'tsconfig.json'),
+  JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [] }, files: ['a.ts'] }),
+);
+writeFileSync(join(varianceDir, 'a.ts'), ['interface A<in T> { f: T }', 'interface B<in U> { f: U }', ''].join('\n'));
+
+/** A diagnostic's arguments, then those of its message chain, depth first. */
+function chainArgs(d) {
+  return [...d.args, ...d.messageChain.flatMap(chainArgs)];
+}
+
+test('marker types print after the type parameter of each variance check', () => {
+  const work = executeCommandLine(createNodeSystem(bundledLibs, ''), ['-p', varianceDir]);
+  assert.equal(work.kind, 'compile');
+  const file = work.program.getSourceFiles().find((f) => f.fileName.endsWith('/a.ts'));
+  const checker = new CheckedProgram(work.program).createChecker();
+  // As tsgo 7.1 reports them.
+  assert.deepEqual(checker.getDiagnostics(file).map(chainArgs), [
+    ['A<super-T>', 'A<sub-T>', 'f', 'super-T', 'sub-T'],
+    ['B<super-U>', 'B<sub-U>', 'f', 'super-U', 'sub-U'],
+  ]);
+});

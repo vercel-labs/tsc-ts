@@ -31,12 +31,16 @@ export function typeToString(c: Checker, t: Type, enclosingDeclaration?: Node, f
     flags ?? NodeBuilderFlags.AllowUniqueESSymbolType | NodeBuilderFlags.UseAliasDefinedOutsideCurrentScope;
   // Prints nested in a serialization depend on its depth (typeToStringFromTypeNode), so only the others are kept.
   if (c.serializationLevel !== 0) return typeToStringFromTypeNode(c, t, enclosingDeclaration, formatFlags) ?? '';
+  // The variance check in progress names the marker types (`sub-T`, `super-T`) after its type parameter.
+  const variance = c.varianceTypeParameter;
   const key =
     String(t.id) +
     ',' +
     String(enclosingDeclaration === undefined ? 0 : enclosingDeclaration.id) +
     ',' +
-    String(formatFlags);
+    String(formatFlags) +
+    ',' +
+    String(variance === undefined ? 0 : variance.id);
   const cached = c.typeStrings.get(key);
   if (cached !== undefined) return cached;
   // A print that creates no types reads only types that exist and settled state, so printing again gives the same
