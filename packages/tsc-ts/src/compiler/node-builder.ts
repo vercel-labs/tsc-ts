@@ -296,6 +296,20 @@ export class TrackedSymbol {
   }
 }
 
+/**
+ * The caches of tsgo's node builder that outlive one request: an emit resolver keeps one node builder, so the types
+ * serialized for one declaration are reused, as copies without positions, by the next ones in the file.
+ */
+export class NodeBuilderCaches {
+  readonly serializedTypes: Map<number, Map<string, SerializedTypeEntry>>;
+  readonly fakeScopes: Map<Node, string>;
+
+  constructor() {
+    this.serializedTypes = new Map<number, Map<string, SerializedTypeEntry>>();
+    this.fakeScopes = new Map<Node, string>();
+  }
+}
+
 class SerializedTypeEntry {
   readonly node: Node;
   readonly truncating: boolean;
@@ -539,6 +553,12 @@ export class NodeBuilder {
   /** The kind of fake scope a block stands for: `params` or `typeParams`. */
   get fakeScopes(): Map<Node, string> {
     return (this.fakeScopesStore ??= new Map<Node, string>());
+  }
+
+  /** Uses `caches` for the types this builder serializes and its fake scopes, sharing them with other builders. */
+  useCaches(caches: NodeBuilderCaches): void {
+    this.serializedTypesStore = caches.serializedTypes;
+    this.fakeScopesStore = caches.fakeScopes;
   }
 
   /** `result`, or undefined if serialization failed. */
@@ -1701,12 +1721,10 @@ export class NodeBuilder {
       typeElements.push(this.signatureToSignatureDeclaration(signature, SyntaxKind.ConstructSignature, undefined));
     }
     for (const info of resolved.indexInfos) {
-      // tsgo creates the placeholder for every index signature, and its length counts toward truncation.
-      const placeholder = this.createElidedInformationPlaceholder();
       const typeNode =
         (t.objectFlags & ObjectFlags.ReverseMapped) !== 0 &&
         (this.flags & NodeBuilderFlags.AllowAnonymousIdentifier) !== 0
-          ? placeholder
+          ? this.createElidedInformationPlaceholder()
           : undefined;
       for (const element of this.indexInfoToObjectComputedNamesOrSignatureDeclaration(info, typeNode))
         typeElements.push(element);

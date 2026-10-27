@@ -419,13 +419,19 @@ function isValidESSymbolDeclaration(node: Node): boolean {
   return false;
 }
 
+/** tsgo's ast.BlockIdOffset, the first id of the symbols a checker numbers. */
+const symbolBlockIdOffset = 2 ** 48;
+
 export function getESSymbolLikeTypeForNode(c: Checker, node: Node): Type {
   if (isValidESSymbolDeclaration(node)) {
     const symbol = getSymbolOfDeclaration(c, node);
     if (symbol !== undefined) {
       let uniqueType = c.uniqueESSymbolTypes.get(symbol);
       if (uniqueType === undefined) {
-        uniqueType = new UniqueESSymbolType(c.nextTypeId(), symbol, '￾@' + symbol.name + '@' + getSymbolId(symbol));
+        // tsgo numbers the symbols its checker keeps links for from 2^48 (ast.BlockIdOffset), and the name's length
+        // counts toward the node builder's truncation.
+        const name = '￾@' + symbol.name + '@' + (symbolBlockIdOffset + getSymbolId(symbol));
+        uniqueType = new UniqueESSymbolType(c.nextTypeId(), symbol, name);
         c.uniqueESSymbolTypes.set(symbol, uniqueType);
       }
       return uniqueType;

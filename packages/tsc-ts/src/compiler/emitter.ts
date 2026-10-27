@@ -157,13 +157,17 @@ export function emitFiles(host: EmitHost, files: readonly SourceFile[], emitOnly
     const file = files[i];
     if (!sourceFileMayBeEmitted(file, options) || host.isSourceFileFromExternalLibrary(file)) continue;
     const paths = getOutputPathsFor(file.fileName, file.scriptKind === ScriptKind.JSON, options, host, forced);
+    // As in tsgo, a file's JavaScript and declarations share one emit context: emit flags that JavaScript
+    // transforms set on the file's own nodes, such as a decorated parameter's name, also apply to its declarations.
+    const context = new EmitContext();
     if (paths.jsFilePath !== '' && (emitOnly === EmitOnly.All || emitOnly === EmitOnly.Js)) {
       if (host.isEmitBlocked(paths.jsFilePath)) result.emitSkipped = true;
-      else emitJSFile(host, file, paths.jsFilePath, paths.sourceMapFilePath, result);
+      else emitJSFile(host, context, file, paths.jsFilePath, paths.sourceMapFilePath, result);
     }
     if (paths.declarationFilePath !== '' && emitOnly !== EmitOnly.Js) {
       if (!forced && host.isEmitBlocked(paths.declarationFilePath)) result.emitSkipped = true;
-      else emitDeclarationFile(host, file, paths.declarationFilePath, paths.declarationMapPath, result, forced);
+      else
+        emitDeclarationFile(host, context, file, paths.declarationFilePath, paths.declarationMapPath, result, forced);
     }
   }
   return result;
@@ -172,6 +176,7 @@ export function emitFiles(host: EmitHost, files: readonly SourceFile[], emitOnly
 /** Emits a declaration file; the host's resolver must be a `DeclarationEmitResolver`. */
 function emitDeclarationFile(
   host: EmitHost,
+  context: EmitContext,
   file: SourceFile,
   declarationFilePath: string,
   declarationMapPath: string,
@@ -184,7 +189,6 @@ function emitDeclarationFile(
     return false;
   }
   const options = host.options;
-  const context = new EmitContext();
   const transformer = new DeclarationTransformer(context, host, options, resolver, declarationFilePath);
   const transformed = transformer.transformSourceFile(file);
   result.declarationTransformed = true;
@@ -269,13 +273,13 @@ function isJsxTransformEnabled(options: CompilerOptions): boolean {
 
 function emitJSFile(
   host: EmitHost,
+  context: EmitContext,
   file: SourceFile,
   jsFilePath: string,
   sourceMapFilePath: string,
   result: EmitResult,
 ): boolean {
   const options = host.options;
-  const context = new EmitContext();
   let transformed = file;
   const transformers = getScriptTransformers(host, context, file);
   for (let i = 0; i < transformers.length; i++) {

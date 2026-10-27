@@ -189,7 +189,8 @@ class Flattener {
       if (this.hoistTempVariables) {
         const value = factory.inlineExpressions(this.expressions)!;
         this.expressions = [];
-        this.emitBinding(temp, value, -1, -1, undefined);
+        // tsgo gives this declaration the empty range at the start of the file (core.TextRange{}), not a synthesized one.
+        this.emitBinding(temp, value, 0, 0, undefined);
       } else {
         this.visitor.context.addVariableDeclaration(temp);
         const last = this.declarations[this.declarations.length - 1]!;

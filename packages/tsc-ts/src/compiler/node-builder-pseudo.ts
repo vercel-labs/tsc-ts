@@ -33,7 +33,7 @@ import { isFunctionLike } from './ast-utilities.js';
 import { getSourceFileOfNode, isEntityNameExpression } from './binder-utilities.js';
 import type { Checker } from './checker.js';
 import { ContextFlags, getContextualType, instantiateContextualType } from './checker-contextual.js';
-import { checkExpressionCached, isConstContext, isLiteralOfContextualType } from './checker-expressions.js';
+import { getTypeOfExpression, isConstContext, isLiteralOfContextualType } from './checker-expressions.js';
 import { getTypeWithFacts, TypeFacts } from './checker-flow.js';
 import { getPropertiesOfType, getPropertyOfType } from './checker-members.js';
 import {
@@ -154,7 +154,8 @@ export function getRegularTypeOfExpression(c: Checker, node: Node): Type {
     (parent instanceof PropertyAccessExpression && parent.name === node)
   )
     expr = parent;
-  return getRegularTypeOfLiteralType(c, checkExpressionCached(c, expr));
+  // Rechecks the expression, as tsgo does, unless its type needed control flow analysis.
+  return getRegularTypeOfLiteralType(c, getTypeOfExpression(c, expr));
 }
 
 function keyword(b: NodeBuilder, kind: SyntaxKind): Node {
@@ -219,7 +220,7 @@ export function pseudoTypeToNode(b: NodeBuilder, t: PseudoType): Node | undefine
       if (parent.kind === SyntaxKind.ArrowFunction && getBody(parent) === node)
         return b.serializeReturnTypeForSignatureEx(getSignatureFromDeclaration(c, parent), false);
       if (isDeclaration(parent)) return b.serializeTypeForDeclaration(parent, undefined, undefined, false);
-      return b.typeToTypeNode(getTypeOfExpressionForPseudo(c, node));
+      return b.typeToTypeNode(getTypeOfExpression(c, node));
     }
     case PseudoTypeKind.NoResult: {
       const node = (t as NoResultType).declaration;
@@ -760,10 +761,6 @@ export function pseudoReturnTypeMatchesPredicate(b: NodeBuilder, rt: PseudoType,
       return false;
   } else if (node.type !== undefined) return false;
   return true;
-}
-
-function getTypeOfExpressionForPseudo(c: Checker, node: Node): Type {
-  return checkExpressionCached(c, node);
 }
 
 /** The type a pseudo-type denotes, for the kinds that map to one directly. */

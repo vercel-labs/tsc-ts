@@ -145,3 +145,133 @@ test(
     }
   },
 );
+
+/** Writes each `[unit, name, text]` as `dir/unit/name` and compares their emit, in one batch, with tsgo's. */
+async function compareUnits(units, flagSets) {
+  const command = buildEmitDriver();
+  const dir = tempDir('tsc-ts-emit-units-test-');
+  const paths = [];
+  for (const [unit, name, text] of units) {
+    mkdirSync(join(dir, unit), { recursive: true });
+    paths.push(join(dir, unit, name));
+    writeFileSync(paths.at(-1), text);
+  }
+  for (const flags of flagSets) {
+    const result = await compareEmits(command, dir, paths, flags, 1);
+    assert.deepEqual(result.failures, [], `emitting with ${flags.join(' ') || 'defaults'}`);
+    assert.equal(result.units, new Set(units.map(([unit]) => unit)).size);
+  }
+}
+
+test(
+  'emit inlines the const enum members that accesses name as values, as tsgo does',
+  { skip: !existsSync(tsgo) && 'needs tsgo' },
+  async () => {
+    await compareUnits(
+      [
+        ['global', 'g.ts', 'declare const enum E { A = 1, B }\n'],
+        // The module's own `E` hides the global const enum.
+        ['local', 'a.ts', 'let E = { A: 1 } as const;\nexport const o = { [E.A]: 1, b: E.A, c: E["A"] };\n'],
+        ['uses', 'b.ts', 'export const v = E.B, w = E["A"];\n'],
+        [
+          'namespace',
+          'c.ts',
+          'namespace N { export const enum F { X = 3 } }\nexport const x = N.F.X, y = N.F["X"];\n' +
+            'function f(N: { F: { X: number } }) { return N.F.X; }\nf;\n',
+        ],
+        // A namespace merged with an import has the members of the imported const enum.
+        ['enum', 'enum.ts', 'export const enum Enum { One = 1 }\n'],
+        [
+          'merge',
+          'merge.ts',
+          'import { Enum } from "../enum/enum";\nnamespace Enum { export type Foo = number; }\nexport { Enum };\n',
+        ],
+        ['index', 'index.ts', 'import { Enum } from "../merge/merge";\nexport const one = Enum.One;\n'],
+      ],
+      [[], ['--module', 'commonjs']],
+    );
+  },
+);
+
+test(
+  'emit elides imports that checking never resolves, as tsgo does',
+  { skip: !existsSync(tsgo) && 'needs tsgo' },
+  async () => {
+    await compareUnits(
+      [
+        [
+          'm',
+          'm.ts',
+          'export function foo(a: any, b: any, c: any) {}\nexport class A {}\nexport class B {}\n' +
+            "export const s = 1, k = 'a', w = 1, x = {}, X = [1];\nexport function d(a: any, b?: any) {}\n",
+        ],
+        // A parameter decorator, which only experimentalDecorators allows.
+        [
+          'decorator',
+          'a.ts',
+          'import { foo, d } from "../m/m";\nexport class C { constructor(@foo p: any) {} m(@d q: any) {} }\n' +
+            'export const e = class { @d m() {} };\n',
+        ],
+        ['shorthand', 'b.ts', 'import { s } from "../m/m";\nexport const o = { s = 5 };\n'],
+        ['for', 'c.ts', 'import { X } from "../m/m";\nfor (var of X) {}\n'],
+        ['computed', 'd.ts', 'import { k, x } from "../m/m";\nexport class C { [k in x] = 1; }\n'],
+        [
+          'heritage',
+          'e.ts',
+          'import { A, B } from "../m/m";\nexport class C extends A, B {}\nexport interface I extends B {}\n',
+        ],
+        ['with', 'g.ts', 'import { w } from "../m/m";\ndeclare const obj: any;\nwith (obj) { w; }\n'],
+      ],
+      [[], ['--experimentalDecorators'], ['--module', 'commonjs']],
+    );
+  },
+);
+
+test(
+  'emit maps the temporary declaration of a flattened binding as tsgo does',
+  { skip: !existsSync(tsgo) && 'needs tsgo' },
+  async () => {
+    await compareUnits(
+      [
+        ['empty', 'a.ts', 'declare const x: any;\nexport var {...{ }} = x;\n'],
+        [
+          'nested',
+          'b.ts',
+          'declare const y: any;\nexport var { a, ...{ b } } = y;\nexport let { c: [d], ...e } = y;\n',
+        ],
+      ],
+      [
+        ['--target', 'es2017', '--sourceMap'],
+        ['--target', 'es2015', '--module', 'commonjs', '--sourceMap'],
+      ],
+    );
+  },
+);
+
+test(
+  'emit keeps imports of names that an export star also re-exports as values, as tsgo does',
+  { skip: !existsSync(tsgo) && 'needs tsgo' },
+  async () => {
+    await compareUnits(
+      [
+        ['a', 'a.ts', 'export class A {}\nexport class B {}\n'],
+        ['typeFirst', 'b.ts', 'export type * from "../a/a";\nexport * from "../a/a";\n'],
+        ['valueFirst', 'c.ts', 'export * from "../a/a";\nexport type * from "../a/a";\n'],
+        ['typeOnly', 'd.ts', 'export type * from "../a/a";\n'],
+        ['chain', 'e.ts', 'export type * from "../typeOnly/d";\nexport * from "../a/a";\n'],
+        ['through', 'f.ts', 'export * from "../typeOnly/d";\n'],
+        [
+          'uses',
+          'g.ts',
+          'import { A } from "../typeFirst/b";\nimport { B } from "../valueFirst/c";\n' +
+            'import { A as D } from "../typeOnly/d";\nimport { B as E } from "../chain/e";\n' +
+            'import { A as F } from "../through/f";\nnew A(); new B(); new D(); new E(); new F();\n',
+        ],
+      ],
+      [
+        ['--module', 'commonjs'],
+        ['--module', 'esnext'],
+      ],
+    );
+  },
+);

@@ -84,7 +84,7 @@ import { isArrayType, isErrorType, isFreshLiteralType, isTupleType } from './che
 import { isTypeAssignableToKind } from './checker-type-operators.js';
 import { type IndexInfo, type LiteralType, SignatureKind, type Type, TypeFlags } from './checker-types.js';
 import { hasLateBindableName } from './checker-utilities.js';
-import { NodeBuilder, isEntityNameVisible, isOptionalParameter } from './node-builder.js';
+import { NodeBuilder, NodeBuilderCaches, isEntityNameVisible, isOptionalParameter } from './node-builder.js';
 import {
   getRegularTypeOfExpression,
   newPseudoChecker,
@@ -126,12 +126,17 @@ export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {
   /** Answers the queries that don't need types. */
   private readonly syntactic: SyntacticDeclarationEmitResolver;
   private readonly aliasesMarked: Set<SourceFile>;
+  /** The emit context of the last node builder, and the caches the builders for it share. */
+  private builderContext: EmitContext | undefined;
+  private builderCaches: NodeBuilderCaches | undefined;
 
   constructor(checker: Checker, syntactic: SyntacticDeclarationEmitResolver) {
     super();
     this.checker = checker;
     this.syntactic = syntactic;
     this.aliasesMarked = new Set<SourceFile>();
+    this.builderContext = undefined;
+    this.builderCaches = undefined;
   }
 
   // JavaScript emit
@@ -418,6 +423,12 @@ export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {
     );
     b.pseudo = newPseudoChecker(this.checker);
     b.declarationOrder = true;
+    // tsgo's emit resolver, one per emit context, keeps one node builder for all its requests.
+    if (context !== this.builderContext || this.builderCaches === undefined) {
+      this.builderContext = context;
+      this.builderCaches = new NodeBuilderCaches();
+    }
+    b.useCaches(this.builderCaches);
     return b;
   }
 
