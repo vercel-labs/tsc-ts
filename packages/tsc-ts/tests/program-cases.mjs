@@ -546,6 +546,29 @@ export function fixtureProjects() {
     'node_modules/lib1/index.js': 'require("lib2");\n',
     'node_modules/lib2/index.js': 'module.exports = 1;\n',
   });
+  // `pc` is reached first at depth 3, through `pa` and `pb`, and later at depth 1, through a chain of local
+  // imports from b.ts: its JavaScript import loads within `maxNodeModuleJsDepth` only from the lower depth.
+  for (const depth of [1, 2]) {
+    add(`js-depth-lowered-${depth}`, {
+      'tsconfig.json': json({
+        compilerOptions: { allowJs: true, maxNodeModuleJsDepth: depth },
+        files: ['a.ts', 'b.ts'],
+      }),
+      'a.ts': 'import "pa";\n',
+      'b.ts': 'import "./c";\n',
+      'c.ts': 'import "./d";\n',
+      'd.ts': 'import "./e";\n',
+      'e.ts': 'import "./f";\n',
+      'f.ts': 'import "./g";\n',
+      'g.ts': 'import "./h";\n',
+      'h.ts': 'import "pc";\n',
+      'node_modules/pa/index.d.ts': 'import "pb";\n',
+      'node_modules/pb/index.d.ts': 'import "pc";\n',
+      'node_modules/pc/index.d.ts': 'import "pj";\n',
+      'node_modules/pj/index.js': 'require("pk");\n',
+      'node_modules/pk/index.js': 'module.exports = 1;\n',
+    });
+  }
   add('js-without-allowjs', {
     'tsconfig.json': '{}',
     'a.ts': 'import "./b";\nimport "lib";\n',
