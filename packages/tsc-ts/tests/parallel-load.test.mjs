@@ -260,6 +260,38 @@ test('a program loaded batch by batch is the same program when files are reached
   assert.equal(describe(program), expected);
 });
 
+// With allowJs, a JavaScript file in node_modules past maxNodeModuleJsDepth is not loaded, and no
+// parse thread prepares it: walking ahead goes past an import of one instead of waiting for it, so the
+// loader takes every prepared file before the program loads. The roots' work runs last root first, so
+// b.ts's import comes before a.ts and c.ts.
+test('walking ahead does not wait for a JavaScript file past maxNodeModuleJsDepth', () => {
+  const dir = tempDir('tsc-ts-parallel-load-elided-');
+  const files = {
+    'tsconfig.json': JSON.stringify({
+      compilerOptions: { allowJs: true, noEmit: true, lib: ['es2022'], types: [] },
+      include: ['src'],
+    }),
+    'src/a.ts': "import { c } from './c';\nexport const a = c;\n",
+    'src/b.ts': "import 'untyped';\nexport const b = 1;\n",
+    'src/c.ts': 'export const c = 1;\n',
+    'node_modules/untyped/package.json': JSON.stringify({ name: 'untyped', version: '1.0.0', main: 'index.js' }),
+    'node_modules/untyped/index.js': 'exports.u = 1;\n',
+  };
+  for (const [name, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), text);
+  }
+  clearPrepared();
+  const plain = executeCommandLine(createNodeSystem(bundledLibs, ''), ['-p', dir]);
+  assert.equal(plain.kind, 'compile');
+  const expected = describe(plain.program);
+  assert.ok(!plain.program.getSourceFiles().some((file) => file.fileName.includes('untyped')));
+
+  const { program, takenAhead } = loadBatchByBatch(dir, ['lib.es2022.d.ts']);
+  assert.equal(takenAhead, program.getSourceFiles().length);
+  assert.equal(describe(program), expected);
+});
+
 function clearPrepared() {
   parallelParse.files.clear();
   parallelParse.used = 0;

@@ -129,7 +129,7 @@ import {
   resolveEntityName,
   resolveName,
   getFirstIdentifier,
-  getCannotFindNameDiagnosticForName,
+  cannotFindNameAtLocation,
   getDeclarationOfAliasSymbol,
   TypeSystemPropertyName,
   popTypeResolution,
@@ -553,14 +553,14 @@ export function getResolvedSymbol(c: Checker, node: Node): Symbol {
   const cached = c.resolvedSymbols.get(node.id);
   if (cached !== undefined) return cached;
   let symbol = c.unknownSymbol;
-  if (getText(node) !== '') {
-    const text = getText(node);
+  const text = getText(node);
+  if (text !== '') {
     const found = resolveName(
       c,
       node,
       text,
       SymbolFlags.Value | SymbolFlags.ExportValue,
-      getCannotFindNameDiagnosticForName(c, node),
+      cannotFindNameAtLocation,
       !isWriteOnlyAccess(node),
       false,
     );
