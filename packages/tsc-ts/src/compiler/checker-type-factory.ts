@@ -1145,7 +1145,30 @@ export function filterType(c: Checker, type: Type, f: (t: Type) => boolean): Typ
 }
 
 export function removeType(c: Checker, type: Type, target: Type): Type {
-  return filterType(c, type, (t) => t !== target);
+  if ((type.flags & TypeFlags.Union) === 0) return type === target ? c.neverType : type;
+  const union = type as UnionType;
+  const origin = union.origin;
+  // An origin that lists the target keeps the rest of its constituents.
+  if (
+    origin !== undefined &&
+    (origin.flags & TypeFlags.Union) !== 0 &&
+    containsType(c, (origin as UnionType).types, target)
+  )
+    return filterType(c, type, (t) => t !== target);
+  const types = union.types;
+  const index =
+    types.length < linearTypeSearchLimit ? indexOfType(types, target, 0) : binarySearchTypes(c, types, target);
+  if (index < 0) return type;
+  if (types.length === 2) return types[1 - index]!;
+  const filtered: Type[] = [];
+  for (let i = 0; i < types.length; i++) if (i !== index) filtered.push(types[i]!);
+  return getUnionTypeFromSortedList(
+    c,
+    filtered,
+    union.objectFlags & (ObjectFlags.PrimitiveUnion | ObjectFlags.ContainsIntersections),
+    undefined,
+    undefined,
+  );
 }
 
 export function countTypes(type: Type): number {
@@ -2010,19 +2033,24 @@ function intersectUnionsOfPrimitiveTypes(c: Checker, types: Type[]): boolean {
 }
 
 function eachUnionContains(c: Checker, unionTypes: Type[], t: Type): boolean {
-  for (const type of unionTypes) {
-    const u = type as UnionType;
-    if (unionContainsType(c, u, t)) continue;
-    if (t === c.missingType) return unionContainsType(c, u, c.undefinedType);
-    if (t === c.undefinedType) return unionContainsType(c, u, c.missingType);
-    let primitive: Type | undefined;
-    if ((t.flags & TypeFlags.StringLiteral) !== 0) primitive = c.stringType;
-    else if ((t.flags & (TypeFlags.Enum | TypeFlags.NumberLiteral)) !== 0) primitive = c.numberType;
-    else if ((t.flags & TypeFlags.BigIntLiteral) !== 0) primitive = c.bigintType;
-    else if ((t.flags & TypeFlags.UniqueESSymbol) !== 0) primitive = c.esSymbolType;
-    if (primitive === undefined || !unionContainsType(c, u, primitive)) return false;
-  }
+  for (const type of unionTypes) if (!unionContainsTypeOrPrimitive(c, type as UnionType, t, true)) return false;
   return true;
+}
+
+/**
+ * Whether `union` contains `t`, `undefined` where `t` is the missing type and the other way around, or
+ * the primitive type of literal `t` (of a unique symbol only with `matchSymbol`).
+ */
+export function unionContainsTypeOrPrimitive(c: Checker, union: UnionType, t: Type, matchSymbol: boolean): boolean {
+  if (unionContainsType(c, union, t)) return true;
+  if (t === c.missingType) return unionContainsType(c, union, c.undefinedType);
+  if (t === c.undefinedType) return unionContainsType(c, union, c.missingType);
+  let primitive: Type | undefined;
+  if ((t.flags & TypeFlags.StringLiteral) !== 0) primitive = c.stringType;
+  else if ((t.flags & (TypeFlags.Enum | TypeFlags.NumberLiteral)) !== 0) primitive = c.numberType;
+  else if ((t.flags & TypeFlags.BigIntLiteral) !== 0) primitive = c.bigintType;
+  else if ((t.flags & TypeFlags.UniqueESSymbol) !== 0 && matchSymbol) primitive = c.esSymbolType;
+  return primitive !== undefined && unionContainsType(c, union, primitive);
 }
 
 export function getCrossProductUnionSize(types: readonly Type[]): number {

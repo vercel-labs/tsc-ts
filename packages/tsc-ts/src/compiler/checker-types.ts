@@ -182,6 +182,9 @@ export const enum ObjectFlags {
   ContainsIntersections = 1 << 25,
   IsUnknownLikeUnionComputed = 1 << 26,
   IsUnknownLikeUnion = 1 << 27,
+  IsUniformEnumComputed = 1 << 28,
+  /** A primitive union in which no two literal constituents are comparable (`isUniformUnionType`). */
+  IsUniformEnum = 1 << 29,
   // Intersections only.
   IsNeverIntersectionComputed = 1 << 25,
   IsNeverIntersection = 1 << 26,
