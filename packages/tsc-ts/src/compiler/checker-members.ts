@@ -17,7 +17,9 @@ import {
   type InterfaceType,
   type IntersectionType,
   type MappedType,
+  DeclaredMemberPlan,
   MemberNames,
+  NamedMemberOrder,
   ObjectFlags,
   type ObjectType,
   type Signature,
@@ -80,6 +82,7 @@ import {
   getLateBoundSymbol,
   getMembersOfSymbol,
   getMergedSymbol,
+  getNamedMemberPositions,
   getNamedMembers,
   getSymbolOfDeclaration,
   isReservedMemberName,
@@ -105,6 +108,8 @@ import {
   instantiateSignatures,
   instantiateSymbol,
   instantiateType,
+  isThisless,
+  keepsSymbolTypeUnderInstantiation,
   keepsSymbolUnderInstantiation,
   newInstantiatedSymbol,
   instantiateTypes,
@@ -344,6 +349,8 @@ export class PendingInstantiatedMembers extends PendingMembers {
   readonly sourceTable: SymbolTable | undefined;
   /** Anonymous type instantiations: the properties of the target, in order. */
   readonly sourceList: Symbol[] | undefined;
+  /** The source's members at their positions: `sourceList`, or the declared members in table order. */
+  readonly sourceMembers: Symbol[];
   readonly mapper: TypeMapper;
   /** MemberState of each member of the source, in order, 16 to a word. */
   readonly states: number[];
@@ -376,6 +383,7 @@ export class PendingInstantiatedMembers extends PendingMembers {
     c: Checker,
     sourceTable: SymbolTable | undefined,
     sourceList: Symbol[] | undefined,
+    sourceMembers: Symbol[],
     mapper: TypeMapper,
     states: number[],
     positions: Map<string, number>,
@@ -383,6 +391,7 @@ export class PendingInstantiatedMembers extends PendingMembers {
     hasRequiredOwnMembers: boolean,
   ) {
     super();
+    this.sourceMembers = sourceMembers;
     this.hasOwnMembers = hasOwnMembers;
     this.hasRequiredOwnMembers = hasRequiredOwnMembers;
     this.c = c;
@@ -511,6 +520,21 @@ export class PendingInstantiatedMembers extends PendingMembers {
   materialize(t: StructuredType): void {
     const c = this.c;
     t.pendingMembers = undefined;
+    if (!this.hasBases) {
+      // The properties are the source's named members, in the order cached for the source
+      // (`NamedMemberOrder`), and they are all of the table, which is built only when asked for.
+      const order = this.namedMemberOrder(t.symbol);
+      if (order !== undefined) {
+        const sourceMembers = this.sourceMembers;
+        const properties: Symbol[] = [];
+        for (const position of order.positions) properties.push(this.memberAt(position, sourceMembers[position]!));
+        this.instantiated = undefined;
+        t.membersValue = undefined;
+        t.propertiesValue = properties;
+        t.pendingMembers = new PropertyMembers(properties, order.names);
+        return;
+      }
+    }
     const members = this.ownTable();
     this.instantiated = undefined;
     if (!this.hasBases) {
@@ -556,6 +580,52 @@ export class PendingInstantiatedMembers extends PendingMembers {
     const pending = t.pendingMembers;
     if (pending !== undefined) pending.materializeTable(t);
   }
+
+  /**
+   * The property order of the source's instantiations for `container` (computed for the first container
+   * asked for), or undefined.
+   */
+  private namedMemberOrder(container: Symbol | undefined): NamedMemberOrder | undefined {
+    const c = this.c;
+    const owner = this.owner;
+    let order = owner !== undefined ? owner.namedMemberOrder : c.namedMemberOrdersOfLists.get(this.sourceList!);
+    if (order === undefined) {
+      order = namedMemberOrderOf(c, this.sourceMembers, container, owner !== undefined);
+      if (owner !== undefined) owner.namedMemberOrder = order;
+      else c.namedMemberOrdersOfLists.set(this.sourceList!, order);
+    }
+    return order !== null && order.container === container ? order : undefined;
+  }
+}
+
+/**
+ * The `NamedMemberOrder` of instantiations of `members` for `container`; null where `getNamedMemberPositions`
+ * has none. With `skipsUnnamed` (declared members), an instantiation's table holds the named members, the
+ * others being skipped, in the order of `members`; without it, every member must be named.
+ */
+function namedMemberOrderOf(
+  c: Checker,
+  members: Symbol[],
+  container: Symbol | undefined,
+  skipsUnnamed: boolean,
+): NamedMemberOrder | null {
+  const positions = getNamedMemberPositions(c, members, container);
+  // Members of a list are never skipped (`pendingInstantiatedList`): its table holds them all.
+  if (positions === undefined || (!skipsUnnamed && positions.length !== members.length)) return null;
+  const names: string[] = [];
+  const byName = new Map<string, number>();
+  // The index in `positions` of each member's position, or -1 for a member that isn't a property.
+  const indexes: number[] = [];
+  for (let i = 0; i < members.length; i++) indexes.push(-1);
+  for (let i = 0; i < positions.length; i++) {
+    const name = members[positions[i]!]!.name;
+    names.push(name);
+    byName.set(name, i);
+    indexes[positions[i]!] = i;
+  }
+  const tableOrder: number[] = [];
+  for (const index of indexes) if (index >= 0) tableOrder.push(index);
+  return new NamedMemberOrder(container, positions, new MemberNames(names, byName, tableOrder));
 }
 
 /**
@@ -657,43 +727,82 @@ function pendingInstantiatedTable(
   const declared = sideOf(c, source);
   const table = declared.declaredMembers;
   if (table === undefined || table.size === 0) return undefined;
+  const plan = declaredMemberPlan(c, declared, table);
+  if (plan.eager) return undefined;
+  const members = plan.members;
+  const named = plan.named;
+  const keptByType = plan.keptByType;
   const states: number[] = [];
   let word = 0;
-  let i = 0;
-  let hasOwnMembers = false;
-  let hasRequiredOwnMembers = false;
-  for (const [id, symbol] of table) {
-    if (id !== symbol.name) return undefined;
+  const count = members.length;
+  for (let i = 0; i < count; i++) {
     let state = MemberState.Skipped;
-    if (isNamedMember(c, symbol, id)) {
-      // A named member without a value flag (an alias) could be replaced by an inherited one; keep
-      // such tables eager, so that an own member always stands.
-      if ((symbol.flags & SymbolFlags.Value) === 0) return undefined;
-      state = keepsSymbolUnderInstantiation(c, symbol, mapper) ? MemberState.Kept : MemberState.Instantiated;
-      // Instantiated symbols have the flags of their source.
-      hasOwnMembers = true;
-      if ((symbol.flags & SymbolFlags.Optional) === 0) hasRequiredOwnMembers = true;
+    if (named[i] !== 0) {
+      const bit = 1 << (i & 31);
+      if ((keptByType[i >> 5]! & bit) !== 0) state = MemberState.Kept;
+      else if (mapper.mapsThisOnly() && isThisless(members[i]!)) {
+        getSymbolId(members[i]!);
+        state = MemberState.Kept;
+      } else if (keepsSymbolTypeUnderInstantiation(c, members[i]!)) {
+        keptByType[i >> 5] = keptByType[i >> 5]! | bit;
+        state = MemberState.Kept;
+      } else state = MemberState.Instantiated;
     }
     word |= state << ((i & 15) * 2);
     if ((i & 15) === 15) {
       states.push(word);
       word = 0;
     }
-    i++;
   }
-  if ((i & 15) !== 0) states.push(word);
+  if ((count & 15) !== 0) states.push(word);
   const pending = new PendingInstantiatedMembers(
     c,
     table,
     undefined,
+    members,
     mapper,
     sharedStates(declared, states),
     declaredMemberPositions(declared, table),
-    hasOwnMembers,
-    hasRequiredOwnMembers,
+    plan.hasOwnMembers,
+    plan.hasRequiredOwnMembers,
   );
   pending.owner = declared;
   return pending;
+}
+
+/** What the pending instantiations of `table`, the declared members of `declared`, share. */
+function declaredMemberPlan(c: Checker, declared: InterfaceType, table: SymbolTable): DeclaredMemberPlan {
+  const known = declared.declaredMemberPlan;
+  if (known !== undefined && known.table === table) return known;
+  const members: Symbol[] = [];
+  const named: number[] = [];
+  let hasOwnMembers = false;
+  let hasRequiredOwnMembers = false;
+  let eager = false;
+  for (const [id, symbol] of table) {
+    if (id !== symbol.name) {
+      eager = true;
+      break;
+    }
+    members.push(symbol);
+    if (!isNamedMember(c, symbol, id)) {
+      named.push(0);
+      continue;
+    }
+    // A named member without a value flag (an alias) could be replaced by an inherited one; keep
+    // such tables eager, so that an own member always stands.
+    if ((symbol.flags & SymbolFlags.Value) === 0) {
+      eager = true;
+      break;
+    }
+    named.push(1);
+    // Instantiated symbols have the flags of their source.
+    hasOwnMembers = true;
+    if ((symbol.flags & SymbolFlags.Optional) === 0) hasRequiredOwnMembers = true;
+  }
+  const plan = new DeclaredMemberPlan(table, eager, members, named, hasOwnMembers, hasRequiredOwnMembers);
+  declared.declaredMemberPlan = plan;
+  return plan;
 }
 
 /**
@@ -729,6 +838,7 @@ function pendingInstantiatedList(c: Checker, list: Symbol[], mapper: TypeMapper)
   return new PendingInstantiatedMembers(
     c,
     undefined,
+    list,
     list,
     mapper,
     states,

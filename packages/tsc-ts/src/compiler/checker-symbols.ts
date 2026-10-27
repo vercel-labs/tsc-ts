@@ -1883,6 +1883,42 @@ export function getNamedMembers(c: Checker, members: SymbolTable | undefined, co
   return contained.length === 0 ? rest : contained.concat(rest);
 }
 
+/**
+ * `getNamedMembers(c, table, container)` for a table that holds `members` in this order under their names, as
+ * positions in `members`; undefined where a member is an alias (`symbolIsValue` then resolves it) or a name repeats.
+ */
+export function getNamedMemberPositions(
+  c: Checker,
+  members: Symbol[],
+  container: Symbol | undefined,
+): number[] | undefined {
+  const isClassOrInterface =
+    container !== undefined && (container.flags & (SymbolFlags.Class | SymbolFlags.Interface)) !== 0;
+  const names = new Set<string>();
+  const contained: number[] = [];
+  const rest: number[] = [];
+  for (let i = 0; i < members.length; i++) {
+    const symbol = members[i]!;
+    if ((symbol.flags & SymbolFlags.Alias) !== 0 || names.has(symbol.name)) return undefined;
+    names.add(symbol.name);
+    if (isReservedMemberName(symbol.name) || !symbolIsValue(c, symbol)) continue;
+    if (isClassOrInterface && isDeclarationContainedBy(symbol, container!)) contained.push(i);
+    else rest.push(i);
+  }
+  sortPositions(c, members, contained);
+  sortPositions(c, members, rest);
+  return contained.length === 0 ? rest : contained.concat(rest);
+}
+
+/** `sortSymbols` for positions in `members`. */
+function sortPositions(c: Checker, members: Symbol[], positions: number[]): void {
+  for (let i = 1; i < positions.length; i++)
+    if (compareSymbols(c, members[positions[i - 1]!]!, members[positions[i]!]!) > 0) {
+      positions.sort((a, b) => compareSymbols(c, members[a]!, members[b]!));
+      return;
+    }
+}
+
 /** Sorts symbols by declaration order; members are usually in that order already. */
 function sortSymbols(c: Checker, symbols: Symbol[]): void {
   for (let i = 1; i < symbols.length; i++)

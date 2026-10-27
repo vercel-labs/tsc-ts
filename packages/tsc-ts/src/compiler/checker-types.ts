@@ -954,6 +954,62 @@ export class MemberNames {
   }
 }
 
+/**
+ * The properties of the instantiations of one source without base types, as `getNamedMembers` orders them
+ * for `container`: the source positions of the named members in that order, and their names
+ * (`PropertyMembers`). The other members are skipped, so the named members are all of an instantiation's table.
+ */
+export class NamedMemberOrder {
+  readonly container: Symbol | undefined;
+  readonly positions: number[];
+  readonly names: MemberNames;
+
+  constructor(container: Symbol | undefined, positions: number[], names: MemberNames) {
+    this.container = container;
+    this.positions = positions;
+    this.names = names;
+  }
+}
+
+/**
+ * What the pending instantiations of a declared members table share whatever their mapper: the members in
+ * table order, which of them are named (the others are skipped), and the members whose resolved type keeps
+ * them under any instantiation (`keepsSymbolTypeUnderInstantiation`), found so far.
+ */
+export class DeclaredMemberPlan {
+  readonly table: SymbolTable;
+  /**
+   * Whether instantiations build the table eagerly: tsgo's table wouldn't be keyed by symbol names, or an
+   * own member could be replaced by an inherited one. The other fields are then incomplete.
+   */
+  readonly eager: boolean;
+  readonly members: Symbol[];
+  /** 1 for a named member, 0 for a skipped one, by position. */
+  readonly named: number[];
+  /** Bits by position: the member's type keeps it under instantiation. Set when found, never cleared. */
+  readonly keptByType: number[];
+  readonly hasOwnMembers: boolean;
+  readonly hasRequiredOwnMembers: boolean;
+
+  constructor(
+    table: SymbolTable,
+    eager: boolean,
+    members: Symbol[],
+    named: number[],
+    hasOwnMembers: boolean,
+    hasRequiredOwnMembers: boolean,
+  ) {
+    this.table = table;
+    this.eager = eager;
+    this.members = members;
+    this.named = named;
+    this.keptByType = [];
+    for (let i = 0; i < members.length; i += 32) this.keptByType.push(0);
+    this.hasOwnMembers = hasOwnMembers;
+    this.hasRequiredOwnMembers = hasRequiredOwnMembers;
+  }
+}
+
 /** A type with members: object types, unions and intersections. */
 export class StructuredType extends Type {
   membersValue: SymbolTable | undefined;
@@ -1061,6 +1117,10 @@ export class InterfaceType extends TypeReference {
   declaredIndexInfos: IndexInfo[];
   /** Positions of the declared members by name, for lazily instantiated members of instantiations. */
   declaredMemberPositions: Map<string, number> | undefined;
+  /** The property order of instantiations (`NamedMemberOrder`); null where it can't be cached. */
+  namedMemberOrder: NamedMemberOrder | null | undefined;
+  /** What pending instantiations of the declared members share (`DeclaredMemberPlan`). */
+  declaredMemberPlan: DeclaredMemberPlan | undefined;
   /** The member states of the last pending instantiation of the type's members (`sharedStates`). */
   lastMemberStates: number[] | undefined;
   /** The property names of the last instantiation whose members table is built on demand. */
@@ -1075,6 +1135,8 @@ export class InterfaceType extends TypeReference {
     this.references = undefined;
     this.checking = undefined;
     this.declaredMemberPositions = undefined;
+    this.namedMemberOrder = undefined;
+    this.declaredMemberPlan = undefined;
     this.lastMemberStates = undefined;
     this.lastMemberNames = undefined;
     this.allTypeParameters = emptyTypes;

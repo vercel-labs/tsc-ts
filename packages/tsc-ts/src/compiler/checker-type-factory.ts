@@ -502,6 +502,9 @@ export function compareNodes(c: Checker, n1: Node | undefined, n2: Node | undefi
   if (n1 === n2) return 0;
   if (n1 === undefined) return 1;
   if (n2 === undefined) return -1;
+  // Siblings are in one file: most compared declarations are members of one declaration.
+  const parent = n1.parent;
+  if (parent !== undefined && parent === n2.parent) return n1.pos - n2.pos;
   const s1 = sourceFileOf(n1);
   const s2 = sourceFileOf(n2);
   if (s1 !== s2) return (c.fileIndex.get(s1) ?? 0) - (c.fileIndex.get(s2) ?? 0);
