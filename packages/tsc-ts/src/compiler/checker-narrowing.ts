@@ -89,6 +89,7 @@ import {
   createArrayType,
   isTupleType,
   newObjectType,
+  unionContainsTypeOrPrimitive,
 } from './checker-type-factory.js';
 import {
   areTypesComparable,
@@ -160,7 +161,7 @@ import {
   getRangeOfTokenAtPosition,
   getSourceFileOfNode,
 } from './binder-utilities.js';
-import { getDeclaredTypeOfSymbol, isConstructorType } from './checker-declared-types.js';
+import { getDeclaredTypeOfSymbol, getParentOfSymbol, isConstructorType } from './checker-declared-types.js';
 import {
   getErasedSignature,
   getReturnTypeFromAnnotation,
@@ -1566,6 +1567,10 @@ function narrowTypeByEqualityWorker(
         return valueType;
       if ((valueType.flags & TypeFlags.Object) !== 0) return c.nonPrimitiveType;
     }
+    if (!doubleEquals && (valueType.flags & TypeFlags.Primitive) !== 0 && isUniformUnionType(c, t)) {
+      const regularType = getRegularTypeOfLiteralType(c, valueType);
+      if (unionContainsTypeOrPrimitive(c, t as UnionType, regularType, false)) return regularType;
+    }
     const filtered = filterType(
       c,
       t,
@@ -1573,9 +1578,45 @@ function narrowTypeByEqualityWorker(
     );
     return replacePrimitivesWithLiterals(c, filtered, valueType);
   }
-  if (isUnitType(valueType))
+  if (isUnitType(valueType)) {
+    if (isUniformUnionType(c, t)) {
+      const filtered = removeType(c, t, getRegularTypeOfLiteralType(c, valueType));
+      if (filtered !== t) return filtered;
+    }
     return filterType(c, t, (u) => !(isUnitLikeType(u) && areTypesComparable(c, u, valueType)));
+  }
   return t;
+}
+
+/**
+ * Whether `t` is a primitive union in which no two literal constituents are comparable: it has no
+ * literals of two enums, and not both enum literals and string or number literals. Comparing such a
+ * union with one of its literals matches only that literal.
+ */
+function isUniformUnionType(c: Checker, t: Type): boolean {
+  if ((t.objectFlags & ObjectFlags.PrimitiveUnion) === 0) return false;
+  const side = sideOf(c, t);
+  if ((side.objectFlags & ObjectFlags.IsUniformEnumComputed) === 0)
+    side.objectFlags |=
+      ObjectFlags.IsUniformEnumComputed | (computeIsUniformUnionType(c, typesOf(t)) ? ObjectFlags.IsUniformEnum : 0);
+  return (side.objectFlags & ObjectFlags.IsUniformEnum) !== 0;
+}
+
+function computeIsUniformUnionType(c: Checker, types: readonly Type[]): boolean {
+  let enumSymbol: Symbol | undefined;
+  let hasStringOrNumberLiteral = false;
+  for (const t of types) {
+    if ((t.flags & TypeFlags.EnumLike) !== 0) {
+      if (hasStringOrNumberLiteral) return false;
+      const parent = getParentOfSymbol(c, t.symbol!);
+      if (enumSymbol === undefined) enumSymbol = parent;
+      else if (enumSymbol !== parent) return false;
+    } else if ((t.flags & TypeFlags.StringOrNumberLiteral) !== 0) {
+      if (enumSymbol !== undefined) return false;
+      hasStringOrNumberLiteral = true;
+    }
+  }
+  return true;
 }
 
 function isCoercibleUnderDoubleEquals(source: Type, target: Type): boolean {
@@ -2194,14 +2235,20 @@ function narrowTypeBySwitchOnDiscriminantWorker(c: Checker, t: Type, flow: FlowS
     return getUnionType(c, ground);
   }
   const discriminantType = getUnionType(c, clauseTypes);
-  const caseType =
-    (discriminantType.flags & TypeFlags.Never) !== 0
-      ? c.neverType
-      : replacePrimitivesWithLiterals(
-          c,
-          filterType(c, t, (u) => areTypesComparable(c, discriminantType, u)),
-          discriminantType,
-        );
+  let caseType: Type | undefined;
+  if ((discriminantType.flags & TypeFlags.Never) !== 0) caseType = c.neverType;
+  else {
+    if ((discriminantType.flags & TypeFlags.Primitive) !== 0 && isUniformUnionType(c, t)) {
+      const regularType = getRegularTypeOfLiteralType(c, discriminantType);
+      if (unionContainsTypeOrPrimitive(c, t as UnionType, regularType, false)) caseType = regularType;
+    }
+    if (caseType === undefined)
+      caseType = replacePrimitivesWithLiterals(
+        c,
+        filterType(c, t, (u) => areTypesComparable(c, discriminantType, u)),
+        discriminantType,
+      );
+  }
   if (!hasDefaultClause) return caseType;
   const defaultType = filterType(c, t, (u) => {
     const unit = extractUnitType(u);
