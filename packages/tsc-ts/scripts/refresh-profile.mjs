@@ -1,11 +1,17 @@
 // Collects the profile that `npm run build:native` optimizes with (profiles/tsc-ts.profdata).
 // Usage: npm run refresh-profile -w tsc-ts [-- --projects-dir <dir>] [--jobs <n>] [--project <dir>[:<tsconfig>]]...
 //
-// Linux only, like --profile-generate. Builds an instrumented tsc-ts (build-native.mjs, with the shipped build's
-// options), checks the tsc-ts sources and the projects in profiles/projects.json with it at --checkers 1, and merges
-// the raw profiles into profiles/tsc-ts.profdata, keeping only the functions that ran (merge-profiles --sparse).
-// Then it builds the native tsc-ts with the new profile and records in profiles/tsc-ts.json the scriptc that
-// collected it and the number of functions it describes, which build:native compares its profile match with.
+// Linux only, like --profile-generate. The profile is collected in two phases, each an instrumented tsc-ts
+// (build-native.mjs, with the shipped build's options) that checks the tsc-ts sources and the projects in
+// profiles/projects.json at --checkers 1:
+//   1. The first build is instrumented before inlining; its raw profiles merge into the first-phase profile.
+//   2. The second build is optimized by the first-phase profile and instrumented after inlining, so it counts each
+//      inlined copy of a function separately (context-sensitive counts).
+// Both phases merge into profiles/tsc-ts.profdata, keeping only the functions that ran (merge-profiles --sparse).
+// scriptc lays out a build that uses a profile with context-sensitive counts by them: it orders each function's
+// blocks and moves the blocks the checks never reached into separate sections. Then the script builds the native
+// tsc-ts with the new profile and records in profiles/tsc-ts.json the scriptc that collected it and the number of
+// functions it describes, which build:native compares its profile match with.
 //
 // The projects are cloned at their pinned commits into --projects-dir (default ~/.cache/tsc-ts/profile-projects) and
 // installed with their lockfiles and without install scripts, once; later runs reuse them. --project adds a project
@@ -50,35 +56,45 @@ if (!Number.isInteger(jobs) || jobs < 1) throw new Error(`--jobs must be a posit
 
 const work = mkdtempSync(join(tmpdir(), 'tsc-ts-profile-'));
 try {
-  const raw = join(work, 'raw');
-  const instrumented = join(work, 'tsc');
-  run(process.execPath, [
-    'scripts/build-native.mjs',
-    `--profile-generate=${join(raw, '%p.profraw')}`,
-    '--output',
-    instrumented,
-  ]);
   const env = { ...process.env, TSC_TS_LIB_DIR: typescriptLib() };
-  await pool(
-    projects.map(({ name, dir, config }) => async () => {
-      // Projects with type errors exit with 1 or 2; any other status is a failed run.
-      const status = await check(instrumented, dir, config, env);
-      if (status === null || status > 2) throw new Error(`the instrumented tsc-ts failed on ${join(dir, config)}`);
-      console.log(`profiled ${name}`);
-    }),
-    jobs,
-  );
-  const profiles = readdirSync(raw).map((name) => join(raw, name));
-  if (profiles.length !== projects.length)
-    throw new Error(`expected ${projects.length} raw profiles in ${raw}, found ${profiles.length}`);
+  const first = join(work, 'first.profdata');
+  run(scriptc, ['merge-profiles', '-o', first, '--sparse', ...(await collect('first', [], env))]);
+  const second = await collect('second', [`--profile-use=${first}`], env);
   mkdirSync(dirname(output), { recursive: true });
-  run(scriptc, ['merge-profiles', '-o', output, '--sparse', ...profiles]);
+  run(scriptc, ['merge-profiles', '-o', output, '--sparse', first, ...second]);
   // The scriptc that generated the profiled code. tests/profile.test.mjs compares it with the pinned scriptc.
   writeFileSync(profileInfo, `${JSON.stringify({ scriptc: scriptcVersion(), functions: null }, null, 2)}\n`);
   console.log(`wrote ${output}`);
   run(process.execPath, ['scripts/build-native.mjs', '--record-profile', '--output', join(work, 'tsc-check')]);
 } finally {
   rmSync(work, { recursive: true, force: true });
+}
+
+// Builds an instrumented tsc-ts with the extra build-native.mjs arguments, checks every project with it, and returns
+// the paths of the raw profiles it wrote, one per project.
+async function collect(phase, buildArgs, env) {
+  const raw = join(work, `${phase}-raw`);
+  const instrumented = join(work, `tsc-${phase}`);
+  run(process.execPath, [
+    'scripts/build-native.mjs',
+    ...buildArgs,
+    `--profile-generate=${join(raw, '%p.profraw')}`,
+    '--output',
+    instrumented,
+  ]);
+  await pool(
+    projects.map(({ name, dir, config }) => async () => {
+      // Projects with type errors exit with 1 or 2; any other status is a failed run.
+      const status = await check(instrumented, dir, config, env);
+      if (status === null || status > 2) throw new Error(`the instrumented tsc-ts failed on ${join(dir, config)}`);
+      console.log(`profiled ${name} (${phase} phase)`);
+    }),
+    jobs,
+  );
+  const profiles = readdirSync(raw).map((name) => join(raw, name));
+  if (profiles.length !== projects.length)
+    throw new Error(`expected ${projects.length} raw profiles in ${raw}, found ${profiles.length}`);
+  return profiles;
 }
 
 // The checkout of a pinned project, cloned and installed when it is missing; returns the project directory.
