@@ -1383,6 +1383,39 @@ test(
   },
 );
 
+// Rebuilds in a row that check on checker threads: each edit writes the file in place, so no directory changes and
+// the rebuild takes the program of the last build with the file swapped in (`Program.updateFile`), and with it the
+// resolver that the last build shared with checker threads, which is immutable once shared. Each edit changes the
+// type of a value that every other file imports. The output is that of a watch on one thread.
+for (const incremental of [false, true]) {
+  test(
+    `--watch shares a program with checker threads in consecutive rebuilds${incremental ? ' with --incremental' : ''}`,
+    { skip: tscTsMissing, timeout: 120_000 },
+    async () => {
+      const files = {
+        'proj/tsconfig.json': JSON.stringify({
+          compilerOptions: { strict: true, noEmit: true, incremental },
+          include: ['src'],
+        }),
+        'proj/src/shared.ts': 'export const shared: number = 1;\n',
+      };
+      for (let i = 0; i < 150; i++)
+        files[`proj/src/m${i}.ts`] =
+          "import { shared } from './shared';\n" + `export const value${i}: number = shared;\n`;
+      const steps = ['string = "s"', 'boolean = true', 'number = 1'].map(
+        (value) => (dir) => writeFileSync(join(dir, 'proj/src/shared.ts'), `export const shared: ${value};\n`),
+      );
+      const run = (args) =>
+        watchSequence(['-p', 'proj', '--watch', ...args], steps, files, () => {}, { TSC_TS_WATCH_MEMORY: '0' });
+      const expected = await run(['--singleThreaded']);
+      const threaded = await run(['--checkers', '2']);
+      assert.equal((expected.output.match(/Found 150 errors/g) ?? []).length, 2);
+      assert.equal((expected.output.match(/Found 0 errors/g) ?? []).length, 2);
+      assert.equal(threaded.output, expected.output);
+    },
+  );
+}
+
 test('--watch after a config edit turns checker threads on', { skip: tscTsMissing, timeout: 120_000 }, async () => {
   const config = (checkers) =>
     `{"compilerOptions":{"outDir":"out","rootDir":"src","strict":true,"checkers":${checkers}},"include":["src"]}`;
