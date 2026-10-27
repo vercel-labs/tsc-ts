@@ -194,7 +194,8 @@ export class ChangeTracker {
       // element's trailing comment after it, as tsc does.
       const separatorToken = this.context.created(new Token(separator));
       separatorToken.pos = end;
-      separatorToken.end = end + separatorString.length;
+      // `| 0`: an int32 position, so the native build keeps node positions as 32-bit integers.
+      separatorToken.end = (end + separatorString.length) | 0;
       separatorToken.parent = after.parent;
       this.replaceRange(end, end, separatorToken, new NodeOptions());
       const indentation = this.findFirstNonWhitespaceColumn(afterStartLinePosition, afterStart);

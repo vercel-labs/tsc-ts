@@ -2,7 +2,8 @@
 // first compiles native/pipe-win32.c, the named pipe server of `tsc-ts --api --pipe`, with zig (the linker scriptc
 // uses there) and links it through native/pipe-win32.ffi.json. On Linux and macOS it first compiles
 // native/listen-posix.c, the Unix socket server of `tsc-ts --api --listen`, with clang, or with zig for the
-// SCRIPTC_TARGET that scriptc links for, and links it through native/listen-posix.ffi.json.
+// SCRIPTC_TARGET that scriptc links for, and links it through native/listen-posix.ffi.json. Then it checks that the
+// number fields of Node, Type and Symbol are 32-bit integers in the build (scripts/check-int32-fields.mjs).
 import { spawnSync } from 'node:child_process';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -43,7 +44,10 @@ if (windows) {
   else run('clang', flags);
   args.push('--ffi', 'native/listen-posix.ffi.json');
 }
-run(scriptc, [...args, ...process.argv.slice(2).filter((arg) => arg !== '--dev'), '-o', 'dist/tsc']);
+const extra = process.argv.slice(2).filter((arg) => arg !== '--dev');
+run(scriptc, [...args, ...extra, '-o', 'dist/tsc']);
+// The checker's hot classes keep 32-bit number fields (scripts/check-int32-fields.mjs), in the IR scriptc keeps.
+if (!extra.includes('--no-keep-llvm')) run(process.execPath, ['scripts/check-int32-fields.mjs', 'dist/main.ll']);
 
 function run(command, commandArgs) {
   const result = spawnSync(command, commandArgs, { cwd: root, stdio: 'inherit' });

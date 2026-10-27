@@ -884,9 +884,9 @@ function configFileDataOf(config: ParsedCommandLine): ConfigFileData {
 function plainJson(value: JsonValue): unknown {
   if (value instanceof JsonArray) return value.items.map(plainJson);
   if (value instanceof JsonObject) {
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of value.entries) out[key] = plainJson(item);
-    return out;
+    // Built from entries rather than stored key by key: a store with a computed key into an untyped object would
+    // keep the native build from storing class fields as 32-bit integers.
+    return Object.fromEntries([...value.entries].map(([key, item]) => [key, plainJson(item)]));
   }
   return value;
 }
@@ -1203,9 +1203,14 @@ export function keptEncodingOf(file: SourceFile, nodeId: number): Uint8Array {
 
 // Header bytes 44 to 51: the source file ID, a little-endian u64.
 function withSourceFileId(data: Uint8Array, id: number): Uint8Array {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  view.setUint32(44, id >>> 0, true);
-  view.setUint32(48, Math.floor(id / 0x100000000), true);
+  // The low and high 32 bits of the id, little-endian, written byte by byte: a DataView over `data.buffer` would
+  // keep the native build from storing class fields as 32-bit integers.
+  const low = id >>> 0;
+  const high = Math.floor(id / 0x100000000) >>> 0;
+  for (let i = 0; i < 4; i++) {
+    data[44 + i] = (low >>> (8 * i)) & 0xff;
+    data[48 + i] = (high >>> (8 * i)) & 0xff;
+  }
   return data;
 }
 
