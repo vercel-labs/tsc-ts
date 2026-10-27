@@ -1138,7 +1138,8 @@ export class FileLoader {
         }
       }
       // A lower depth restarts references already started, which may now be loaded past `maxNodeModuleJsDepth`.
-      if (loadSubTasks && (lowered || !taskByFileName.startedSubTasks)) {
+      // Every file reached from them is at least as deep, so a depth past it changes nothing they load.
+      if (loadSubTasks && ((lowered && depth <= this.maxNodeModuleJsDepth) || !taskByFileName.startedSubTasks)) {
         taskByFileName.startedSubTasks = true;
         if (taskByFileName.subTasks !== undefined) this.start(taskByFileName.subTasks, data.lowestDepth);
       }
