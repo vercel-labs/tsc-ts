@@ -7,8 +7,6 @@
 // checker that touches part of a program (as each of several parallel checkers does) stores only
 // the pages it touches.
 
-import type { Symbol } from './symbol.js';
-
 /** Links are stored in pages of 256 ids. */
 export const enum LinkPaging {
   Bits = 8,
@@ -210,13 +208,12 @@ function bitCount(x: number): number {
 }
 
 /**
- * A page of a `CompactSymbolLinkTable`: one bit per id of the page in eight 32-id words, the number
- * of symbols stored before each word, and the symbols in id order. The words are fields, so a
- * lookup reads one object before the symbols. The class isn't generic, so natively the words are
- * 32-bit fields: every write stores an int32.
+ * The presence bits of a `CompactLinkPage`: one bit per id of the page in eight 32-id words, and the
+ * number of values stored before each word. The words are fields, so a lookup reads one object before
+ * the values. The class isn't generic, so natively the words are 32-bit fields: every write stores an
+ * int32.
  */
-class CompactLinkPage {
-  readonly values: Symbol[];
+class CompactLinkWords {
   private w0: number;
   private w1: number;
   private w2: number;
@@ -230,7 +227,6 @@ class CompactLinkPage {
   private before1: number;
 
   constructor() {
-    this.values = [];
     this.w0 = 0;
     this.w1 = 0;
     this.w2 = 0;
@@ -310,20 +306,27 @@ class CompactLinkPage {
   }
 }
 
+/** A page of a `CompactLinkTable`: its presence bits and the values stored, in id order. */
+class CompactLinkPage<T> extends CompactLinkWords {
+  readonly values: T[] = [];
+}
+
 /**
- * Symbols by node id, for ids a checker resolves in one in four to one in eight of the ids of the
- * pages it touches, as it resolves the identifiers and names of the files it checks. Pages of
- * `LinkPaging.Size` ids keep a presence bit per id and only the symbols stored, so a symbol costs
- * about one array slot. A `LinkTable` page costs a slot for every id, and a `Map` entry also
- * stores its key and a share of the hash buckets. At fewer values per page than that, the page's
- * own allocations outweigh what it saves, and a `SparseLinkTable` costs less.
+ * Values by node id, for ids a checker stores a value for in more than about one in sixteen of the
+ * ids of the pages it touches: the symbols it resolves for the identifiers and names of the files it
+ * checks (one in four to one in eight), and the types and signatures it resolves for their type
+ * nodes and calls (one in twelve to one in seventeen). Pages of `LinkPaging.Size` ids keep a presence
+ * bit per id and only the values stored, so a value costs about one array slot. A `LinkTable` page
+ * costs a slot for every id, and a `Map` entry also stores its key and a share of the hash buckets.
+ * At fewer values per page than that, the page's own allocations outweigh what it saves, and a
+ * `SparseLinkTable` costs less.
  */
-export class CompactSymbolLinkTable {
-  readonly pages: (CompactLinkPage | undefined)[] = [];
-  /** The number of symbols stored. */
+export class CompactLinkTable<T> {
+  readonly pages: (CompactLinkPage<T> | undefined)[] = [];
+  /** The number of values stored. */
   size = 0;
 
-  get(id: number): Symbol | undefined {
+  get(id: number): T | undefined {
     const page = this.pages[id >> LinkPaging.Bits];
     if (page === undefined) return undefined;
     const slot = id & LinkPaging.Mask;
@@ -332,13 +335,13 @@ export class CompactSymbolLinkTable {
     return page.values[page.rank(slot, bits)];
   }
 
-  set(id: number, value: Symbol | undefined): void {
+  set(id: number, value: T | undefined): void {
     const index = id >> LinkPaging.Bits;
     let page = this.pages[index];
     if (page === undefined) {
       if (value === undefined) return;
       while (this.pages.length <= index) this.pages.push(undefined);
-      page = new CompactLinkPage();
+      page = new CompactLinkPage<T>();
       this.pages[index] = page;
     }
     const slot = id & LinkPaging.Mask;
