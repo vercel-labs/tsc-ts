@@ -1786,8 +1786,17 @@ export const enum TypeMapperKind {
   Merged = 3,
 }
 
+/** The id of the next mapper this thread creates. */
+let nextTypeMapperId = 0;
+
 /** Maps type parameters to types. Subclasses replace tsgo's function mappers. */
 export abstract class TypeMapper {
+  /**
+   * A number for the mapper, unique among the mappers this thread creates (until it wraps at 2^31), so the
+   * stack of active mappers can be searched by id instead of by reference.
+   */
+  readonly id: number = (nextTypeMapperId = (nextTypeMapperId + 1) | 0);
+
   abstract map(type: Type): Type;
 
   kind(): TypeMapperKind {

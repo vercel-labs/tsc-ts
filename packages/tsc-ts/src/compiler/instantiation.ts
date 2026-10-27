@@ -218,19 +218,23 @@ export function instantiateTypeWithAlias(
     else c.error(c.currentNode, Diagnostics.Type_instantiation_is_excessively_deep_and_possibly_infinite);
     return c.errorType;
   }
-  const depth = c.activeMapperDepth;
-  const activeMappers = c.activeMappers;
-  let index = depth - 1;
-  while (index >= 0 && activeMappers[index]! !== mapper) index--;
+  const depth = c.activeMapperDepth | 0;
+  const mapperId = mapper.id | 0;
+  let index = (depth - 1) | 0;
+  while (index >= 0 && c.activeMapperIds[index]! !== mapperId) index = (index - 1) | 0;
   if (index === -1) {
     // A newly active mapper has no cached instantiations; its cache is created when a nested
     // instantiation with the same mapper stores one.
-    if (depth < activeMappers.length) {
-      activeMappers[depth] = mapper;
+    if (depth === c.activeMapperIds.length) {
+      const grown = new Int32Array(depth * 2);
+      grown.set(c.activeMapperIds);
+      c.activeMapperIds = grown;
+    }
+    c.activeMapperIds[depth] = mapperId;
+    if (depth < c.activeMapperCaches.length) {
       c.activeMapperCaches[depth] = undefined;
       c.activeMapperAliasCaches[depth] = undefined;
     } else {
-      activeMappers.push(mapper);
       c.activeMapperCaches.push(undefined);
       c.activeMapperAliasCaches.push(undefined);
     }

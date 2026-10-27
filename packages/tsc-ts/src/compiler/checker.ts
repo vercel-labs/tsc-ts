@@ -653,8 +653,8 @@ export class Checker implements TypeChecking {
   instantiationCount = 0;
   /** Instantiations over the checker's lifetime (statistics). */
   totalInstantiations = 0;
-  /** Mappers of the instantiations in progress: the first `activeMapperDepth` entries are live. */
-  readonly activeMappers: TypeMapper[] = [];
+  /** Ids of the mappers of the instantiations in progress: the first `activeMapperDepth` entries are live. */
+  activeMapperIds = new Int32Array(16);
   activeMapperDepth = 0;
   /** Per active mapper: its instantiations by type id, created on the first nested write. */
   readonly activeMapperCaches: (Map<number, Type> | undefined)[] = [];
