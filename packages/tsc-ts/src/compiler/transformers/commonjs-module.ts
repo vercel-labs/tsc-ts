@@ -1243,7 +1243,9 @@ export class CommonJSModuleTransformer extends Transformer {
     const rewrite =
       this.options.rewriteRelativeImportExtensions === true &&
       ((isImportCall(node) && node.arguments.nodes.length > 0) || (isInJSFile(node) && isRequireCall(node, false)));
-    if (isImportCall(node) && this.shouldTransformImportCall()) return this.visitImportCallExpression(node, rewrite);
+    // `import.source()` and the other phase imports stay as written.
+    if (node.expression.kind === SyntaxKind.ImportKeyword && this.shouldTransformImportCall())
+      return this.visitImportCallExpression(node, rewrite);
     if (rewrite) return this.rewriteImportOrRequireCall(node);
     const callee = node.expression;
     if (callee instanceof Identifier) {

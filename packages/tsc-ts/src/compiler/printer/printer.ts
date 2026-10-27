@@ -2952,8 +2952,8 @@ export class Printer extends NameGeneratorHost {
       case SyntaxKind.MetaProperty:
         if (node instanceof MetaProperty) {
           const state = this.enterNode(node);
-          this.emitToken(node.keywordToken, node.pos, node);
-          this.write1('.');
+          const pos = this.emitToken(node.keywordToken, node.pos, node);
+          this.emitToken(SyntaxKind.DotToken, pos, node);
           this.emitIdentifierName(node.name);
           this.exitNode(node, state);
           return true;

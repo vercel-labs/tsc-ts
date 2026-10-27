@@ -307,9 +307,7 @@ test('global diagnostics found emitting declarations are not reported', { skip: 
 });
 
 // Type text in diagnostics lists a union's constituents in the union's order, as tsgo does; only
-// declaration files reorder the ones the union orders by type id (above). The function expression has
-// a written return type, so its body is checked after the file's statements, and `a` is created after
-// `b`, which is declared later: the message has `b | a`.
+// declaration files reorder the ones the union orders by type id (above). tsgo 7.1's message has `a | b`.
 test('diagnostics list union constituents in the order tsgo does', { skip: tscTsMissing || tsgoMissing }, () => {
   const cwd = tempDir('tsc-ts-diagnostic-union-order-');
   const project = {
@@ -331,7 +329,7 @@ test('diagnostics list union constituents in the order tsgo does', { skip: tscTs
   const actual = run(cwd, ['--singleThreaded']);
   rmSync(join(cwd, 'out'), { recursive: true, force: true });
   const expected = spawnSync(tsgo, ['-p', '.', '--pretty', 'false', '--singleThreaded'], { cwd, encoding: 'utf8' });
-  assert.match(expected.stdout, /Type '\{ readonly kind: "b"; readonly y: string; \} \| \{ readonly kind: "a";/);
+  assert.match(expected.stdout, /Type '\{ readonly kind: "a"; readonly x: number; \} \| \{ readonly kind: "b";/);
   assert.equal(actual.stdout, expected.stdout);
   assert.equal(actual.status, expected.status);
 });
