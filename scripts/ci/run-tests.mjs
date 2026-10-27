@@ -15,7 +15,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFil
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { allUnits, durationOf, nativeBinaries, pack, root } from './units.mjs';
+import { allUnits, durationOf, nativeBinaries, pack, referenceBinaries, root } from './units.mjs';
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -108,6 +108,10 @@ const missing = Object.values(nativeBinaries).filter(
   (binary) => ids.some((id) => Object.values(units.get(id).env).includes(binary)) && !existsSync(binary),
 );
 if (missing.length > 0) throw new Error(`native units need ${missing.join(' and ')}: build them first`);
+// So would missing reference compilers, which a build:oracle cache entry might lack.
+const missingReferences = referenceBinaries.filter((binary) => !existsSync(binary));
+if (ids.length > 0 && missingReferences.length > 0)
+  throw new Error(`the tests need ${missingReferences.join(' and ')}: run npm run build:oracle`);
 const results = [];
 for (const id of ids) {
   const unit = units.get(id);
