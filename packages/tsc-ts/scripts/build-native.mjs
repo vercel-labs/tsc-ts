@@ -11,6 +11,9 @@
 // to `scriptc build`, except:
 //   --output <path>          writes the executable there instead of dist/tsc
 //   --profile-generate=<p>   builds the instrumented tsc-ts refresh-profile.mjs runs, without the profile
+//   --profile-use=<p>        optimizes with <p> instead of profiles/tsc-ts.profdata; with --profile-generate, builds
+//                            the second instrumented tsc-ts refresh-profile.mjs runs, which is optimized by <p> and
+//                            counts the code again after inlining
 //   --record-profile         writes the number of functions the profile describes to profiles/tsc-ts.json
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -28,12 +31,13 @@ const { values, tokens } = parseArgs({
     dev: { type: 'boolean', default: false },
     output: { type: 'string', default: 'dist/tsc' },
     'profile-generate': { type: 'string' },
+    'profile-use': { type: 'string' },
     'record-profile': { type: 'boolean', default: false },
   },
   strict: false,
   tokens: true,
 });
-const ours = new Set(['dev', 'output', 'profile-generate', 'record-profile']);
+const ours = new Set(['dev', 'output', 'profile-generate', 'profile-use', 'record-profile']);
 // The arguments for scriptc, in their order: every option this script does not handle, with its value.
 const passed = [];
 for (const token of tokens) {
@@ -52,12 +56,14 @@ const scriptc =
   process.env.SCRIPTC ?? join(dirname(scriptcPackage), JSON.parse(readFileSync(scriptcPackage, 'utf8')).bin.scriptc);
 
 const generate = values['profile-generate'];
+const profile = values['profile-use'];
 const useProfile = !values.dev && generate === undefined;
 const args = ['build', 'src/main.ts'];
 if (values.dev) args.push('--optimization=dev');
 else {
   args.push('--optimization=speed', '--detached-exit');
-  args.push(generate === undefined ? '--profile-use=profiles/tsc-ts.profdata' : `--profile-generate=${generate}`);
+  if (generate === undefined) args.push(`--profile-use=${profile ?? 'profiles/tsc-ts.profdata'}`);
+  else args.push(...(profile === undefined ? [] : [`--profile-use=${profile}`]), `--profile-generate=${generate}`);
 }
 mkdirSync(join(root, 'dist'), { recursive: true });
 if (windows) {
