@@ -959,19 +959,19 @@ const stampGap = 20;
 /**
  * Runs `tsc-ts` with `args` in a new directory with `files` and makes the edits of `steps` (a file and its text, or
  * `null` to remove a directory, files to write in order, or a function of the directory and the `tsc-ts` process), each once the previous build
- * reported. `prepare` runs on the directory before `tsc-ts`
+ * reported. `prepare` runs on the directory before `tsc-ts` (or `command`)
  * starts, which gets `extraEnv` in its environment. Returns the output and the output directory's files.
  *
  * Edits go through `replaceFiles`, and each starts `stampGap` milliseconds after the report: the watch compares
  * modification times, which the system takes from a clock that advances in ticks of a few milliseconds, so an edit in
  * the tick of the last build's stamps would have the time stamp it already saw.
  */
-async function watchSequence(args, steps, files = watchProject, prepare = () => {}, extraEnv = {}) {
+async function watchSequence(args, steps, files = watchProject, prepare = () => {}, extraEnv = {}, command = tscTs) {
   const dir = tempDir('tsc-ts-watch-');
   writeFiles(dir, files);
   prepare(dir);
   const env = { PATH: process.env.PATH ?? '', TSC_TS_BUNDLED_LIBS: bundledLibs, NO_COLOR: '1', ...extraEnv };
-  const child = spawn(tscTs[0], [...tscTs.slice(1), ...args, '--preserveWatchOutput'], { cwd: dir, env });
+  const child = spawn(command[0], [...command.slice(1), ...args, '--preserveWatchOutput'], { cwd: dir, env });
   let output = '';
   let exit;
   child.stdout.on('data', (chunk) => (output += chunk));
@@ -1215,10 +1215,6 @@ test(
   },
 );
 
-// A watch that starts on one thread because its config sets `checkers` to 1, then an edit of the config sets it to 2
-// with a change that affects every file: the rebuild takes the unchanged files of the first build, whose symbols got
-// no ids at creation, so it checks them on this thread rather than sharing them with checker threads. The output is
-// that of a watch on one thread.
 // A rebuild that swaps an edited file into a program shared with checker threads takes its immutable files and
 // include reasons; the file-processing error of an unchanged file is reported again from them.
 test(
@@ -1321,6 +1317,9 @@ for (const incremental of [false, true]) {
   );
 }
 
+// A watch whose config sets `checkers` to 1 loads its first program on parse threads, so its symbols get ids at
+// creation; an edit of the config then sets it to 2 with a change that affects every file, and the rebuild shares
+// the unchanged files of the first build with checker threads. The output is that of a watch on one thread.
 test('--watch after a config edit turns checker threads on', { skip: tscTsMissing, timeout: 120_000 }, async () => {
   const config = (checkers) =>
     `{"compilerOptions":{"outDir":"out","rootDir":"src","strict":true,"checkers":${checkers}},"include":["src"]}`;
@@ -1341,6 +1340,60 @@ test('--watch after a config edit turns checker threads on', { skip: tscTsMissin
   assert.equal((expected.output.match(/Found 20 errors/g) ?? []).length, 2);
   assert.equal(threaded.output, expected.output);
   assert.deepEqual(threaded.files, expected.files);
+});
+
+// A watch started with build info loads its first program on parse threads and checks what changed since the build
+// info was written: here an edit that affects every file, which checker threads check with `--checkers 2`. The first
+// build reports and writes what tsgo's does, and the rebuild after it what a watch on one thread does.
+test('--watch with build info builds what changed since it', { skip, timeout: 180_000 }, async () => {
+  const files = {
+    'proj/tsconfig.json': JSON.stringify({
+      compilerOptions: { outDir: 'out', rootDir: 'src', strict: true, incremental: true, declaration: true },
+      include: ['src'],
+    }),
+    'proj/src/shared.ts': 'export const shared: number = 1;\n',
+  };
+  for (let i = 0; i < 200; i++)
+    files[`proj/src/m${i}.ts`] = "import { shared } from './shared';\n" + `export const value${i}: number = shared;\n`;
+  const outputs = (dir) => {
+    const out = readFiles(join(dir, 'proj/out'));
+    for (const [file, text] of Object.entries(out)) out[file] = normalize(text, dir);
+    return out;
+  };
+  const watchWith = async (command, args, steps) => {
+    let dir;
+    // The build info of a build, then an edit that affects every file.
+    const prepare = (d) => {
+      dir = d;
+      run(command, ['-p', 'proj'], d);
+      writeFiles(d, { 'proj/src/shared.ts': 'export const shared: string = "s";\n' });
+    };
+    const result = await watchSequence(
+      ['-p', 'proj', '--watch', ...args],
+      steps,
+      files,
+      prepare,
+      { TSC_TS_WATCH_MEMORY: '0' },
+      command,
+    );
+    return { output: result.output, files: outputs(dir) };
+  };
+  const expected = await watchWith([tsgo], [], []);
+  assert.equal((expected.output.match(/Found 200 errors/g) ?? []).length, 1);
+  for (const args of [
+    ['--checkers', '1'],
+    ['--checkers', '2'],
+  ]) {
+    const first = await watchWith(tscTs, args, []);
+    assert.equal(first.output, expected.output, args.join(' '));
+    assert.deepEqual(first.files, expected.files, args.join(' '));
+  }
+  const steps = [['proj/src/shared.ts', 'export const shared: number = 1;\n']];
+  const single = await watchWith(tscTs, ['--singleThreaded'], steps);
+  const threaded = await watchWith(tscTs, ['--checkers', '2'], steps);
+  assert.equal((single.output.match(/Found 0 errors/g) ?? []).length, 1);
+  assert.equal(threaded.output, single.output);
+  assert.deepEqual(threaded.files, single.files);
 });
 
 // A new process reads the config again: after a failed read of a changed config, the process builds on with the
