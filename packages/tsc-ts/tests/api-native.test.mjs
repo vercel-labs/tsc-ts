@@ -3,7 +3,7 @@
 // signatures and text at every node). api-library.test.mjs compares the Node build's answers with tsc --api's.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, realpathSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { compileOptions, compiledDir, tempDir } from './temp.mjs';
@@ -30,12 +30,24 @@ test('a native build of tsc-ts/api answers as the Node build', { skip, timeout: 
   });
   const nodeProbe = [process.execPath, '--stack-size=16000', join(node, probe.replace(/\.ts$/, '.js'))];
 
-  const native = join(tempDir('tsc-ts-api-native-build-'), 'api-probe');
+  const buildDir = tempDir('tsc-ts-api-native-build-');
+  const native = join(buildDir, 'api-probe');
+  // The build emits code in its own process (SCRIPTC_EMIT_WORKERS=0): this build has hung with a forked emit worker
+  // still running. A build that takes over ten minutes fails the test; its output goes to a file, which a process left
+  // behind cannot hold open the way it could a pipe.
+  const log = join(buildDir, 'build.log');
+  const fd = openSync(log, 'w');
   const build = spawnSync(scriptc, ['build', probe, '--optimization=dev', '-o', native], {
     cwd: root,
-    encoding: 'utf8',
+    env: { ...process.env, SCRIPTC_EMIT_WORKERS: '0' },
+    stdio: ['ignore', fd, fd],
+    timeout: 600_000,
   });
-  assert.ok(build.status === 0 && existsSync(native), build.stdout + build.stderr);
+  closeSync(fd);
+  assert.ok(
+    build.status === 0 && existsSync(native),
+    `${build.error === undefined ? '' : build.error.message + '\n'}${readFileSync(log, 'utf8')}`,
+  );
 
   // The library fixture (more than 4,000 answers), and one whose files and config file have errors.
   for (const [fixture, minimum] of [
