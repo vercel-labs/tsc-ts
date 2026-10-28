@@ -39,6 +39,9 @@ const inferredProjectName = '/dev/null/inferred';
 interface Registry {
   types: Map<number, Type>;
   signatures: Map<number, Signature>;
+  // The types and signatures replies have carried (proto.TypeReply).
+  sentTypes: Set<number>;
+  sentSignatures: Set<number>;
 }
 
 class SnapshotData {
@@ -46,6 +49,8 @@ class SnapshotData {
   // The project each symbol was first returned from.
   readonly symbolProjects = new Map<number, string>();
   readonly registries = new Map<string, Registry>();
+  // The symbols replies have carried (proto.SymbolReply).
+  readonly sentSymbols = new Set<number>();
 
   constructor(
     readonly id: number,
@@ -61,7 +66,7 @@ class SnapshotData {
   registry(projectId: string): Registry {
     let registry = this.registries.get(projectId);
     if (registry === undefined) {
-      registry = { types: new Map(), signatures: new Map() };
+      registry = { types: new Map(), signatures: new Map(), sentTypes: new Set(), sentSignatures: new Set() };
       this.registries.set(projectId, registry);
     }
     return registry;
@@ -136,23 +141,28 @@ class Query {
     return resolveNode(this.project, handle ?? '');
   }
 
-  typeResponse(type: Type | undefined): proto.TypeResponse | null {
+  typeResponse(type: Type | undefined): proto.TypeReply | null {
     return type === undefined ? null : typeResponse(this.snapshot, this.projectId, type);
   }
 
-  typeResponses(types: Type[]): proto.TypeResponse[] {
+  typeResponses(types: Type[]): proto.TypeReply[] {
     return types.map((t) => typeResponse(this.snapshot, this.projectId, t));
   }
 
-  symbolResponse(symbol: Symbol | undefined): proto.SymbolResponse | null {
+  symbolResponse(symbol: Symbol | undefined): proto.SymbolReply | null {
     return symbol === undefined ? null : symbolResponse(this.snapshot, symbol, this.projectId);
   }
 
-  symbolResponses(symbols: Symbol[]): proto.SymbolResponse[] {
+  symbolResponses(symbols: Symbol[]): proto.SymbolReply[] {
     return symbols.map((s) => symbolResponse(this.snapshot, s, this.projectId));
   }
 
-  signatureResponse(signature: Signature | undefined): proto.SignatureResponse | null {
+  // A symbol inside another response object, which is never a bare id.
+  symbolData(symbol: Symbol): proto.SymbolResponse {
+    return symbolData(this.snapshot, symbol, this.projectId);
+  }
+
+  signatureResponse(signature: Signature | undefined): proto.SignatureReply | null {
     return signature === undefined ? null : signatureResponse(this.snapshot, this.projectId, signature);
   }
 
@@ -180,6 +190,8 @@ export class Session {
   private readonly openFiles = new Map<string, OpenFile>();
   private inferred: LoadedProject | undefined;
   private timing: ServerTiming | undefined;
+  // Whether replies name objects the client holds by their ids (proto.InitializeParams).
+  private objectReferences = false;
   // File contents and parsed files kept across snapshots.
   private readonly files: backend.SessionFiles;
 
@@ -204,6 +216,7 @@ export class Session {
     this.openProjects.clear();
     this.openFiles.clear();
     this.inferred = undefined;
+    this.objectReferences = false;
     this.files.reset();
     this.resetServerTiming();
   }
@@ -219,8 +232,10 @@ export class Session {
     try {
       // As tsgo, echo returns the payload's bytes as they are, which need not be UTF-8 text.
       if (method === 'echo') return { ok: true, reply: payload.slice() };
+      sending = this.objectReferences ? new SentIds() : null;
       return { ok: true, reply: this.dispatch(method, decodeText(payload)) };
     } catch (e) {
+      sending?.unmark();
       // Classified here: natively, a caught value passed on loses its class.
       // Compiler failures read like Go panics.
       if (e instanceof ApiError) return { ok: false, error: e.message };
@@ -232,6 +247,7 @@ export class Session {
       }
       return { ok: false, error: backend.panicMessage(e) };
     } finally {
+      sending = null;
       if (this.timing !== undefined) this.record(method, Date.now() - start);
     }
   }
@@ -241,7 +257,9 @@ export class Session {
       case 'ping':
         return '"pong"';
       case 'initialize':
-        return JSON.stringify(this.initialize());
+        return JSON.stringify(
+          this.initialize(params === '' ? null : (JSON.parse(params) as proto.InitializeParams | null)),
+        );
       case 'updateSnapshot':
         return JSON.stringify(this.updateSnapshot(JSON.parse(params) as proto.UpdateSnapshotParams | null));
       case 'release':
@@ -465,10 +483,12 @@ export class Session {
 
   // Lifecycle
 
-  private initialize(): proto.InitializeResponse {
+  private initialize(params: proto.InitializeParams | null): proto.InitializeResponse {
+    this.objectReferences = params?.objectReferences === true;
     return {
       useCaseSensitiveFileNames: this.options.useCaseSensitiveFileNames,
       currentDirectory: this.options.currentDirectory,
+      objectReferences: this.objectReferences ? true : undefined,
     };
   }
 
@@ -655,13 +675,13 @@ export class Session {
 
   // Symbols and types at locations
 
-  private symbolAtPosition(params: proto.PositionParams): proto.SymbolResponse | null {
+  private symbolAtPosition(params: proto.PositionParams): proto.SymbolReply | null {
     const q = this.query(params);
     const node = q.project.nodeAtPosition(q.sourceFile(params.file), params.position ?? 0);
     return node === undefined ? null : q.symbolResponse(q.project.symbolAtLocation(node));
   }
 
-  private symbolsAtPositions(params: proto.PositionsParams): (proto.SymbolResponse | null)[] {
+  private symbolsAtPositions(params: proto.PositionsParams): (proto.SymbolReply | null)[] {
     const q = this.query(params);
     const file = q.sourceFile(params.file);
     return (params.positions ?? []).map((position) => {
@@ -670,28 +690,28 @@ export class Session {
     });
   }
 
-  private symbolAtLocation(params: proto.LocationParams): proto.SymbolResponse | null {
+  private symbolAtLocation(params: proto.LocationParams): proto.SymbolReply | null {
     const q = this.query(params);
     return q.symbolResponse(q.project.symbolAtLocation(q.node(params.location)));
   }
 
-  private symbolsAtLocations(params: proto.LocationsParams): (proto.SymbolResponse | null)[] {
+  private symbolsAtLocations(params: proto.LocationsParams): (proto.SymbolReply | null)[] {
     const q = this.query(params);
     return (params.locations ?? []).map((handle) => q.symbolResponse(q.project.symbolAtLocation(q.node(handle))));
   }
 
-  private typeOfSymbol(params: proto.SymbolParams, declared: boolean): proto.TypeResponse | null {
+  private typeOfSymbol(params: proto.SymbolParams, declared: boolean): proto.TypeReply | null {
     const q = this.query(params);
     const symbol = q.symbol(params.symbol);
     return q.typeResponse(declared ? q.project.declaredTypeOfSymbol(symbol) : q.project.typeOfSymbol(symbol));
   }
 
-  private typesOfSymbols(params: proto.SymbolsParams): (proto.TypeResponse | null)[] {
+  private typesOfSymbols(params: proto.SymbolsParams): (proto.TypeReply | null)[] {
     const q = this.query(params);
     return (params.symbols ?? []).map((id) => q.typeResponse(q.project.typeOfSymbol(q.symbol(id))));
   }
 
-  private resolveName(params: proto.ResolveNameParams): proto.SymbolResponse | null {
+  private resolveName(params: proto.ResolveNameParams): proto.SymbolReply | null {
     const q = this.query(params);
     let location: Node | undefined;
     if (params.location !== undefined && params.location !== '') {
@@ -713,7 +733,7 @@ export class Session {
     return q.symbolResponse(symbol);
   }
 
-  private signaturesOfType(params: proto.SignaturesOfTypeParams): (proto.SignatureResponse | null)[] {
+  private signaturesOfType(params: proto.SignaturesOfTypeParams): (proto.SignatureReply | null)[] {
     const q = this.query(params);
     const kind = params.kind === 1 ? backend.SignatureKind.Construct : backend.SignatureKind.Call;
     return q.project.signaturesOfType(q.type(params.type), kind).map((s) => q.signatureResponse(s));
@@ -723,31 +743,31 @@ export class Session {
     const q = this.query(params);
     const kind = params.kind === 1 ? backend.SignatureKind.Construct : backend.SignatureKind.Call;
     return (params.types ?? []).map((id) =>
-      q.project.signaturesOfType(q.type(id), kind).map((s) => q.signatureResponse(s)),
+      q.project.signaturesOfType(q.type(id), kind).map((s) => signatureData(q.snapshot, q.projectId, s)),
     );
   }
 
-  private resolvedSignature(params: proto.LocationParams): proto.SignatureResponse | null {
+  private resolvedSignature(params: proto.LocationParams): proto.SignatureReply | null {
     const q = this.query(params);
     return q.signatureResponse(q.project.resolvedSignature(q.node(params.location)));
   }
 
-  private resolvedSignatures(params: proto.LocationsParams): (proto.SignatureResponse | null)[] {
+  private resolvedSignatures(params: proto.LocationsParams): (proto.SignatureReply | null)[] {
     const q = this.query(params);
     return (params.locations ?? []).map((handle) => q.signatureResponse(q.project.resolvedSignature(q.node(handle))));
   }
 
-  private contextualTypes(params: proto.LocationsParams): (proto.TypeResponse | null)[] {
+  private contextualTypes(params: proto.LocationsParams): (proto.TypeReply | null)[] {
     const q = this.query(params);
     return (params.locations ?? []).map((handle) => q.typeResponse(q.project.contextualType(q.node(handle))));
   }
 
-  private typeAtLocation(params: proto.LocationParams): proto.TypeResponse | null {
+  private typeAtLocation(params: proto.LocationParams): proto.TypeReply | null {
     const q = this.query(params);
     return q.typeResponse(q.project.typeAtLocation(q.node(params.location)));
   }
 
-  private typeAtLocations(params: proto.LocationsParams): (proto.TypeResponse | null)[] {
+  private typeAtLocations(params: proto.LocationsParams): (proto.TypeReply | null)[] {
     const q = this.query(params);
     return (params.locations ?? []).map((handle) => q.typeResponse(q.project.typeAtLocation(q.node(handle))));
   }
@@ -778,19 +798,19 @@ export class Session {
         if (entry.filterText !== undefined) response.filterText = entry.filterText;
         if (entry.detail !== undefined) response.detail = entry.detail;
         if (entry.labelDetails !== undefined) response.labelDetails = entry.labelDetails;
-        if (entry.symbol !== undefined) response.symbol = q.symbolResponse(entry.symbol) ?? undefined;
+        if (entry.symbol !== undefined) response.symbol = q.symbolData(entry.symbol);
         return response;
       }),
     };
   }
 
-  private typeAtPosition(params: proto.PositionParams): proto.TypeResponse | null {
+  private typeAtPosition(params: proto.PositionParams): proto.TypeReply | null {
     const q = this.query(params);
     const node = q.project.nodeAtPosition(q.sourceFile(params.file), params.position ?? 0);
     return node === undefined ? null : q.typeResponse(q.project.typeAtLocation(node));
   }
 
-  private typesAtPositions(params: proto.PositionsParams): (proto.TypeResponse | null)[] {
+  private typesAtPositions(params: proto.PositionsParams): (proto.TypeReply | null)[] {
     const q = this.query(params);
     const file = q.sourceFile(params.file);
     return (params.positions ?? []).map((position) => {
@@ -801,14 +821,14 @@ export class Session {
 
   // Properties of symbols, types and signatures
 
-  private symbolOfSymbol(method: string, params: proto.ObjectParams): proto.SymbolResponse | null {
+  private symbolOfSymbol(method: string, params: proto.ObjectParams): proto.SymbolReply | null {
     const snapshot = this.snapshot(params.snapshot);
     const symbol = resolveSymbol(snapshot, params.objectId);
     const result = method === 'getParentOfSymbol' ? backend.symbolParent(symbol) : backend.symbolExportSymbol(symbol);
     return result === undefined ? null : symbolResponse(snapshot, result, params.project ?? '');
   }
 
-  private symbolTableOfSymbol(method: string, params: proto.ObjectParams): proto.SymbolResponse[] {
+  private symbolTableOfSymbol(method: string, params: proto.ObjectParams): proto.SymbolReply[] {
     const snapshot = this.snapshot(params.snapshot);
     const symbol = resolveSymbol(snapshot, params.objectId);
     const symbols = method === 'getMembersOfSymbol' ? backend.symbolMembers(symbol) : backend.symbolExports(symbol);
@@ -817,7 +837,7 @@ export class Session {
     return q.symbolResponses(q.project.sortSymbols(symbols));
   }
 
-  private symbolOfType(method: string, params: proto.ObjectParams): proto.SymbolResponse | null {
+  private symbolOfType(method: string, params: proto.ObjectParams): proto.SymbolReply | null {
     const snapshot = this.snapshot(params.snapshot);
     const projectId = params.project ?? '';
     const type = resolveType(snapshot, projectId, params.objectId);
@@ -825,7 +845,7 @@ export class Session {
     return result === undefined ? null : symbolResponse(snapshot, result, projectId);
   }
 
-  private typeOfType(method: string, params: proto.ObjectParams): proto.TypeResponse | null {
+  private typeOfType(method: string, params: proto.ObjectParams): proto.TypeReply | null {
     const snapshot = this.snapshot(params.snapshot);
     const projectId = params.project ?? '';
     const type = resolveType(snapshot, projectId, params.objectId);
@@ -833,7 +853,7 @@ export class Session {
     return result === undefined ? null : typeResponse(snapshot, projectId, result);
   }
 
-  private typesOfType(method: string, params: proto.ObjectParams): proto.TypeResponse[] {
+  private typesOfType(method: string, params: proto.ObjectParams): proto.TypeReply[] {
     const snapshot = this.snapshot(params.snapshot);
     const projectId = params.project ?? '';
     const type = resolveType(snapshot, projectId, params.objectId);
@@ -846,23 +866,23 @@ export class Session {
     return { snapshot, projectId, signature: resolveSignature(snapshot, projectId, params.objectId) };
   }
 
-  private typeParametersOfSignature(params: proto.ObjectParams): proto.TypeResponse[] {
+  private typeParametersOfSignature(params: proto.ObjectParams): proto.TypeReply[] {
     const { snapshot, projectId, signature } = this.signatureOf(params);
     return backend.signatureTypeParameters(signature).map((t) => typeResponse(snapshot, projectId, t));
   }
 
-  private parametersOfSignature(params: proto.ObjectParams): proto.SymbolResponse[] {
+  private parametersOfSignature(params: proto.ObjectParams): proto.SymbolReply[] {
     const { snapshot, projectId, signature } = this.signatureOf(params);
     return backend.signatureParameters(signature).map((s) => symbolResponse(snapshot, s, projectId));
   }
 
-  private thisParameterOfSignature(params: proto.ObjectParams): proto.SymbolResponse | null {
+  private thisParameterOfSignature(params: proto.ObjectParams): proto.SymbolReply | null {
     const { snapshot, projectId, signature } = this.signatureOf(params);
     const symbol = backend.signatureThisParameter(signature);
     return symbol === undefined ? null : symbolResponse(snapshot, symbol, projectId);
   }
 
-  private targetOfSignature(params: proto.ObjectParams): proto.SignatureResponse | null {
+  private targetOfSignature(params: proto.ObjectParams): proto.SignatureReply | null {
     const { snapshot, projectId, signature } = this.signatureOf(params);
     const target = backend.signatureTarget(signature);
     return target === undefined ? null : signatureResponse(snapshot, projectId, target);
@@ -870,12 +890,12 @@ export class Session {
 
   // Checker queries
 
-  private contextualType(params: proto.LocationParams): proto.TypeResponse | null {
+  private contextualType(params: proto.LocationParams): proto.TypeReply | null {
     const q = this.query(params);
     return q.typeResponse(q.project.contextualType(q.node(params.location)));
   }
 
-  private checkerTypeOfType(method: string, params: proto.TypeParams): proto.TypeResponse | null {
+  private checkerTypeOfType(method: string, params: proto.TypeParams): proto.TypeReply | null {
     const q = this.query(params);
     const type = q.type(params.type);
     const project = q.project;
@@ -894,17 +914,17 @@ export class Session {
     return q.typeResponse(project.baseConstraintOfType(type));
   }
 
-  private baseTypesOfLiteralTypes(params: proto.TypesParams): (proto.TypeResponse | null)[] {
+  private baseTypesOfLiteralTypes(params: proto.TypesParams): (proto.TypeReply | null)[] {
     const q = this.query(params);
     return (params.types ?? []).map((id) => q.typeResponse(q.project.baseTypeOfLiteralType(q.type(id))));
   }
 
-  private typeFromTypeNode(params: proto.LocationParams): proto.TypeResponse | null {
+  private typeFromTypeNode(params: proto.LocationParams): proto.TypeReply | null {
     const q = this.query(params);
     return q.typeResponse(q.project.typeFromTypeNode(q.node(params.location)));
   }
 
-  private parameterType(params: proto.ParameterTypeParams): proto.TypeResponse | null {
+  private parameterType(params: proto.ParameterTypeParams): proto.TypeReply | null {
     const q = this.query(params);
     const signature = q.signature(params.signature);
     const index = params.index ?? 0;
@@ -933,12 +953,12 @@ export class Session {
     return q.project.isTypeAssignableTo(q.type(params.source), q.type(params.target));
   }
 
-  private shorthandAssignmentValueSymbol(params: proto.LocationParams): proto.SymbolResponse | null {
+  private shorthandAssignmentValueSymbol(params: proto.LocationParams): proto.SymbolReply | null {
     const q = this.query(params);
     return q.symbolResponse(q.project.shorthandAssignmentValueSymbol(q.node(params.location)));
   }
 
-  private typeOfSymbolAtLocation(params: proto.SymbolAtLocationParams): proto.TypeResponse | null {
+  private typeOfSymbolAtLocation(params: proto.SymbolAtLocationParams): proto.TypeReply | null {
     const q = this.query(params);
     const symbol = q.symbol(params.symbol);
     return q.typeResponse(q.project.typeOfSymbolAtLocation(symbol, q.node(params.location)));
@@ -989,7 +1009,7 @@ export class Session {
     return q.project.isContextSensitive(q.node(params.location));
   }
 
-  private typeOfSignature(method: string, params: proto.SignatureParams): proto.TypeResponse | null {
+  private typeOfSignature(method: string, params: proto.SignatureParams): proto.TypeReply | null {
     const q = this.query(params);
     const signature = q.signature(params.signature);
     return q.typeResponse(
@@ -999,7 +1019,7 @@ export class Session {
     );
   }
 
-  private returnTypesOfSignatures(params: proto.SignaturesParams): (proto.TypeResponse | null)[] {
+  private returnTypesOfSignatures(params: proto.SignaturesParams): (proto.TypeReply | null)[] {
     const q = this.query(params);
     return (params.signatures ?? []).map((id) => q.typeResponse(q.project.returnTypeOfSignature(q.signature(id))));
   }
@@ -1012,27 +1032,27 @@ export class Session {
       kind: predicate.kind,
       parameterIndex: predicate.parameterIndex,
       parameterName: predicate.parameterName === '' ? undefined : predicate.parameterName,
-      type: predicate.type === undefined ? undefined : typeResponse(q.snapshot, q.projectId, predicate.type),
+      type: predicate.type === undefined ? undefined : typeData(q.snapshot, q.projectId, predicate.type),
     };
   }
 
-  private checkerTypesOfType(method: string, params: proto.TypeParams): proto.TypeResponse[] {
+  private checkerTypesOfType(method: string, params: proto.TypeParams): proto.TypeReply[] {
     const q = this.query(params);
     const type = q.type(params.type);
     return q.typeResponses(method === 'getBaseTypes' ? q.project.baseTypes(type) : q.project.typeArguments(type));
   }
 
-  private propertiesOfType(params: proto.TypeParams): proto.SymbolResponse[] {
+  private propertiesOfType(params: proto.TypeParams): proto.SymbolReply[] {
     const q = this.query(params);
     return q.symbolResponses(q.project.propertiesOfType(q.type(params.type)));
   }
 
   private propertiesOfTypes(params: proto.TypesParams): proto.SymbolResponse[][] {
     const q = this.query(params);
-    return (params.types ?? []).map((id) => q.symbolResponses(q.project.propertiesOfType(q.type(id))));
+    return (params.types ?? []).map((id) => q.project.propertiesOfType(q.type(id)).map((s) => q.symbolData(s)));
   }
 
-  private propertyOfType(params: proto.NamedTypeParams): proto.SymbolResponse | null {
+  private propertyOfType(params: proto.NamedTypeParams): proto.SymbolReply | null {
     const q = this.query(params);
     return q.symbolResponse(q.project.propertyOfType(q.type(params.type), params.name ?? ''));
   }
@@ -1040,14 +1060,14 @@ export class Session {
   private indexInfosOfType(params: proto.TypeParams): proto.IndexInfoResponse[] {
     const q = this.query(params);
     return q.project.indexInfosOfType(q.type(params.type)).map((info) => ({
-      keyType: typeResponse(q.snapshot, q.projectId, info.keyType),
-      valueType: typeResponse(q.snapshot, q.projectId, info.valueType),
+      keyType: typeData(q.snapshot, q.projectId, info.keyType),
+      valueType: typeData(q.snapshot, q.projectId, info.valueType),
       isReadonly: info.isReadonly,
       declaration: info.declaration === undefined ? undefined : nodeHandle(info.declaration),
     }));
   }
 
-  private branchOfConditionalType(method: string, params: proto.ObjectParams): proto.TypeResponse | null {
+  private branchOfConditionalType(method: string, params: proto.ObjectParams): proto.TypeReply | null {
     const q = this.query(params);
     const type = q.type(params.objectId);
     return q.typeResponse(
@@ -1067,24 +1087,24 @@ export class Session {
     return (params.locations ?? []).map((handle) => literalValueResponse(q.project.constantValue(q.node(handle))));
   }
 
-  private signatureFromDeclaration(params: proto.LocationParams): proto.SignatureResponse | null {
+  private signatureFromDeclaration(params: proto.LocationParams): proto.SignatureReply | null {
     const q = this.query(params);
     return q.signatureResponse(q.project.signatureFromDeclaration(q.node(params.location)));
   }
 
-  private signaturesFromDeclarations(params: proto.LocationsParams): (proto.SignatureResponse | null)[] {
+  private signaturesFromDeclarations(params: proto.LocationsParams): (proto.SignatureReply | null)[] {
     const q = this.query(params);
     return (params.locations ?? []).map((handle) =>
       q.signatureResponse(q.project.signatureFromDeclaration(q.node(handle))),
     );
   }
 
-  private exportSpecifierLocalTargetSymbol(params: proto.LocationParams): proto.SymbolResponse | null {
+  private exportSpecifierLocalTargetSymbol(params: proto.LocationParams): proto.SymbolReply | null {
     const q = this.query(params);
     return q.symbolResponse(q.project.exportSpecifierLocalTargetSymbol(q.node(params.location)));
   }
 
-  private aliasedSymbol(method: string, params: proto.SymbolParams): proto.SymbolResponse | null {
+  private aliasedSymbol(method: string, params: proto.SymbolParams): proto.SymbolReply | null {
     const q = this.query(params);
     const symbol = q.symbol(params.symbol);
     return q.symbolResponse(
@@ -1092,17 +1112,17 @@ export class Session {
     );
   }
 
-  private aliasedSymbols(params: proto.SymbolsParams): (proto.SymbolResponse | null)[] {
+  private aliasedSymbols(params: proto.SymbolsParams): (proto.SymbolReply | null)[] {
     const q = this.query(params);
     return (params.symbols ?? []).map((id) => q.symbolResponse(q.project.aliasedSymbol(q.symbol(id))));
   }
 
-  private exportsOfModule(params: proto.SymbolParams): proto.SymbolResponse[] {
+  private exportsOfModule(params: proto.SymbolParams): proto.SymbolReply[] {
     const q = this.query(params);
     return q.symbolResponses(q.project.exportsOfModule(q.symbol(params.symbol)));
   }
 
-  private memberInModuleExports(params: proto.NamedSymbolParams): proto.SymbolResponse | null {
+  private memberInModuleExports(params: proto.NamedSymbolParams): proto.SymbolReply | null {
     const q = this.query(params);
     return q.symbolResponse(q.project.memberInModuleExports(q.symbol(params.symbol), params.name ?? ''));
   }
@@ -1129,7 +1149,7 @@ export class Session {
     const node = q.node(params.node);
     return q.project.referencedSymbolsForNode(node, params.position ?? 0).map((entry) => {
       const response: proto.ReferencedSymbolEntry = { definition: nodeHandle(entry.definition) };
-      if (entry.symbol !== undefined) response.symbol = q.symbolResponse(entry.symbol)!;
+      if (entry.symbol !== undefined) response.symbol = q.symbolData(entry.symbol);
       response.references = entry.references.map(nodeHandle);
       return response;
     });
@@ -1146,7 +1166,7 @@ export class Session {
       );
   }
 
-  private intrinsicType(name: backend.IntrinsicTypeName, params: proto.ProjectParams): proto.TypeResponse | null {
+  private intrinsicType(name: backend.IntrinsicTypeName, params: proto.ProjectParams): proto.TypeReply | null {
     const q = this.query(params);
     return q.typeResponse(q.project.intrinsicType(name));
   }
@@ -1301,7 +1321,53 @@ function optionalNode(q: Query, handle: proto.NodeHandle | undefined): Node | un
 
 // Responses
 
-function symbolResponse(snapshot: SnapshotData, symbol: Symbol, projectId: string): proto.SymbolResponse {
+// The ids the request being handled marked as sent, when the client asked for object references.
+let sending: SentIds | null = null;
+
+// The ids a reply marks as sent: kept when the reply is sent, unmarked when the request fails.
+class SentIds {
+  private readonly sets: Set<number>[] = [];
+  private readonly ids: number[] = [];
+
+  // Whether an earlier reply carried the object; marks it as carried otherwise.
+  held(sent: Set<number>, id: number): boolean {
+    if (sent.has(id)) return true;
+    sent.add(id);
+    this.sets.push(sent);
+    this.ids.push(id);
+    return false;
+  }
+
+  unmark(): void {
+    for (let i = 0; i < this.ids.length; i++) this.sets[i]!.delete(this.ids[i]!);
+  }
+}
+
+function symbolResponse(snapshot: SnapshotData, symbol: Symbol, projectId: string): proto.SymbolReply {
+  if (sending !== null) {
+    const id = backend.symbolId(symbol);
+    if (sending.held(snapshot.sentSymbols, id)) return id;
+  }
+  return symbolData(snapshot, symbol, projectId);
+}
+
+function typeResponse(snapshot: SnapshotData, projectId: string, type: Type): proto.TypeReply {
+  if (sending !== null) {
+    const id = backend.typeId(type);
+    if (sending.held(snapshot.registry(projectId).sentTypes, id)) return id;
+  }
+  return typeData(snapshot, projectId, type);
+}
+
+function signatureResponse(snapshot: SnapshotData, projectId: string, signature: Signature): proto.SignatureReply {
+  if (sending !== null) {
+    const id = backend.signatureId(signature);
+    if (sending.held(snapshot.registry(projectId).sentSignatures, id)) return id;
+  }
+  return signatureData(snapshot, projectId, signature);
+}
+
+function symbolData(snapshot: SnapshotData, symbol: Symbol, projectId: string): proto.SymbolResponse {
   const id = registerSymbol(snapshot, symbol, projectId);
   const declarations = backend.symbolDeclarations(symbol);
   const valueDeclaration = backend.symbolValueDeclaration(symbol);
@@ -1320,7 +1386,7 @@ function symbolResponse(snapshot: SnapshotData, symbol: Symbol, projectId: strin
   };
 }
 
-function typeResponse(snapshot: SnapshotData, projectId: string, type: Type): proto.TypeResponse {
+function typeData(snapshot: SnapshotData, projectId: string, type: Type): proto.TypeResponse {
   const id = backend.typeId(type);
   const registry = snapshot.registry(projectId);
   if (!registry.types.has(id)) registry.types.set(id, type);
@@ -1403,7 +1469,7 @@ function typeResponse(snapshot: SnapshotData, projectId: string, type: Type): pr
   return r;
 }
 
-function signatureResponse(snapshot: SnapshotData, projectId: string, signature: Signature): proto.SignatureResponse {
+function signatureData(snapshot: SnapshotData, projectId: string, signature: Signature): proto.SignatureResponse {
   const id = backend.signatureId(signature);
   const registry = snapshot.registry(projectId);
   if (!registry.signatures.has(id)) registry.signatures.set(id, signature);
