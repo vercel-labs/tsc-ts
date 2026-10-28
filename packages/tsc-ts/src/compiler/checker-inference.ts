@@ -488,6 +488,267 @@ export function inferTypes(
   state.inferFromTypes(source, target);
 }
 
+/** Whether no inference has a candidate or an inferred type, or is fixed, as in a new context. */
+function isUnstarted(inferences: readonly InferenceInfo[]): boolean {
+  for (const i of inferences)
+    if (i.candidates.length !== 0 || i.contraCandidates.length !== 0 || i.inferredType !== undefined || i.isFixed)
+      return false;
+  return true;
+}
+
+const enum UnstartedInferenceState {
+  /** Walked once, which may have resolved the types the walk reaches. Nothing is kept. */
+  Seen,
+  /** Walked twice; the second walk created no types and left `inferences`. */
+  Walked,
+  /** A third walk did the same as the second, so later walks are skipped. */
+  Confirmed,
+  /** Always walked: walks differed or created types, or one reported a diagnostic or met a circularity. */
+  Unusable,
+}
+
+/** A memoized `inferTypesFromUnstarted` walk. */
+export class UnstartedInference {
+  readonly state: UnstartedInferenceState;
+  readonly inferences: InferenceInfo[];
+  /** The instantiations the walk does, which a skipped walk adds to the counts. */
+  readonly instantiations: number;
+  /** The instantiation depth the confirming walk started at: a walk starting deeper might reach the limit. */
+  readonly depth: number;
+  /** The variance reliability flags the walk reports. */
+  readonly reliabilityFlags: number;
+  /** The unions and intersections the walk searched before their properties were resolved. */
+  readonly searched: readonly Type[];
+
+  constructor(
+    state: UnstartedInferenceState,
+    inferences: InferenceInfo[],
+    instantiations: number,
+    depth: number,
+    reliabilityFlags: number,
+    searched: readonly Type[],
+  ) {
+    this.state = state;
+    this.inferences = inferences;
+    this.instantiations = instantiations;
+    this.depth = depth;
+    this.reliabilityFlags = reliabilityFlags;
+    this.searched = searched;
+  }
+}
+
+const verifyUnstartedInferences = process.env['TSC_TS_VERIFY_INFERENCE_MEMO'] === '1';
+
+/**
+ * `inferTypes` into the inferences for `signature`'s type parameters, to `target`, which is
+ * determined by `signature` (its return type). When no inference has started, the walk depends only
+ * on `signature`, `source` and `priority`, so it is memoized per checker. Contextual return type
+ * inference repeats the same walk for calls of a generic function with the same contextual type at
+ * different call sites.
+ *
+ * A walk is skipped only when it would add nothing but the inferences:
+ * - Once a second and a third walk have both created no types or signatures and done the same. The
+ *   first walk resolves the types it reaches; only walks that repeat keep their inferences.
+ * - With the instantiation count and depth replayed. The walk is skipped only where it could not
+ *   reach the instantiation limits.
+ * - With the variance reliability flags replayed.
+ * - Never when a walk reported a diagnostic or met a circularity. Never during a variance
+ *   computation, where relations are not cached and circularities are found differently.
+ * - Only while the unions and intersections whose unresolved properties the walk searched
+ *   (hasUnmatchedProperty) are still unresolved. Once they are resolved, the same walk creates the
+ *   property types, so it is learned again.
+ */
+export function inferTypesFromUnstarted(
+  c: Checker,
+  signature: Signature,
+  inferences: InferenceInfo[],
+  source: Type,
+  target: Type,
+  priority: InferencePriority,
+): void {
+  if (c.inVarianceComputation || !isUnstarted(inferences)) {
+    inferTypes(c, inferences, source, target, priority, false);
+    return;
+  }
+  const caches = c.inferenceCaches;
+  const memo = caches.unstartedInferences;
+  let bySource = memo.get(signature.id);
+  if (bySource === undefined) {
+    bySource = new Map<number, UnstartedInference>();
+    memo.set(signature.id, bySource);
+  }
+  const key = source.id * 4096 + priority;
+  let known = bySource.get(key);
+  if (known !== undefined && known.state === UnstartedInferenceState.Confirmed) {
+    if (havePropertiesResolved(c, known.searched)) {
+      // Learn the walk again for the resolved properties; each union's properties are resolved once.
+      bySource.delete(key);
+      known = undefined;
+    } else if (c.instantiationDepth <= known.depth && c.instantiationCount + known.instantiations < 5000000) {
+      if (verifyUnstartedInferences) verifyUnstartedInference(c, signature, known, source, target, priority);
+      copyInferences(inferences, known.inferences);
+      const outer = c.unresolvedPropertySearches;
+      if (outer !== undefined) for (const t of known.searched) outer.push(t);
+      c.instantiationCount += known.instantiations;
+      c.totalInstantiations += known.instantiations;
+      c.reliabilityFlags |= known.reliabilityFlags;
+      return;
+    }
+  }
+  const reports = c.reports;
+  const cycles = c.resolutionCycleCount;
+  const outerSearches = c.unresolvedPropertySearches;
+  const searches: Type[] = [];
+  c.unresolvedPropertySearches = searches;
+  const types = c.typeCount;
+  const signatures = c.signatureCount;
+  const count = c.instantiationCount;
+  const total = c.totalInstantiations;
+  const depth = c.instantiationDepth;
+  const reliabilityFlags = c.reliabilityFlags;
+  // Nothing reads the flags before setting them, so the walk's own are those it leaves from zero.
+  c.reliabilityFlags = 0;
+  inferTypes(c, inferences, source, target, priority, false);
+  const walkFlags = c.reliabilityFlags;
+  c.reliabilityFlags = reliabilityFlags | walkFlags;
+  c.unresolvedPropertySearches = outerSearches;
+  // An enclosing walk depends on the searches of the walks within it.
+  if (outerSearches !== undefined) for (const t of searches) outerSearches.push(t);
+  const state = known === undefined ? undefined : known.state;
+  if (state === UnstartedInferenceState.Confirmed || state === UnstartedInferenceState.Unusable) return;
+  const instantiations = c.totalInstantiations - total;
+  if (c.reports !== reports || c.resolutionCycleCount !== cycles || c.instantiationCount - count !== instantiations) {
+    bySource.set(key, caches.alwaysWalked);
+    return;
+  }
+  if (state === undefined) {
+    bySource.set(key, caches.seenOnce);
+    return;
+  }
+  if (c.typeCount !== types || c.signatureCount !== signatures) {
+    bySource.set(key, caches.alwaysWalked);
+    return;
+  }
+  const searched = searches.length === 0 ? searches : [...new Set(searches)];
+  if (state === UnstartedInferenceState.Seen) {
+    const snapshot: InferenceInfo[] = [];
+    for (const i of inferences) snapshot.push(i.clone());
+    bySource.set(
+      key,
+      new UnstartedInference(UnstartedInferenceState.Walked, snapshot, instantiations, depth, walkFlags, searched),
+    );
+    return;
+  }
+  bySource.set(
+    key,
+    sameInferences(inferences, known!.inferences) &&
+      instantiations === known!.instantiations &&
+      walkFlags === known!.reliabilityFlags
+      ? new UnstartedInference(
+          UnstartedInferenceState.Confirmed,
+          known!.inferences,
+          instantiations,
+          depth,
+          walkFlags,
+          searched,
+        )
+      : caches.alwaysWalked,
+  );
+}
+
+/** Whether the properties of any of `types` have been resolved. */
+function havePropertiesResolved(c: Checker, types: readonly Type[]): boolean {
+  for (const t of types)
+    if (sideOf(c, t as UnionOrIntersectionType).membersOf?.resolvedProperties !== undefined) return true;
+  return false;
+}
+
+function copyInferences(inferences: InferenceInfo[], from: readonly InferenceInfo[]): void {
+  for (let k = 0; k < inferences.length; k++) {
+    const info = inferences[k]!;
+    const known = from[k]!;
+    if (known.candidates.length !== 0) {
+      info.candidates = known.candidates.slice();
+      info.candidateDepths = known.candidateDepths.slice();
+    }
+    if (known.contraCandidates.length !== 0) info.contraCandidates = known.contraCandidates.slice();
+    info.inferredType = known.inferredType;
+    info.priority = known.priority;
+    info.topLevel = known.topLevel;
+    info.isFixed = known.isFixed;
+    info.impliedArity = known.impliedArity;
+  }
+}
+
+function sameTypes(a: readonly Type[], b: readonly Type[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) return false;
+  return true;
+}
+
+function sameInferences(a: readonly InferenceInfo[], b: readonly InferenceInfo[]): boolean {
+  for (let k = 0; k < a.length; k++) {
+    const x = a[k]!;
+    const y = b[k]!;
+    if (
+      !sameTypes(x.candidates, y.candidates) ||
+      x.candidateDepths.length !== y.candidateDepths.length ||
+      x.candidateDepths.some((d, i) => d !== y.candidateDepths[i]) ||
+      !sameTypes(x.contraCandidates, y.contraCandidates) ||
+      x.inferredType !== y.inferredType ||
+      x.priority !== y.priority ||
+      x.topLevel !== y.topLevel ||
+      x.isFixed !== y.isFixed ||
+      x.impliedArity !== y.impliedArity
+    )
+      return false;
+  }
+  return true;
+}
+
+/** With TSC_TS_VERIFY_INFERENCE_MEMO=1: walks anyway and reports how the skipped walk would have differed. */
+function verifyUnstartedInference(
+  c: Checker,
+  signature: Signature,
+  known: UnstartedInference,
+  source: Type,
+  target: Type,
+  priority: InferencePriority,
+): void {
+  const inferences: InferenceInfo[] = [];
+  for (const i of known.inferences) inferences.push(new InferenceInfo(i.typeParameter));
+  const types = c.typeCount;
+  const signatures = c.signatureCount;
+  const total = c.totalInstantiations;
+  const reports = c.reports;
+  const cycles = c.resolutionCycleCount;
+  const reliabilityFlags = c.reliabilityFlags;
+  const outerSearches = c.unresolvedPropertySearches;
+  c.reliabilityFlags = 0;
+  c.unresolvedPropertySearches = undefined;
+  inferTypes(c, inferences, source, target, priority, false);
+  const walkFlags = c.reliabilityFlags;
+  c.reliabilityFlags = reliabilityFlags;
+  c.unresolvedPropertySearches = outerSearches;
+  const instantiations = c.totalInstantiations - total;
+  // Undo the check walk's count so the run continues as without verification.
+  c.instantiationCount -= instantiations;
+  c.totalInstantiations -= instantiations;
+  const differences: string[] = [];
+  if (!sameInferences(inferences, known.inferences)) differences.push('inferences');
+  if (c.typeCount !== types) differences.push(`${c.typeCount - types} types`);
+  if (c.signatureCount !== signatures) differences.push(`${c.signatureCount - signatures} signatures`);
+  if (instantiations !== known.instantiations)
+    differences.push(`${instantiations} instantiations, not ${known.instantiations}`);
+  if (c.reports !== reports) differences.push(`${c.reports - reports} diagnostics`);
+  if (c.resolutionCycleCount !== cycles) differences.push('a circularity');
+  if (walkFlags !== known.reliabilityFlags) differences.push('reliability flags');
+  if (differences.length !== 0)
+    process.stderr.write(
+      `inference memo: signature ${signature.id} source ${source.id} priority ${priority}: ${differences.join(', ')}\n`,
+    );
+}
+
 const enum InferenceAction {
   ConditionalType,
   GenericMappedTypes,
@@ -1491,6 +1752,7 @@ function hasUnmatchedProperty(c: Checker, source: Type, target: Type, matchDiscr
     sideOf(c, t as UnionOrIntersectionType).membersOf?.resolvedProperties !== undefined
   )
     return getUnmatchedProperty(c, source, target, false, matchDiscriminantProperties) !== undefined;
+  if (c.unresolvedPropertySearches !== undefined) c.unresolvedPropertySearches.push(t);
   const containingType = t as UnionOrIntersectionType;
   const isUnion = (t.flags & TypeFlags.Union) !== 0;
   const checked = new Set<string>();
@@ -2473,6 +2735,15 @@ export class InferenceCaches {
   readonly reverseTargetStack: Type[] = [];
   reverseStackDepth = 0;
   reverseExpandingFlags: number = ExpandingFlags.None;
+  /**
+   * What `inferTypesFromUnstarted` left in each inference, by signature id, then by source type id
+   * times 4096 plus the priority.
+   */
+  readonly unstartedInferences = new Map<number, Map<number, UnstartedInference>>();
+  /** The `unstartedInferences` entry of a walk seen once. */
+  readonly seenOnce = new UnstartedInference(UnstartedInferenceState.Seen, [], 0, 0, 0, []);
+  /** The `unstartedInferences` entry of a walk that is never skipped. */
+  readonly alwaysWalked = new UnstartedInference(UnstartedInferenceState.Unusable, [], 0, 0, 0, []);
 }
 
 // ---- Constraints of `infer` type parameters
