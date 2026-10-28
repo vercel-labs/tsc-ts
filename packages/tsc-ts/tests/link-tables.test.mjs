@@ -52,6 +52,21 @@ test('CompactLinkTable keeps the values of every id of a full page', () => {
   assert.equal(table.get(1 << 20), undefined);
 });
 
+test('CompactLinkTable finds values in pages created far apart and in any order', () => {
+  const table = new CompactLinkTable();
+  const ids = [1 << 24, 5, (1 << 24) + 255, 70000, 256, 1 << 20, 70001, 3 << 22];
+  for (const id of ids) table.set(id, id + 1);
+  for (const id of ids) assert.equal(table.get(id), id + 1, `id ${id}`);
+  for (const id of [0, 4, 6, 255, 257, 69999, (1 << 24) + 1, (1 << 24) + 256, 1 << 25])
+    assert.equal(table.get(id), undefined);
+  assert.equal(table.size, ids.length);
+  table.clear();
+  for (const id of ids) assert.equal(table.get(id), undefined);
+  table.set(70000, 1);
+  assert.equal(table.get(70000), 1);
+  assert.equal(table.size, 1);
+});
+
 test('CompactIntLinkTable stores, replaces and clears int32 values like a Map', () => {
   const next = random(9);
   for (const span of [64, 300, 5000, 100000]) {

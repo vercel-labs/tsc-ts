@@ -209,13 +209,16 @@ function bitCount(x: number): number {
 }
 
 /**
- * A page of a `CompactLinkTable`'s presence bits: one bit per id of the page in eight 32-id words, and
- * the number of values stored before each word. The words are fields, so a lookup reads one object
- * before the values. Natively the words are 32-bit fields, since every write stores an int32. A class
- * that is generic or has a generic subclass keeps its number fields as doubles, so the values the
- * bits index are in the table's `values`, not in this class or a subclass.
+ * A page of a `CompactLinkTable`'s presence bits: one bit per id of the page in eight 32-id words, the
+ * number of values stored before each word, and the position of the page's values in the table's
+ * `values`. The words are fields, so a lookup reads one object before the values. Natively the words
+ * are 32-bit fields, since every write stores an int32. A class that is generic or has a generic
+ * subclass keeps its number fields as doubles, so the values the bits index are in the table's
+ * `values`, not in this class or a subclass.
  */
 class CompactLinkPage {
+  /** The position of the page's values in the table's `values`. */
+  readonly position: number;
   private w0: number;
   private w1: number;
   private w2: number;
@@ -228,7 +231,8 @@ class CompactLinkPage {
   private before0: number;
   private before1: number;
 
-  constructor() {
+  constructor(position: number) {
+    this.position = position | 0;
     this.w0 = 0;
     this.w1 = 0;
     this.w2 = 0;
@@ -326,9 +330,14 @@ class CompactLinkPage {
  * allocations outweigh what it saves, and a `SparseLinkTable` costs less.
  */
 export class CompactLinkTable<T> {
+  /**
+   * The pages by `id >> LinkPaging.Bits`, up to the highest page stored; undefined where a page stores
+   * nothing. A checker stores values in a few percent of the pages of a large program, so the values
+   * are kept apart, one list for each page stored, rather than in a second slot per page.
+   */
   readonly pages: (CompactLinkPage | undefined)[] = [];
-  /** The values stored in each page, in id order. */
-  readonly values: (T[] | undefined)[] = [];
+  /** The values of each page stored, in id order, at the page's `position`. */
+  readonly values: T[][] = [];
   /** The number of values stored. */
   size = 0;
 
@@ -339,7 +348,7 @@ export class CompactLinkTable<T> {
     const slot = id & LinkPaging.Mask;
     const bits = page.word(slot >> 5);
     if ((bits & (1 << (slot & 31))) === 0) return undefined;
-    return this.values[index]![page.rank(slot, bits)];
+    return this.values[page.position]![page.rank(slot, bits)];
   }
 
   set(id: number, value: T | undefined): void {
@@ -347,15 +356,12 @@ export class CompactLinkTable<T> {
     let page = this.pages[index];
     if (page === undefined) {
       if (value === undefined) return;
-      while (this.pages.length <= index) {
-        this.pages.push(undefined);
-        this.values.push(undefined);
-      }
-      page = new CompactLinkPage();
+      while (this.pages.length <= index) this.pages.push(undefined);
+      page = new CompactLinkPage(this.values.length);
       this.pages[index] = page;
-      this.values[index] = [];
+      this.values.push([]);
     }
-    const values = this.values[index]!;
+    const values = this.values[page.position]!;
     const slot = id & LinkPaging.Mask;
     const word = slot >> 5;
     const bit = 1 << (slot & 31);
