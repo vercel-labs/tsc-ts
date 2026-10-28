@@ -10,7 +10,7 @@ import { compileSources } from './temp.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const repo = resolve(root, '../..');
-const libs = join(repo, 'upstream/typescript-go/internal/bundled/libs');
+const libs = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
 const oracle = join(repo, 'packages/tsgo/dist/check-oracle');
 
 const source = [

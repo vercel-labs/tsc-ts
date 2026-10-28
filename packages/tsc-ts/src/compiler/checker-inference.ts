@@ -572,7 +572,7 @@ export function inferTypesFromUnstarted(
   target: Type,
   priority: InferencePriority,
 ): void {
-  if (c.inVarianceComputation || !isUnstarted(inferences)) {
+  if (c.varianceStack.length !== 0 || !isUnstarted(inferences)) {
     inferTypes(c, inferences, source, target, priority, false);
     return;
   }
@@ -673,10 +673,7 @@ function copyInferences(inferences: InferenceInfo[], from: readonly InferenceInf
   for (let k = 0; k < inferences.length; k++) {
     const info = inferences[k]!;
     const known = from[k]!;
-    if (known.candidates.length !== 0) {
-      info.candidates = known.candidates.slice();
-      info.candidateDepths = known.candidateDepths.slice();
-    }
+    if (known.candidates.length !== 0) info.candidates = known.candidates.slice();
     if (known.contraCandidates.length !== 0) info.contraCandidates = known.contraCandidates.slice();
     info.inferredType = known.inferredType;
     info.priority = known.priority;
@@ -698,8 +695,6 @@ function sameInferences(a: readonly InferenceInfo[], b: readonly InferenceInfo[]
     const y = b[k]!;
     if (
       !sameTypes(x.candidates, y.candidates) ||
-      x.candidateDepths.length !== y.candidateDepths.length ||
-      x.candidateDepths.some((d, i) => d !== y.candidateDepths[i]) ||
       !sameTypes(x.contraCandidates, y.contraCandidates) ||
       x.inferredType !== y.inferredType ||
       x.priority !== y.priority ||
