@@ -730,6 +730,12 @@ export class Checker implements TypeChecking {
   resolutionDepth = 0;
   /** The number of resolution cycles found (`pushTypeResolution`). */
   resolutionCycleCount = 0;
+  /**
+   * While an `inferTypesFromUnstarted` walk runs: the unions and intersections whose properties
+   * `hasUnmatchedProperty` searched before they were resolved. Such a search creates fewer types
+   * than one of the resolved properties.
+   */
+  unresolvedPropertySearches: Type[] | undefined = undefined;
 
   constructor(host: CheckerHost) {
     this.host = host;
@@ -1173,6 +1179,7 @@ export function disposeChecker(c: Checker): void {
   c.patternAmbientModuleAugmentations.clear();
   c.sharedFlowTypes.length = 0;
   c.relationComparers = [];
+  c.inferenceCaches.unstartedInferences.clear();
 }
 
 export const enum VarianceReporting {
