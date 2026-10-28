@@ -17,6 +17,18 @@ test('the committed profile was collected with the pinned scriptc', () => {
   );
 });
 
+// A scriptc with a second profile phase builds with profiles/tsc-ts.cs.profdata, and the code it instruments differs from
+// what a scriptc without one builds; such a scriptc reports the same version as the release it follows. So the one-phase
+// profile, which only a scriptc without a second phase builds with, is collected with one.
+test('the one-phase profile was collected with a scriptc that has no second profile phase', () => {
+  const { secondProfilePhase } = JSON.parse(readFileSync('profiles/tsc-ts.json', 'utf8'));
+  assert.equal(
+    secondProfilePhase,
+    false,
+    'profiles/tsc-ts.profdata must come from a scriptc without a second profile phase: run npm run refresh-profile with the pinned scriptc',
+  );
+});
+
 test('the pinned profile projects name a commit, an install command and a config', () => {
   const { projects } = JSON.parse(readFileSync('profiles/projects.json', 'utf8'));
   assert.equal(projects.length, 8);

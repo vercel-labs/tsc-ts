@@ -4,20 +4,23 @@
 // Linux only, like --profile-generate. The profiles are collected in two phases, each an instrumented tsc-ts
 // (build-native.mjs, with the shipped build's options) that checks the tsc-ts sources and the projects in
 // profiles/projects.json at --checkers 1, keeping only the functions that ran (merge-profiles --sparse):
-//   1. The first build is instrumented before inlining; its raw profiles merge into profiles/tsc-ts.profdata, which
-//      builds with a scriptc that has no second profile phase use.
+//   1. The first build is instrumented before inlining. With a scriptc that has no second profile phase, its raw
+//      profiles merge into profiles/tsc-ts.profdata, which such a scriptc builds with. A scriptc with a second phase
+//      builds only with the two-phase profile and instruments different code, so its first phase only feeds the
+//      second, and profiles/tsc-ts.profdata is left as the pinned scriptc collected it.
 //   2. When the scriptc accepts a second profile phase (profile-phases.mjs), the second build is optimized by the
 //      first-phase profile and instrumented after inlining, so it counts each inlined copy of a function separately
 //      (context-sensitive counts). Both phases merge into profiles/tsc-ts.cs.profdata. scriptc lays out a build that
 //      uses it by those counts: it orders each function's blocks and moves the blocks the checks never reached into
-//      separate sections. With a scriptc that has no second phase, the two-phase profile is left as it is.
+//      separate sections. With a scriptc that has no second phase, the two-phase profile and its block counts are
+//      left as they are.
 //      The second build also writes profiles/tsc-ts.cs.blocks (SCRIPTC_RECORD_PROFILE_BLOCKS): the block counts of the
 //      functions the first-phase profile annotates, which both phases share. A build that uses the two-phase profile
 //      annotates the functions whose control flow changed since it was collected from those counts; a scriptc that
 //      writes no block counts leaves the file out.
 // Then the script builds the native tsc-ts with each new profile and records beside it (tsc-ts.json, tsc-ts.cs.json)
-// the scriptc that collected it and the number of functions it describes, which build:native compares its profile
-// match with.
+// the scriptc that collected it, whether that scriptc has a second profile phase, and the number of functions it
+// describes, which build:native compares its profile match with.
 //
 // The projects are cloned at their pinned commits into --projects-dir (default ~/.cache/tsc-ts/profile-projects) and
 // installed with their lockfiles and without install scripts, once; later runs reuse them. --project adds a project
@@ -25,7 +28,16 @@
 // SCRIPTC selects the scriptc executable that builds and merges the profiles.
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -67,27 +79,37 @@ if (!Number.isInteger(jobs) || jobs < 1) throw new Error(`--jobs must be a posit
 const work = mkdtempSync(join(tmpdir(), 'tsc-ts-profile-'));
 try {
   const env = { ...process.env, TSC_TS_LIB_DIR: typescriptLib() };
-  const single = join(root, SINGLE_PHASE_PROFILE);
-  mkdirSync(dirname(single), { recursive: true });
-  // Block counts of an earlier collection would describe the code another profile was collected on.
-  const blocks = join(root, TWO_PHASE_PROFILE.replace(/\.profdata$/, '.blocks'));
-  rmSync(blocks, { force: true });
-  run(scriptc, ['merge-profiles', '-o', single, '--sparse', ...(await collect('first', [], env))]);
-  const written = [SINGLE_PHASE_PROFILE];
-  if (supportsSecondProfilePhase(scriptc, single)) {
-    const second = await collect('second', [`--profile-use=${single}`], env, {
+  mkdirSync(join(root, dirname(SINGLE_PHASE_PROFILE)), { recursive: true });
+  const first = join(work, 'first.profdata');
+  run(scriptc, ['merge-profiles', '-o', first, '--sparse', ...(await collect('first', [], env))]);
+  const secondPhase = supportsSecondProfilePhase(scriptc, first);
+  const written = [];
+  if (secondPhase) {
+    // Block counts of an earlier collection would describe the code another profile was collected on.
+    const blocks = join(root, TWO_PHASE_PROFILE.replace(/\.profdata$/, '.blocks'));
+    rmSync(blocks, { force: true });
+    const second = await collect('second', [`--profile-use=${first}`], env, {
       ...process.env,
       SCRIPTC_RECORD_PROFILE_BLOCKS: blocks,
     });
-    run(scriptc, ['merge-profiles', '-o', join(root, TWO_PHASE_PROFILE), '--sparse', single, ...second]);
+    run(scriptc, ['merge-profiles', '-o', join(root, TWO_PHASE_PROFILE), '--sparse', first, ...second]);
     written.push(TWO_PHASE_PROFILE);
+    console.log(
+      `${scriptc} has a second profile phase; ${SINGLE_PHASE_PROFILE}, which a scriptc without one builds with, is left as it is`,
+    );
   } else {
+    copyFileSync(first, join(root, SINGLE_PHASE_PROFILE));
+    written.push(SINGLE_PHASE_PROFILE);
     console.log(`${scriptc} has no second profile phase; ${TWO_PHASE_PROFILE} is left as it is`);
   }
   for (const profile of written) {
-    // The scriptc that generated the profiled code. tests/profile.test.mjs compares it with the pinned scriptc.
+    // The scriptc that generated the profiled code. tests/profile.test.mjs compares it with the pinned scriptc, and
+    // checks that the one-phase profile comes from a scriptc without a second profile phase.
     const info = join(root, profileInfoPath(profile));
-    writeFileSync(info, `${JSON.stringify({ scriptc: scriptcVersion(), functions: null }, null, 2)}\n`);
+    writeFileSync(
+      info,
+      `${JSON.stringify({ scriptc: scriptcVersion(), secondProfilePhase: secondPhase, functions: null }, null, 2)}\n`,
+    );
     console.log(`wrote ${join(root, profile)}`);
     run(process.execPath, [
       'scripts/build-native.mjs',
