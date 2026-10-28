@@ -41,7 +41,7 @@ async function open(objectReferences) {
   cpSync(resolve('tests/fixtures/project'), dir, { recursive: true });
   const client = new Client(tscTs, dir, env);
   const initialized = await client.json('initialize', objectReferences ? { objectReferences: true } : undefined);
-  const update = await client.json('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+  const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
   const base = { snapshot: update.snapshot, project: update.projects[0].id };
   const located = [];
   for (const file of await client.json('getSourceFileNames', base)) {
@@ -71,9 +71,11 @@ function resolveReply(server, kind, value) {
     return object;
   }
   if (value === null) return null;
-  const held = server.held[kind].get(value.id);
+  // A symbol's id is its reference's.
+  const id = kind === 'symbol' ? value.reference.id : value.id;
+  const held = server.held[kind].get(id);
   if (held !== undefined) return held;
-  server.held[kind].set(value.id, value);
+  server.held[kind].set(id, value);
   return value;
 }
 
@@ -122,7 +124,12 @@ test('replies with object references resolve to the replies without them', { ski
     await both('getResolvedSignatures', (s) => ({ locations: all(s) }));
 
     const typeIds = [...new Set(types.filter((t) => t !== null).map((t) => t.id))];
-    const symbolIds = [...new Set(symbols.filter((s) => s !== null).map((s) => s.id))];
+    // Each server's symbol references name its own copy's files.
+    const references = new Map();
+    for (const symbol of symbols)
+      if (symbol !== null) references.set(JSON.stringify(symbol.reference), symbol.reference);
+    const symbolReferences = [...references.values()];
+    const inServer = (server, reference) => JSON.parse(JSON.stringify(reference).replaceAll('<dir>', server.dir));
     assert.ok(typeIds.length > 50, `${typeIds.length} types`);
     for (const type of typeIds) {
       await both('getPropertiesOfType', () => ({ type }));
@@ -133,16 +140,16 @@ test('replies with object references resolve to the replies without them', { ski
       for (const kind of [0, 1]) {
         const signatures = await both('getSignaturesOfType', () => ({ type, kind }));
         for (const signature of Array.isArray(signatures) ? signatures : []) {
-          await both('getReturnTypeOfSignature', () => ({ signature: signature.id }));
+          await both('getReturnTypeOfSignature', () => ({ objectId: signature.id }));
           await both('getTypePredicateOfSignature', () => ({ signature: signature.id }));
         }
       }
     }
-    for (const symbol of symbolIds) {
-      await both('getTypeOfSymbol', () => ({ symbol }));
-      await both('getAliasedSymbol', () => ({ symbol }));
+    for (const reference of symbolReferences) {
+      await both('getTypeOfSymbol', (s) => ({ symbol: inServer(s, reference) }));
+      await both('getAliasedSymbol', (s) => ({ symbol: inServer(s, reference) }));
     }
-    await both('getTypesOfSymbols', () => ({ symbols: symbolIds }));
+    await both('getTypesOfSymbols', (s) => ({ symbols: symbolReferences.map((reference) => inServer(s, reference)) }));
 
     assert.equal(plain.references, 0);
     assert.ok(referencing.references > 1000, `${referencing.references} references`);
