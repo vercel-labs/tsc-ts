@@ -235,13 +235,27 @@ export interface PrintNodeParams {
   terminateUnterminatedLiterals?: boolean;
 }
 
+export interface InitializeParams {
+  // Whether replies may name objects the client already holds by their ids (TypeReply, SymbolReply, SignatureReply).
+  objectReferences?: boolean;
+}
+
 // Responses
 
 export interface InitializeResponse {
   // 0 for case-insensitive file names, 1 for case-sensitive ones.
   caseSensitivity: number;
   currentDirectory: string;
+  // Whether replies name objects the client already holds by their ids: true when the client asked for it.
+  objectReferences?: boolean;
 }
+
+// A reply that is a type, or an array of types, carries each as a TypeResponse. When the client asked for object
+// references, a type an earlier reply carried for the same snapshot and project is its id instead. Types inside other
+// response objects are always TypeResponses. SymbolReply and SignatureReply do the same; symbols are kept per snapshot.
+export type TypeReply = TypeResponse | number;
+export type SymbolReply = SymbolResponse | number;
+export type SignatureReply = SignatureResponse | number;
 
 export interface SnapshotResponse {
   snapshot: number;
