@@ -266,23 +266,44 @@ export class Relation {
     }
   }
 
-  set(key: number, result: number): void {
+  /** Sets the result of `key`, and returns whether the key is new. */
+  set(key: number, result: number): boolean {
     const keys = this.keys;
     const mask = keys.length - 1;
     for (let i = relationSlot(key) & mask; ; i = (i + 1) & mask) {
       const k = keys[i]!;
       if (k === key) {
         this.results[i] = result;
-        return;
+        return false;
       }
       if (k === 0) {
         keys[i] = key;
         this.results[i] = result;
         this.count++;
         if (this.count * 4 > keys.length * 3) this.grow();
-        return;
+        return true;
       }
     }
+  }
+
+  /** Removes `key`, moving later entries of its probe run back so lookups still find them. */
+  delete(key: number): void {
+    const keys = this.keys;
+    const results = this.results;
+    const mask = keys.length - 1;
+    let i = relationSlot(key) & mask;
+    for (; keys[i] !== key; i = (i + 1) & mask) if (keys[i] === 0) return;
+    for (let j = (i + 1) & mask; keys[j] !== 0; j = (j + 1) & mask) {
+      // An entry stays where it is when its home slot is cyclically after the freed slot and at or before it.
+      const home = relationSlot(keys[j]!) & mask;
+      if (i <= j ? i < home && home <= j : i < home || home <= j) continue;
+      keys[i] = keys[j]!;
+      results[i] = results[j]!;
+      i = j;
+    }
+    keys[i] = 0;
+    results[i] = 0;
+    this.count--;
   }
 
   size(): number {
@@ -1013,8 +1034,25 @@ export function checkTypeRelatedTo(
   // Nested checks (from resolving types during the relation) find no spare and allocate their own.
   const r = c.spareRelater ?? new Relater(c, relation, errorNode);
   c.spareRelater = undefined;
+  const relationCount = Math.trunc((16000000 - relation.size()) / 8);
+  if (errorNode !== undefined) {
+    // Relate without reporting first: reporting builds a message for every comparison that fails on the way,
+    // even when the relation holds. When the relation fails, the results this pass added are removed, since
+    // the comparisons it assumed related while comparing would change which failure the report elaborates.
+    r.reset(relation, undefined);
+    r.relationCount = relationCount;
+    const addedKeys: number[] = [];
+    r.addedKeys = addedKeys;
+    const quiet = r.isRelatedToEx(source, target, RecursionFlags.Both, false, undefined, IntersectionState.None);
+    r.addedKeys = undefined;
+    if (quiet !== Ternary.False && !r.overflow) {
+      c.spareRelater = r;
+      return true;
+    }
+    for (const key of addedKeys) relation.delete(key);
+  }
   r.reset(relation, errorNode);
-  r.relationCount = Math.trunc((16000000 - relation.size()) / 8);
+  r.relationCount = relationCount;
   const result = r.isRelatedToEx(
     source,
     target,
@@ -1146,6 +1184,8 @@ export class Relater extends TypeComparer {
   expandingFlags: ExpandingFlags = ExpandingFlags.None;
   overflow = false;
   relationCount = 0;
+  /** The keys this check added to the relation, while relating without reporting first. */
+  addedKeys: number[] | undefined = undefined;
   /** The intersection state passed to `compare` during signature comparisons. */
   signatureIntersectionState: IntersectionState = IntersectionState.None;
   // What `relateVariances` changes in its caller's state when it falls back to structure.
@@ -1747,18 +1787,22 @@ export class Relater extends TypeComparer {
       }
     } else {
       // False under assumptions is false without them.
-      this.relation.set(id, RelationComparisonResult.Failed | propagatingVarianceFlags);
+      this.record(id, RelationComparisonResult.Failed | propagatingVarianceFlags);
       this.relationCount--;
       this.resetMaybeStack(maybeStart, propagatingVarianceFlags, false);
     }
     return result;
   }
 
+  record(key: number, result: number): void {
+    if (this.relation.set(key, result) && this.addedKeys !== undefined) this.addedKeys.push(key);
+  }
+
   resetMaybeStack(maybeStart: number, propagatingVarianceFlags: number, markAllAsSucceeded: boolean): void {
     for (let i = maybeStart; i < this.maybeKeys.length; i++) {
       this.maybeKeysSet.delete(this.maybeKeys[i]!);
       if (markAllAsSucceeded) {
-        this.relation.set(this.maybeKeys[i]!, RelationComparisonResult.Succeeded | propagatingVarianceFlags);
+        this.record(this.maybeKeys[i]!, RelationComparisonResult.Succeeded | propagatingVarianceFlags);
         this.relationCount--;
       }
     }
