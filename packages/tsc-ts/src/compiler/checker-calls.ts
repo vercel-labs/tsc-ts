@@ -184,6 +184,7 @@ import {
   everyInferenceHasCandidates,
   someInferenceHasCandidates,
   inferTypes,
+  inferTypesFromUnstarted,
   isConstTypeVariable,
   isMutableArrayLikeType,
 } from './checker-inference.js';
@@ -1434,13 +1435,13 @@ function inferTypeArguments(
               )
             : instantiatedType;
         // Return type inferences have the lowest priority.
-        inferTypes(
+        inferTypesFromUnstarted(
           c,
+          signature,
           context.inferences,
           inferenceSourceType,
           inferenceTargetType,
           InferencePriority.ReturnType,
-          false,
         );
       }
       // A separate pass for the mapper used to instantiate generic contextual types, from the outer
@@ -1448,7 +1449,14 @@ function inferTypeArguments(
       const returnContext = createInferenceContext(c, signature.typeParameters, signature, context.flags, undefined);
       const outerReturnMapper = outerContext !== undefined ? createOuterReturnMapper(c, outerContext) : undefined;
       const returnSourceType = instantiateType(c, contextualType, outerReturnMapper);
-      inferTypes(c, returnContext.inferences, returnSourceType, inferenceTargetType, InferencePriority.None, false);
+      inferTypesFromUnstarted(
+        c,
+        signature,
+        returnContext.inferences,
+        returnSourceType,
+        inferenceTargetType,
+        InferencePriority.None,
+      );
       context.returnMapper = someInferenceHasCandidates(returnContext.inferences)
         ? getMapperFromContext(cloneInferredPartOfContext(c, returnContext))
         : undefined;
