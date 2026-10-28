@@ -257,7 +257,9 @@ export class Session {
       case 'ping':
         return '"pong"';
       case 'initialize':
-        return JSON.stringify(this.initialize(params === '' ? null : (JSON.parse(params) as proto.InitializeParams | null)));
+        return JSON.stringify(
+          this.initialize(params === '' ? null : (JSON.parse(params) as proto.InitializeParams | null)),
+        );
       case 'updateSnapshot':
         return JSON.stringify(this.updateSnapshot(JSON.parse(params) as proto.UpdateSnapshotParams | null));
       case 'release':
