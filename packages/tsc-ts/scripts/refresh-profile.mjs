@@ -11,6 +11,10 @@
 //      (context-sensitive counts). Both phases merge into profiles/tsc-ts.cs.profdata. scriptc lays out a build that
 //      uses it by those counts: it orders each function's blocks and moves the blocks the checks never reached into
 //      separate sections. With a scriptc that has no second phase, the two-phase profile is left as it is.
+//      The second build also writes profiles/tsc-ts.cs.blocks (SCRIPTC_RECORD_PROFILE_BLOCKS): the block counts of the
+//      functions the first-phase profile annotates, which both phases share. A build that uses the two-phase profile
+//      annotates the functions whose control flow changed since it was collected from those counts; a scriptc that
+//      writes no block counts leaves the file out.
 // Then the script builds the native tsc-ts with each new profile and records beside it (tsc-ts.json, tsc-ts.cs.json)
 // the scriptc that collected it and the number of functions it describes, which build:native compares its profile
 // match with.
@@ -64,10 +68,16 @@ try {
   const env = { ...process.env, TSC_TS_LIB_DIR: typescriptLib() };
   const single = join(root, SINGLE_PHASE_PROFILE);
   mkdirSync(dirname(single), { recursive: true });
+  // Block counts of an earlier collection would describe the code another profile was collected on.
+  const blocks = join(root, TWO_PHASE_PROFILE.replace(/\.profdata$/, '.blocks'));
+  rmSync(blocks, { force: true });
   run(scriptc, ['merge-profiles', '-o', single, '--sparse', ...(await collect('first', [], env))]);
   const written = [SINGLE_PHASE_PROFILE];
   if (supportsSecondProfilePhase(scriptc, single)) {
-    const second = await collect('second', [`--profile-use=${single}`], env);
+    const second = await collect('second', [`--profile-use=${single}`], env, {
+      ...process.env,
+      SCRIPTC_RECORD_PROFILE_BLOCKS: blocks,
+    });
     run(scriptc, ['merge-profiles', '-o', join(root, TWO_PHASE_PROFILE), '--sparse', single, ...second]);
     written.push(TWO_PHASE_PROFILE);
   } else {
@@ -90,18 +100,23 @@ try {
   rmSync(work, { recursive: true, force: true });
 }
 
-// Builds an instrumented tsc-ts with the extra build-native.mjs arguments, checks every project with it, and returns
-// the paths of the raw profiles it wrote, one per project.
-async function collect(phase, buildArgs, env) {
+// Builds an instrumented tsc-ts with the extra build-native.mjs arguments and environment, checks every project with
+// it, and returns the paths of the raw profiles it wrote, one per project.
+async function collect(phase, buildArgs, env, buildEnv = process.env) {
   const raw = join(work, `${phase}-raw`);
   const instrumented = join(work, `tsc-${phase}`);
-  run(process.execPath, [
-    'scripts/build-native.mjs',
-    ...buildArgs,
-    `--profile-generate=${join(raw, '%p.profraw')}`,
-    '--output',
-    instrumented,
-  ]);
+  run(
+    process.execPath,
+    [
+      'scripts/build-native.mjs',
+      ...buildArgs,
+      `--profile-generate=${join(raw, '%p.profraw')}`,
+      '--output',
+      instrumented,
+    ],
+    root,
+    buildEnv,
+  );
   await pool(
     projects.map(({ name, dir, config }) => async () => {
       // Projects with type errors exit with 1 or 2; any other status is a failed run.
@@ -181,8 +196,8 @@ function typescriptLib() {
   return lib;
 }
 
-function run(command, args, cwd = root) {
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit' });
+function run(command, args, cwd = root, env = process.env) {
+  const result = spawnSync(command, args, { cwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited with ${result.status}`);
 }
