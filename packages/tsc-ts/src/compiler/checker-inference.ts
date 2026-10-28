@@ -194,7 +194,12 @@ import {
 } from './relations.js';
 import { maybeTypeOfKind } from './checker-utilities.js';
 import { getTypeFromTypeNode } from './checker-type-nodes.js';
-import { getMergedSymbol, getSymbolOfDeclaration } from './checker-symbols.js';
+import {
+  findResolutionCycleStartIndex,
+  getMergedSymbol,
+  getSymbolOfDeclaration,
+  TypeSystemPropertyName,
+} from './checker-symbols.js';
 import { parsePseudoBigInt } from './pseudo-bigint.js';
 import { getContextualTypeForInference } from './checker-contextual.js';
 import {
@@ -1403,15 +1408,21 @@ function someTypeCouldHoldInference(c: Checker, targets: readonly Type[]): boole
 
 /**
  * `couldContainTypeVariables` without two of its conservative answers: a deferred reference without an
- * alias, once its type arguments are resolved, holds type variables only through them, like any other
- * reference; and the static side of a class declared at the top level of a file or module holds none
- * outside its generic signatures, which inference erases.
+ * alias holds type variables only through its type arguments, like any other reference; and the static
+ * side of a class declared at the top level of a file or module holds none outside its generic
+ * signatures, which inference erases. A deferred reference's type arguments are resolved here unless
+ * they are being resolved already, where resolving them would report a circularity.
  */
 function couldHoldInference(c: Checker, t: Type, depth: number): boolean {
   if (!couldContainTypeVariables(c, t)) return false;
   if (t.alias !== undefined || depth === 4) return true;
   if ((t.objectFlags & ObjectFlags.Reference) !== 0) {
-    const resolved = (t as TypeReference).resolvedTypeArguments ?? sideOf(c, t as TypeReference).resolvedTypeArguments;
+    const resolved =
+      (t as TypeReference).resolvedTypeArguments ??
+      sideOf(c, t as TypeReference).resolvedTypeArguments ??
+      (findResolutionCycleStartIndex(c, t, TypeSystemPropertyName.ResolvedTypeArguments) < 0
+        ? getTypeArguments(c, t)
+        : undefined);
     if (resolved === undefined) return true;
     for (const a of resolved) if (couldHoldInference(c, a, depth + 1)) return true;
     return false;
