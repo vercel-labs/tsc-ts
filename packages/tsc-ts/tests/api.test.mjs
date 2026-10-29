@@ -764,6 +764,67 @@ test('tsc-ts --api offers only tag names in opening-tag completions', { skip, ti
   }
 });
 
+// Completions insert no text a declaration or a package writes as statements: an exhaustive switch over an enum
+// that is exported only under a string alias offers no case snippet, element-access completions quote a property
+// name that starts with a digit but is not a number, string-literal completions escape a property name for the
+// literal's quote, and an exports pattern that leaves its package offers nothing.
+test('tsc-ts --api completions insert no statements from declaration names', { skip, timeout: 300_000 }, async () => {
+  const root = tempDir('tsc-ts-api-');
+  const dir = join(root, 'app');
+  mkdirSync(join(dir, 'node_modules/evil'), { recursive: true });
+  mkdirSync(join(root, 'outside'), { recursive: true });
+  writeFileSync(join(root, 'outside/secret.d.ts'), 'export {};\n');
+  writeFileSync(
+    join(dir, 'node_modules/evil/package.json'),
+    JSON.stringify({ name: 'evil', exports: { './*': './../../../outside/*.js' } }),
+  );
+  writeFileSync(join(dir, 'package.json'), '{"dependencies":{"evil":"1.0.0"}}');
+  writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'nodenext', strict: true } }));
+  writeFileSync(
+    join(dir, 'a.ts'),
+    'enum E { A = "a", B = "b" }\nexport { E as "x; f(); y" };\nexport declare function getE(): E;\n',
+  );
+  const text = [
+    'import { getE } from "./a.js";',
+    'import type {} from "evil/";',
+    'switch (getE()) {',
+    '  ',
+    '}',
+    'declare const o: { "0]; f(); o[": 1; "a\\"]; f(); o[\\"": 2; 1: 3; ok: 4 };',
+    'o.',
+    'const k = o[""];',
+    '',
+  ].join('\n');
+  const file = join(dir, 'b.ts');
+  writeFileSync(file, text);
+  const client = new Client(tscTs, dir, env);
+  try {
+    await client.json('initialize');
+    const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id, file };
+    const entriesAt = async (position) =>
+      (await client.json('getCompletionsAtPosition', { ...base, position }))?.entries ?? [];
+    const switchEntries = await entriesAt(text.indexOf('switch (getE()) {\n  ') + 20);
+    assert.ok(switchEntries.length > 0);
+    assert.deepEqual(
+      switchEntries.filter((e) => (e.insertText ?? e.name).includes('f()')),
+      [],
+    );
+    const dot = new Map((await entriesAt(text.indexOf('o.\n') + 2)).map((e) => [e.name, e.insertText]));
+    assert.equal(dot.get('0]; f(); o['), '["0]; f(); o["]');
+    assert.equal(dot.get('1'), '[1]');
+    assert.equal(dot.get('ok'), undefined);
+    const names = (await entriesAt(text.indexOf('o[""]') + 3)).map((e) => e.name);
+    assert.ok(names.includes('a\\"]; f(); o[\\"'), JSON.stringify(names));
+    assert.ok(!names.includes('a"]; f(); o["'), JSON.stringify(names));
+    assert.ok(names.includes('ok'));
+    const specifiers = (await entriesAt(text.indexOf('"evil/"') + 6)).map((e) => e.name);
+    assert.ok(!specifiers.includes('secret'), JSON.stringify(specifiers));
+  } finally {
+    await client.close();
+  }
+});
+
 // tsc prepares auto-imports for a completion request in a snapshot of its own, which takes the next snapshot ID; a
 // request with symbols, or one whose list needs no auto-imports, takes none.
 test(

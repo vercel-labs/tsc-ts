@@ -955,9 +955,11 @@ export function quote(file: SourceFile, text: string): string {
   return quoted;
 }
 
+// A property name as an element access writes it: a numeric name as it is, any other name quoted. A name that
+// starts with a digit but is not a number's text, such as `0]; f(); x[`, is quoted too.
 export function quotePropertyName(file: SourceFile, name: string): string {
   const ch = name.charCodeAt(0);
-  if (ch >= 0x30 && ch <= 0x39) return name;
+  if (ch >= 0x30 && ch <= 0x39 && String(Number(name)) === name) return name;
   return quote(file, name);
 }
 

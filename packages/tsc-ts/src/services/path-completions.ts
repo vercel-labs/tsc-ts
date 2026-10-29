@@ -620,6 +620,13 @@ class PathCompletions {
       ? combinePaths(normalizedPrefixDirectory, normalizedPrefixBase + fragmentDirectory)
       : normalizedPrefixDirectory;
     const baseDirectory = normalizePath(combinePaths(packageDirectory, expandedPrefixDirectory));
+    // An `exports` or `imports` target stays inside its package: a pattern whose directory leaves the package, such
+    // as `./../../outside/*`, offers nothing, and the directories outside it are not read.
+    if (
+      (isExports || isImports) &&
+      !containsPath(normalizePath(packageDirectory), baseDirectory, this.fs.useCaseSensitiveFileNames)
+    )
+      return [];
     const normalizedSuffix = normalizePath(suffix);
     const matchingSuffixes: string[] = [];
     if (normalizedSuffix !== '') {

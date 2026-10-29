@@ -3077,14 +3077,21 @@ function typeToAutoImportableTypeNode(c: Checker, t: Type, contextNode: Node, fa
   return typeNode === undefined ? undefined : toImportableReference(typeNode, idToSymbol, factory);
 }
 
-// The import types of a type node, where an expression can be made of it, as references.
-function toImportableReference(node: Node, idToSymbol: ReadonlyMap<Node, Symbol>, factory: EmitContext): Node {
+// The import types of a type node, where an expression can be made of it, as references, or undefined when an
+// imported name is not an identifier (a string export alias such as `export { E as "a b" }`), which a reference
+// cannot be written with.
+function toImportableReference(
+  node: Node,
+  idToSymbol: ReadonlyMap<Node, Symbol>,
+  factory: EmitContext,
+): Node | undefined {
   if (node instanceof ImportTypeNode && node.qualifier !== undefined && isLiteralImportTypeArgument(node.argument)) {
     const first = getFirstIdentifier(node.qualifier);
     const symbol = idToSymbol.get(first);
     // An import type the builder copied from source names what it imports itself.
     if (symbol === undefined) return node;
     const name = getNameForExportedSymbol(symbol);
+    if (!isIdentifierText(name, LanguageVariant.Standard)) return undefined;
     const qualifier =
       name !== first.text
         ? replaceFirstIdentifier(node.qualifier, factory.createIdentifier(name), factory)
@@ -3092,15 +3099,14 @@ function toImportableReference(node: Node, idToSymbol: ReadonlyMap<Node, Symbol>
     return factory.created(new TypeReferenceNode(qualifier, node.typeArguments));
   }
   if (node instanceof IndexedAccessTypeNode) {
-    return factory.created(
-      new IndexedAccessTypeNode(
-        toImportableReference(node.objectType, idToSymbol, factory),
-        toImportableReference(node.indexType, idToSymbol, factory),
-      ),
-    );
+    const objectType = toImportableReference(node.objectType, idToSymbol, factory);
+    const indexType = toImportableReference(node.indexType, idToSymbol, factory);
+    if (objectType === undefined || indexType === undefined) return undefined;
+    return factory.created(new IndexedAccessTypeNode(objectType, indexType));
   }
   if (node instanceof ParenthesizedTypeNode) {
-    return factory.created(new ParenthesizedTypeNode(toImportableReference(node.type, idToSymbol, factory)));
+    const type = toImportableReference(node.type, idToSymbol, factory);
+    return type === undefined ? undefined : factory.created(new ParenthesizedTypeNode(type));
   }
   return node;
 }
