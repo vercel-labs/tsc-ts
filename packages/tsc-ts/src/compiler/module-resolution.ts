@@ -780,12 +780,13 @@ class ResolutionState {
     }
   }
 
+  /** The type root's path for the name, resolved against the type root as tsgo does: `./css` in it is `css`. */
   private getCandidateFromTypeRoot(typeRoot: string): string {
     const name =
       typeRoot.endsWith('/node_modules/@types') || typeRoot.endsWith('/node_modules/@types/')
         ? this.mangleScopedPackageName(this.name)
         : this.name;
-    return combinePaths(typeRoot, name);
+    return normalizePath(combinePaths(typeRoot, name));
   }
 
   private mangleScopedPackageName(name: string): string {
