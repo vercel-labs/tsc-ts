@@ -841,8 +841,10 @@ function getCompletionData(
   search.hasImportStatementCompletion = hasImportStatementCompletion;
   if (isRightOfDot || isRightOfQuestionDot) search.getTypeScriptMemberSymbols();
   else if (isRightOfOpenTag) {
-    // JSX tag names: the intrinsic elements, then the global completions.
-    data.symbols = [...getPropertiesOfType(c, getJsxType(c, 'IntrinsicElements', location))];
+    // JSX tag names: the intrinsic elements whose names are tag names, then the global completions.
+    data.symbols = getPropertiesOfType(c, getJsxType(c, 'IntrinsicElements', location)).filter((symbol) =>
+      isJsxTagNameText(symbolName(symbol)),
+    );
     search.tryGetGlobalSymbols();
     data.completionKind = CompletionKind.Global;
     data.keywordFilters = KeywordCompletionFilters.None;
@@ -3630,6 +3632,18 @@ function getCompletionEntryDisplayNameForSymbol(
       return { name, needsConvertPropertyAccess: true };
   }
   return { name, needsConvertPropertyAccess: false };
+}
+
+// Whether a property name of JSX.IntrinsicElements can be written as an opening tag's name: a JSX identifier, or two
+// joined by a colon (a namespaced name). An opening-tag completion inserts the name as it is, so another name, such
+// as one that contains spaces, `=` or braces, would add its text to the tag.
+function isJsxTagNameText(name: string): boolean {
+  const colon = name.indexOf(':');
+  if (colon < 0) return isIdentifierText(name, LanguageVariant.JSX);
+  return (
+    isIdentifierText(name.slice(0, colon), LanguageVariant.JSX) &&
+    isIdentifierText(name.slice(colon + 1), LanguageVariant.JSX)
+  );
 }
 
 function startsWithQuote(s: string): boolean {

@@ -720,6 +720,50 @@ test('tsc-ts --api completes like tsc --api', { skip, timeout: 600_000 }, async 
   }
 });
 
+// An opening tag's completions offer the JSX.IntrinsicElements names that are tag names: JSX identifiers, with
+// dashes, and namespaced names. A declaration key that holds attribute text is not offered, since the completion
+// would insert that text into the tag. For tag names, the list is the one tsc answers.
+test('tsc-ts --api offers only tag names in opening-tag completions', { skip, timeout: 300_000 }, async () => {
+  const dir = tempDir('tsc-ts-api-');
+  writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { jsx: 'preserve', strict: true } }));
+  const tags = ['div', 'my-element', 'svg:rect', 'x_1'];
+  const injected = ['div onClick={() => fetch("/x")}', 'img src=x', 'a b', 'svg:rect:x', '"quoted"', '>', 'x.y', ''];
+  const declare = (names) =>
+    `declare namespace JSX {\n  interface IntrinsicElements {\n${names
+      .map((name) => `    ${JSON.stringify(name)}: {};\n`)
+      .join('')}  }\n  interface Element {}\n}\nconst a = <;\n`;
+  const file = join(dir, 'tags.tsx');
+  writeFileSync(file, declare(tags));
+  const d = new Differential([realTsc], tscTs, dir, env);
+  try {
+    await d.call('initialize');
+    const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id };
+    const position = readFileSync(file, 'utf8').indexOf('<;') + 1;
+    const names = (await d.call('getCompletionsAtPosition', { ...base, file, position })).entries.map((e) => e.name);
+    for (const tag of tags) assert.ok(names.includes(tag), tag);
+  } finally {
+    await d.close();
+  }
+  report(d);
+
+  writeFileSync(file, declare([...tags, ...injected]));
+  const client = new Client(tscTs, dir, env);
+  try {
+    await client.json('initialize');
+    const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id };
+    const position = readFileSync(file, 'utf8').indexOf('<;') + 1;
+    const { entries } = await client.json('getCompletionsAtPosition', { ...base, file, position });
+    const names = entries.map((e) => e.name);
+    for (const tag of tags) assert.ok(names.includes(tag), tag);
+    for (const name of injected) assert.ok(!names.includes(name), JSON.stringify(name));
+    for (const e of entries) assert.ok(!/[\s={}"<>]/.test(e.insertText ?? e.name), JSON.stringify(e));
+  } finally {
+    await client.close();
+  }
+});
+
 // tsc prepares auto-imports for a completion request in a snapshot of its own, which takes the next snapshot ID; a
 // request with symbols, or one whose list needs no auto-imports, takes none.
 test(
