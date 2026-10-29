@@ -184,7 +184,9 @@ import {
   getUnmatchedProperty,
   getVariances,
   isUnmatchedProperty,
+  isDeeplyNestedStackEntry,
   isDeeplyNestedType,
+  type RecursionId,
   setStackEntry,
   isObjectTypeWithInferableIndex,
   isTypeAssignableTo,
@@ -797,18 +799,25 @@ class InferenceState {
   expandingFlags: ExpandingFlags = ExpandingFlags.None;
   propagationType: Type | undefined = undefined;
   /**
-   * invokeOnce's pairs, for each priority and variance of the walk (`visitMode`), by packed type ids (`visitKey`),
-   * or spelled when an id is too large to pack.
+   * The statuses of the pairs invokeOnce finished, for each priority and variance of the walk (`visitMode`), by
+   * packed type ids (`visitKey`), or spelled when an id is too large to pack. The first pair with packed ids is in
+   * `firstVisitKey` instead: most walks finish at most one.
    */
   visited: Map<number, Map<number, InferencePriority>> | undefined = undefined;
   visitedSpelled: Map<string, InferencePriority> | undefined = undefined;
-  /** The mode `visitedPairs` belongs to, or -1 before the first `visitedOf`. */
+  /** The mode `visitedPairs` belongs to, or -1 before the first `visitedPairsOf`. */
   visitedMode = -1;
   /** `visited`'s map for `visitedMode`; a walk mostly stays in one mode. */
   visitedPairs: Map<number, InferencePriority> | undefined = undefined;
-  /** invokeOnce's recursion stacks; the first `stackDepth` entries of each are live. */
-  readonly sourceStack: Type[] = [];
-  readonly targetStack: Type[] = [];
+  /** The first finished pair with packed ids (-1 before it), its mode and its status. */
+  firstVisitKey = -1;
+  firstVisitMode = 0;
+  firstVisitStatus: InferencePriority = InferencePriority.MaxValue;
+  /**
+   * Where this walk's entries start on the checker's invokeOnce stacks (`InferenceCaches.invokeSourceStack`). The
+   * `stackDepth` entries from there are live: the pairs being visited.
+   */
+  readonly stackBase: number;
   stackDepth = 0;
 
   constructor(
@@ -823,6 +832,7 @@ class InferenceState {
     this.originalTarget = originalTarget;
     this.priority = priority;
     this.contravariant = contravariant;
+    this.stackBase = c.inferenceCaches.invokeStackDepth;
   }
 
   infoFor(t: Type): InferenceInfo | undefined {
@@ -1054,27 +1064,29 @@ class InferenceState {
     // As in tsc, a pair is visited once for each priority and variance it is inferred with.
     const mode = visitMode(this.priority, this.contravariant, this.bivariant);
     const key = visitKey(source, target);
-    // One map lookup for the pair, and the same map for both of its updates below.
-    const pairs = key >= 0 ? this.visitedOf(mode) : undefined;
-    const status =
-      pairs !== undefined ? pairs.get(key) : this.visitedSpelled?.get(source.id + ',' + target.id + ',' + mode);
+    const status = this.getVisited(source, target, key, mode);
     if (status !== undefined) {
       this.inferencePriority = Math.min(this.inferencePriority, status);
       return;
     }
-    if (pairs !== undefined) pairs.set(key, InferencePriority.Circularity);
-    else this.setVisitedSpelled(source, target, mode, InferencePriority.Circularity);
     const saveInferencePriority = this.inferencePriority;
     this.inferencePriority = InferencePriority.MaxValue;
     // Duplicate recursion identities on both sides mean a circularity.
     const saveExpandingFlags = this.expandingFlags;
+    const caches = this.c.inferenceCaches;
     const stackDepth = this.stackDepth;
-    setStackEntry(this.sourceStack, stackDepth, source);
-    setStackEntry(this.targetStack, stackDepth, target);
+    const start = this.stackBase;
+    const end = start + stackDepth + 1;
+    setStackEntry(caches.invokeSourceStack, end - 1, source);
+    setStackEntry(caches.invokeTargetStack, end - 1, target);
+    setNumberEntry(caches.invokeModeStack, end - 1, mode);
+    setNumberEntry(caches.invokeSourceIdentities, end - 1, 0);
+    setNumberEntry(caches.invokeTargetIdentities, end - 1, 0);
     this.stackDepth = stackDepth + 1;
-    if (isDeeplyNestedType(this.c, source, this.sourceStack, stackDepth + 1, 2))
+    caches.invokeStackDepth = end;
+    if (isDeeplyNestedStackEntry(this.c, caches.invokeSourceStack, caches.invokeSourceIdentities, start, end, 2))
       this.expandingFlags |= ExpandingFlags.Source;
-    if (isDeeplyNestedType(this.c, target, this.targetStack, stackDepth + 1, 2))
+    if (isDeeplyNestedStackEntry(this.c, caches.invokeTargetStack, caches.invokeTargetIdentities, start, end, 2))
       this.expandingFlags |= ExpandingFlags.Target;
     if (this.expandingFlags !== ExpandingFlags.Both) {
       switch (action) {
@@ -1096,10 +1108,62 @@ class InferenceState {
       }
     } else this.inferencePriority = InferencePriority.Circularity;
     this.stackDepth = stackDepth;
+    caches.invokeStackDepth = end - 1;
     this.expandingFlags = saveExpandingFlags;
-    if (pairs !== undefined) pairs.set(key, this.inferencePriority);
-    else this.setVisitedSpelled(source, target, mode, this.inferencePriority);
+    this.setVisited(source, target, key, mode, this.inferencePriority);
     this.inferencePriority = Math.min(this.inferencePriority, saveInferencePriority);
+  }
+
+  /**
+   * The status of the pair in `mode`: its status once it is finished, Circularity while it is being visited, and
+   * undefined before its first visit.
+   */
+  getVisited(source: Type, target: Type, key: number, mode: number): InferencePriority | undefined {
+    if (key >= 0) {
+      if (key === this.firstVisitKey && mode === this.firstVisitMode) return this.firstVisitStatus;
+      const status = this.visited !== undefined ? this.visitedPairsOf(mode)?.get(key) : undefined;
+      if (status !== undefined) return status;
+    } else {
+      const status = this.visitedSpelled?.get(source.id + ',' + target.id + ',' + mode);
+      if (status !== undefined) return status;
+    }
+    const caches = this.c.inferenceCaches;
+    const targetStack = caches.invokeTargetStack;
+    const end = this.stackBase + this.stackDepth;
+    for (let i = this.stackBase; i < end; i++)
+      if (targetStack[i] === target && caches.invokeSourceStack[i] === source && caches.invokeModeStack[i] === mode)
+        return InferencePriority.Circularity;
+    return undefined;
+  }
+
+  /** Records the status of a finished pair. */
+  setVisited(source: Type, target: Type, key: number, mode: number, status: InferencePriority): void {
+    if (key < 0) {
+      let visited = this.visitedSpelled;
+      if (visited === undefined) {
+        visited = new Map<string, InferencePriority>();
+        this.visitedSpelled = visited;
+      }
+      visited.set(source.id + ',' + target.id + ',' + mode, status);
+    } else if (this.firstVisitKey < 0) {
+      this.firstVisitKey = key;
+      this.firstVisitMode = mode;
+      this.firstVisitStatus = status;
+    } else {
+      let modes = this.visited;
+      if (modes === undefined) {
+        modes = new Map<number, Map<number, InferencePriority>>();
+        this.visited = modes;
+      }
+      let pairs = this.visitedPairsOf(mode);
+      if (pairs === undefined) {
+        pairs = new Map<number, InferencePriority>();
+        modes.set(mode, pairs);
+        this.visitedMode = mode;
+        this.visitedPairs = pairs;
+      }
+      pairs.set(key, status);
+    }
   }
 
   // Source and target are instantiations of the same type alias: infers between the type arguments, with defaults
@@ -1119,32 +1183,15 @@ class InferenceState {
     );
   }
 
-  /** The visited pairs of `mode` (`visited`), created on first use. */
-  visitedOf(mode: number): Map<number, InferencePriority> {
-    if (mode === this.visitedMode) return this.visitedPairs!;
-    let modes = this.visited;
-    if (modes === undefined) {
-      modes = new Map<number, Map<number, InferencePriority>>();
-      this.visited = modes;
+  /** `visited`'s map of the pairs finished in `mode`, if there is one. */
+  visitedPairsOf(mode: number): Map<number, InferencePriority> | undefined {
+    if (mode === this.visitedMode) return this.visitedPairs;
+    const pairs = this.visited?.get(mode);
+    if (pairs !== undefined) {
+      this.visitedMode = mode;
+      this.visitedPairs = pairs;
     }
-    let pairs = modes.get(mode);
-    if (pairs === undefined) {
-      pairs = new Map<number, InferencePriority>();
-      modes.set(mode, pairs);
-    }
-    this.visitedMode = mode;
-    this.visitedPairs = pairs;
     return pairs;
-  }
-
-  /** Records the status of a pair whose ids are too large for `visitKey`. */
-  setVisitedSpelled(source: Type, target: Type, mode: number, status: InferencePriority): void {
-    let visited = this.visitedSpelled;
-    if (visited === undefined) {
-      visited = new Map<string, InferencePriority>();
-      this.visitedSpelled = visited;
-    }
-    visited.set(source.id + ',' + target.id + ',' + mode, status);
   }
 
   inferFromMatchingTypes(sources: Type[], targets: Type[], kind: MatchKind): MatchedTypes {
@@ -2590,15 +2637,20 @@ function clearActiveMapperCaches(c: Checker): void {
   for (const cache of c.activeMapperAliasCaches) if (cache !== undefined) cache.clear();
 }
 
+function setNumberEntry(stack: number[], depth: number, value: number): void {
+  if (depth < stack.length) stack[depth] = value;
+  else stack.push(value);
+}
+
 /** Type ids below this bound pack in pairs into one exact number. */
 const VisitKeyIdLimit = 1 << 26;
 
-/** invokeOnce's key for a pair of types: both ids in one number, or -1 when an id is too large. */
 /** The priority and variance of an inference walk, packed. */
 function visitMode(priority: number, contravariant: boolean, bivariant: boolean): number {
   return priority * 4 + (contravariant ? 2 : 0) + (bivariant ? 1 : 0);
 }
 
+/** invokeOnce's key for a pair of types: both ids in one number, or -1 when an id is too large. */
 function visitKey(source: Type, target: Type): number {
   const s = source.id;
   const t = target.id;
@@ -2822,6 +2874,18 @@ export class InferenceCaches {
   readonly contextFreeTypes = new Map<Node, Type>();
   readonly reverseMapped = new Map<string, Type | undefined>();
   readonly reverseHomomorphicMapped = new Map<string, Type | undefined>();
+  /**
+   * invokeOnce's recursion stacks, shared by the checker's inference walks, with the mode of each visit and the
+   * recursion identities isDeeplyNestedStackEntry keeps for each entry. The first `invokeStackDepth` entries are live.
+   * A walk's entries start where the live entries end when it starts (`InferenceState.stackBase`), so a walk started
+   * during another one keeps the other's entries.
+   */
+  readonly invokeSourceStack: Type[] = [];
+  readonly invokeTargetStack: Type[] = [];
+  readonly invokeModeStack: number[] = [];
+  readonly invokeSourceIdentities: RecursionId[] = [];
+  readonly invokeTargetIdentities: RecursionId[] = [];
+  invokeStackDepth = 0;
   /** inferReverseMappedType's recursion stacks; the first `reverseStackDepth` entries of each are live. */
   readonly reverseSourceStack: Type[] = [];
   readonly reverseTargetStack: Type[] = [];
