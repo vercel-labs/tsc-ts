@@ -4410,6 +4410,65 @@ export function isDeeplyNestedType(
 }
 
 /**
+ * isDeeplyNestedType for the newest entry of `stack[start..end)`, counting only the entries in that range.
+ * `identities` holds the recursion identity of each entry of the range once a check has computed it: 0 before
+ * that, and -1 for an entry whose recursion identity target is an intersection, which is matched by its
+ * constituents each time. Later checks compare the kept identities. The identities are computed when and in the
+ * order isDeeplyNestedType computes them, so the types and symbol ids they create come in the same order.
+ */
+export function isDeeplyNestedStackEntry(
+  c: Checker,
+  stack: readonly Type[],
+  identities: RecursionId[],
+  start: number,
+  end: number,
+  maxDepth: number,
+): boolean {
+  if (end - start < maxDepth) return false;
+  return isDeeplyNestedInRange(c, stack[end - 1]!, true, stack, identities, start, end, maxDepth);
+}
+
+function isDeeplyNestedInRange(
+  c: Checker,
+  t: Type,
+  isEntry: boolean,
+  stack: readonly Type[],
+  identities: RecursionId[],
+  start: number,
+  end: number,
+  maxDepth: number,
+): boolean {
+  const target = getRecursionIdentityTarget(c, t);
+  if ((target.flags & TypeFlags.Intersection) !== 0) {
+    if (isEntry) identities[end - 1] = -1;
+    for (const u of typesOf(target))
+      if (isDeeplyNestedInRange(c, u, false, stack, identities, start, end, maxDepth)) return true;
+    return false;
+  }
+  const identity = getRecursionIdentityFromTarget(target);
+  if (isEntry) identities[end - 1] = identity;
+  let count = 0;
+  let lastTypeId = 0;
+  for (let i = start; i < end; i++) {
+    const s = stack[i]!;
+    let known = identities[i]!;
+    if (known === 0) {
+      const sourceTarget = getRecursionIdentityTarget(c, s);
+      known = (sourceTarget.flags & TypeFlags.Intersection) !== 0 ? -1 : getRecursionIdentityFromTarget(sourceTarget);
+      identities[i] = known;
+    }
+    if (known >= 0 ? known === identity : hasMatchingRecursionIdentity(c, s, identity)) {
+      if (s.id >= lastTypeId) {
+        count++;
+        if (count >= maxDepth) return true;
+      }
+      lastTypeId = s.id;
+    }
+  }
+  return false;
+}
+
+/**
  * The type whose recursion identity `t` has: the object type of an indexed access (T in T[K]), and for a
  * homomorphic mapped type the deepest target type that has a symbol. Unwrapping mapped types keeps the identities of
  * mapped types applied to written object literals unique: in `Mapped<{ x: Mapped<{ x: Mapped<{ x: string }>}>}>`,
