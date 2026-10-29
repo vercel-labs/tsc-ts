@@ -1072,6 +1072,41 @@ test('tsc-ts --api adds imports like tsc --api', { skip, timeout: 300_000 }, asy
   }
 });
 
+// The import adder writes no import of an export whose name is not an identifier: a CommonJS export named with
+// statement text would otherwise become an import specifier with that text. An export with an identifier name is
+// still imported.
+test('tsc-ts --api adds no import of an export with a non-identifier name', { skip, timeout: 300_000 }, async () => {
+  const dir = tempDir('tsc-ts-api-');
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { module: 'nodenext', allowJs: true, checkJs: true }, include: ['src'] }),
+  );
+  writeFileSync(join(dir, 'package.json'), '{"type":"module"}');
+  const name = "x } from 'y'; f(); import { z";
+  writeFileSync(join(dir, 'src/c.cjs'), `exports[${JSON.stringify(name)}] = 1;\nexports.okc = 2;\n`);
+  writeFileSync(join(dir, 'src/b.ts'), 'export {};\n');
+  const client = new Client(tscTs, dir, env);
+  try {
+    await client.json('initialize');
+    const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id };
+    const text = readFileSync(join(dir, 'src/c.cjs'), 'utf8');
+    const editsFor = async (position) => {
+      const symbol = await client.json('getSymbolAtPosition', { ...base, file: join(dir, 'src/c.cjs'), position });
+      assert.ok(symbol);
+      const actions = [{ kind: 'importSymbol', symbol: symbol.reference, isValidTypeOnlyUseSite: false }];
+      return client.json('getImportAdderEdits', { ...base, file: join(dir, 'src/b.ts'), actions });
+    };
+    assert.deepEqual(await editsFor(text.indexOf(JSON.stringify(name)) + 1), []);
+    const ok = await editsFor(text.indexOf('okc'));
+    assert.equal(ok.length, 1);
+    assert.match(ok[0].newText, /^import \{ okc \} from "\.\/c\.cjs";/);
+  } finally {
+    await client.close();
+  }
+});
+
 for (const fixture of ['services', 'project']) {
   test(
     `tsc-ts --api answers language service queries like tsc --api (${fixture})`,

@@ -306,9 +306,14 @@ export class AutoImportView {
     return fixes;
   }
 
-  /** The fixes that import `e`: through an existing namespace import, an existing import, or a new import. */
+  /**
+   * The fixes that import `e`: through an existing namespace import, an existing import, or a new import. An export
+   * whose name is not an identifier, such as `exports["a b"]` or `export { x as "a b" }`, has none: every fix writes
+   * the name as an identifier, in an import specifier, a binding or a qualified name.
+   */
   getFixes(e: Export, forJSX: boolean, isValidTypeOnlyUseSite: boolean, hasUsagePosition = true): AutoImportFix[] {
     const fixes: AutoImportFix[] = [];
+    if (!isIdentifierText(e.name(), LanguageVariant.Standard)) return fixes;
     // Using a namespace import or a JSDoc import type writes at the usage, so they need its position.
     const namespaceFix = hasUsagePosition ? this.tryUseExistingNamespaceImport(e) : undefined;
     if (namespaceFix !== undefined) fixes.push(namespaceFix);
