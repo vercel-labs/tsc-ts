@@ -375,6 +375,14 @@ export abstract class CompilerProgram {
     this.emitter = new ProgramEmitter(checked);
   }
 
+  /**
+   * The time spent in declaration emit while checking, to count as emit time rather than check time, since
+   * the last call. Only an incremental program emits while checking, to compute signatures.
+   */
+  takeNestedEmitTime(): number {
+    return 0;
+  }
+
   get program(): Program {
     return this.checked.program;
   }
@@ -398,6 +406,15 @@ export abstract class CompilerProgram {
   /** See `CheckedProgram.getGlobalDiagnostics`. */
   getGlobalDiagnostics(withCheckerThreads = true): Diagnostic[] {
     return this.checked.getGlobalDiagnostics(withCheckerThreads);
+  }
+
+  /**
+   * Whether the global diagnostics found by checking are reported after the semantic diagnostics. An
+   * incremental program has them in the semantic diagnostics of the files they were found in
+   * (`CheckedProgram.globalsInFileDiagnostics`).
+   */
+  reportsGlobalDiagnosticsOfChecking(): boolean {
+    return !this.checked.globalsInFileDiagnostics;
   }
 
   /** Semantic diagnostics of every file. */
@@ -445,10 +462,11 @@ export class PlainProgram extends CompilerProgram {
 
   emit(writer: OutputWriter): EmitResult {
     const options = this.options;
-    if (options.noEmit !== true) {
-      const skipped = handleNoEmitOnError(this);
-      if (skipped !== undefined) return skipped;
-    }
+    // A `noEmit` program emits nothing, and its emit is not skipped (tsgo's `HandleNoEmitOptions`): its
+    // declaration errors come with its other diagnostics (`getDiagnosticsOfProgram`).
+    if (options.noEmit === true) return new EmitResult();
+    const skipped = handleNoEmitOnError(this);
+    if (skipped !== undefined) return skipped;
     const program = this.program;
     const files = program.getSourceFiles();
     const parallel = this.checked.emittedInParallel;
@@ -462,7 +480,9 @@ export class PlainProgram extends CompilerProgram {
               const emitted = parallel[i];
               // The declaration thread emitted the declarations of the files it could (parallel-emit.ts).
               const ahead = this.checked.declarationsEmittedAhead;
-              const declarations = (): EmitResult => ahead?.[i] ?? this.emitter.emit([file], EmitOnly.Dts, writer);
+              // The file's JavaScript is emitted too, here or on an emit thread.
+              const declarations = (): EmitResult =>
+                ahead?.[i] ?? this.emitter.emit([file], EmitOnly.DtsAfterJs, writer);
               if (emitted === undefined)
                 return ahead !== undefined
                   ? combineEmitResults([this.emitter.emit([file], EmitOnly.Js, writer), declarations()])
@@ -473,13 +493,6 @@ export class PlainProgram extends CompilerProgram {
               return combineEmitResults([written, declarations()]);
             }),
           );
-    if (options.noEmit === true) {
-      // Emit is skipped only for files that would have been emitted.
-      result.emitSkipped = files.some((file) => program.sourceFileMayBeEmitted(file, false));
-      // Declaration emit still runs for its errors, as in tsgo, also when other errors were found.
-      if (getEmitDeclarations(options) && options.noEmitOnError !== true)
-        for (const d of this.getDeclarationDiagnostics()) result.diagnostics.push(d);
-    }
     return result;
   }
 }
@@ -496,10 +509,9 @@ export function handleNoEmitOnError(program: CompilerProgram): EmitResult | unde
 }
 
 /**
- * Config and syntax errors; without syntax errors, program, global and semantic errors too, and
- * declaration errors under `noEmit` (or `withDeclarationDiagnostics`). With `declarationsLater`, the
- * declaration errors are left to `program.emit`, which reports them under `noEmit` (without
- * `noEmitOnError`) whether or not other errors were found.
+ * Config and syntax errors; without syntax errors, program, global and semantic errors too, and, when
+ * there are none of these, declaration errors under `noEmit` (or `withDeclarationDiagnostics`). With
+ * `declarationsLater`, the declaration errors are left to the caller (`declarationDiagnosticsDue`).
  */
 export function getDiagnosticsOfProgram(
   program: CompilerProgram,
@@ -520,21 +532,35 @@ export function getDiagnosticsOfProgram(
   if (result.length === configCount) {
     const checkStart = performance.now();
     const semantic = program.getSemanticDiagnostics();
-    program.times.checkTime = performance.now() - checkStart;
+    // Declaration emit that computed signatures while checking counts as emit time, as in TypeScript 7.1.
+    const nestedEmitTime = program.takeNestedEmitTime();
+    program.times.checkTime = Math.max(0, performance.now() - checkStart - nestedEmitTime);
+    program.times.emitTime += nestedEmitTime;
     for (const d of semantic) result.push(d);
     // Checking may have found more, such as missing global types.
-    for (const d of program.getGlobalDiagnostics()) result.push(d);
+    if (program.reportsGlobalDiagnosticsOfChecking()) for (const d of program.getGlobalDiagnostics()) result.push(d);
     mark('semantic diagnostics');
   }
-  if (
-    !declarationsLater &&
+  if (!declarationsLater && declarationDiagnosticsDue(program, result, withDeclarationDiagnostics))
+    for (const d of program.getDeclarationDiagnostics()) result.push(d);
+  return result;
+}
+
+/**
+ * Whether `getDiagnosticsOfProgram` adds the declaration errors to `diagnostics`: under `noEmit` (or
+ * `withDeclarationDiagnostics`) with declarations, when only config errors were found.
+ */
+export function declarationDiagnosticsDue(
+  program: CompilerProgram,
+  diagnostics: readonly Diagnostic[],
+  withDeclarationDiagnostics: boolean,
+): boolean {
+  const options = program.options;
+  return (
     (withDeclarationDiagnostics || options.noEmit === true) &&
     getEmitDeclarations(options) &&
-    result.length === configCount
-  ) {
-    for (const d of program.getDeclarationDiagnostics()) result.push(d);
-  }
-  return result;
+    diagnostics.length === program.getConfigFileParsingDiagnostics().length
+  );
 }
 
 /** Combines emit results in order. */

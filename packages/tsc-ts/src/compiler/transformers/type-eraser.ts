@@ -398,7 +398,16 @@ export class TypeEraser extends Transformer {
       case SyntaxKind.ImportClause:
         if (node instanceof ImportClause) {
           if (node.phaseModifier === SyntaxKind.TypeKeyword) return undefined;
-          const bindings = this.visitNode(node.namedBindings);
+          let bindings = this.visitNode(node.namedBindings);
+          // With a default import, `{}` left by erasing type-only specifiers goes; a `{}` written in the source stays.
+          if (
+            node.name !== undefined &&
+            bindings instanceof NamedImports &&
+            bindings.elements.nodes.length === 0 &&
+            node.namedBindings instanceof NamedImports &&
+            node.namedBindings.elements.nodes.length !== 0
+          )
+            bindings = undefined;
           if (node.name === undefined && bindings === undefined) return undefined;
           return factory.updateImportClause(node, node.phaseModifier, node.name, bindings);
         }

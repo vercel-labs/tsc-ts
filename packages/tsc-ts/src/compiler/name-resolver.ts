@@ -172,13 +172,20 @@ export class NameResolver {
         current = current.parent;
         if (current === undefined) break;
       }
+      // A module's import attributes type sees neither the module's locals nor its exports.
+      const isModuleAttributes =
+        current.kind === SyntaxKind.ModuleDeclaration &&
+        (current as ModuleDeclaration).attributes !== undefined &&
+        lastLocation === (current as ModuleDeclaration).attributes;
       const locals = getLocalsOf(current);
       // Locals of a global source file are merged into the globals.
       if (locals !== undefined && !isGlobalSourceFile(current)) {
         result = this.lookup(locals, name, meaning);
         if (result !== undefined) {
           let useResult = true;
-          if (isFunctionLike(current) && lastLocation !== undefined && lastLocation !== getBody(current)) {
+          if (isModuleAttributes) {
+            useResult = false;
+          } else if (isFunctionLike(current) && lastLocation !== undefined && lastLocation !== getBody(current)) {
             // Type parameters are in scope in the whole signature, but local types only in the
             // body; parameters only in the body, parameter list and return type. JSDoc types
             // are parented above type parameters, so this doesn't apply to them.
@@ -215,6 +222,7 @@ export class NameResolver {
         case SyntaxKind.SourceFile:
         case SyntaxKind.ModuleDeclaration: {
           if (current.kind === SyntaxKind.SourceFile && !isExternalOrCommonJSModule(current as SourceFile)) break;
+          if (isModuleAttributes) break;
           const moduleSymbol = this.getSymbolOfDeclaration(current);
           if (moduleSymbol === undefined) break;
           const moduleExports = moduleSymbol.exports ?? emptyTable;

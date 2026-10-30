@@ -27,7 +27,6 @@
 // to the checks. --jobs sets how many checks run at once (default: half the CPUs, at most the number of projects).
 // SCRIPTC selects the scriptc executable that builds and merges the profiles.
 import { spawn, spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import {
   copyFileSync,
   existsSync,
@@ -212,21 +211,11 @@ function scriptcVersion() {
   return version;
 }
 
-// TypeScript 7.0.2's lib files, from the tsc bundled with the installed scriptc.
+// TypeScript's lib files, from the pinned upstream (npm run fetch:upstream).
 function typescriptLib() {
-  const require = createRequire(join(root, 'package.json'));
-  const scriptcPackage = JSON.parse(readFileSync(require.resolve('scriptc/package.json'), 'utf8'));
-  for (const name of Object.keys(scriptcPackage.optionalDependencies ?? {})) {
-    let path;
-    try {
-      path = require.resolve(`${name}/package.json`);
-    } catch {
-      continue;
-    }
-    const lib = join(dirname(path), 'dist/lib/typescript/lib');
-    if (existsSync(join(lib, 'lib.d.ts'))) return lib;
-  }
-  throw new Error('no scriptc platform package with TypeScript lib files is installed');
+  const lib = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
+  if (!existsSync(join(lib, 'lib.d.ts'))) throw new Error(`no lib files in ${lib}: run npm run fetch:upstream`);
+  return lib;
 }
 
 function run(command, args, cwd = root, env = process.env) {

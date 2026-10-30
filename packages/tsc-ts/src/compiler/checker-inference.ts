@@ -12,6 +12,7 @@ import {
   type TypeParameterDeclaration,
   type ConditionalTypeNode,
 } from './ast.js';
+import { isInJSFile } from './ast-utilities.js';
 import { hasSyntacticModifier } from './binder-utilities.js';
 import { SyntaxKind } from './syntax-kind.js';
 import type { Checker } from './checker.js';
@@ -50,6 +51,7 @@ import {
   newTypeMapper,
   SimpleTypeMapper,
   emptyTypes,
+  getNonDistributedTypeParameter,
 } from './checker-types.js';
 import {
   UnionReduction,
@@ -88,6 +90,7 @@ import {
   someType,
   tupleTargetOf,
   typesOf,
+  compareTypes,
 } from './checker-type-factory.js';
 import {
   getDeclaredTypeOfClassOrInterface,
@@ -124,6 +127,7 @@ import {
   isNoInferType,
   isTypeMatchedByTemplateLiteralType,
   shouldDeferIndexType,
+  type TemplateTypeComparer,
 } from './checker-type-operators.js';
 import {
   getApparentType,
@@ -180,7 +184,9 @@ import {
   getUnmatchedProperty,
   getVariances,
   isUnmatchedProperty,
+  isDeeplyNestedStackEntry,
   isDeeplyNestedType,
+  type RecursionId,
   setStackEntry,
   isObjectTypeWithInferableIndex,
   isTypeAssignableTo,
@@ -190,7 +196,12 @@ import {
 } from './relations.js';
 import { maybeTypeOfKind } from './checker-utilities.js';
 import { getTypeFromTypeNode } from './checker-type-nodes.js';
-import { getMergedSymbol, getSymbolOfDeclaration } from './checker-symbols.js';
+import {
+  findResolutionCycleStartIndex,
+  getMergedSymbol,
+  getSymbolOfDeclaration,
+  TypeSystemPropertyName,
+} from './checker-symbols.js';
 import { parsePseudoBigInt } from './pseudo-bigint.js';
 import { getContextualTypeForInference } from './checker-contextual.js';
 import {
@@ -211,6 +222,8 @@ export const enum InferenceFlags {
   AnyDefault = 1 << 1,
   /** A generic function was skipped during inference. */
   SkippedGenericFunction = 1 << 2,
+  /** Inferences other than pure return type inferences are not filtered by their constraints. */
+  NoConstraintChecks = 1 << 3,
 }
 
 export const enum InferencePriority {
@@ -247,14 +260,12 @@ const enum ExpandingFlags {
 // Shared empty candidate lists: an InferenceInfo gets its own on its first candidate, as tsgo's nil
 // slices do. Never changed.
 const noCandidates: Type[] = [];
-const noCandidateDepths: number[] = [];
 
 /** Inferences for one type parameter. */
 export class InferenceInfo {
   readonly typeParameter: Type;
-  /** Covariant candidates, in decreasing depth order. */
+  /** Covariant candidates. */
   candidates: Type[] = noCandidates;
-  candidateDepths: number[] = noCandidateDepths;
   contraCandidates: Type[] = noCandidates;
   inferredType: Type | undefined = undefined;
   priority: InferencePriority = InferencePriority.MaxValue;
@@ -269,10 +280,7 @@ export class InferenceInfo {
 
   clone(): InferenceInfo {
     const info = new InferenceInfo(this.typeParameter);
-    if (this.candidates.length !== 0) {
-      info.candidates = this.candidates.slice();
-      info.candidateDepths = this.candidateDepths.slice();
-    }
+    if (this.candidates.length !== 0) info.candidates = this.candidates.slice();
     if (this.contraCandidates.length !== 0) info.contraCandidates = this.contraCandidates.slice();
     info.inferredType = this.inferredType;
     info.priority = this.priority;
@@ -566,7 +574,7 @@ export function inferTypesFromUnstarted(
   target: Type,
   priority: InferencePriority,
 ): void {
-  if (c.inVarianceComputation || !isUnstarted(inferences)) {
+  if (c.varianceStack.length !== 0 || !isUnstarted(inferences)) {
     inferTypes(c, inferences, source, target, priority, false);
     return;
   }
@@ -667,10 +675,7 @@ function copyInferences(inferences: InferenceInfo[], from: readonly InferenceInf
   for (let k = 0; k < inferences.length; k++) {
     const info = inferences[k]!;
     const known = from[k]!;
-    if (known.candidates.length !== 0) {
-      info.candidates = known.candidates.slice();
-      info.candidateDepths = known.candidateDepths.slice();
-    }
+    if (known.candidates.length !== 0) info.candidates = known.candidates.slice();
     if (known.contraCandidates.length !== 0) info.contraCandidates = known.contraCandidates.slice();
     info.inferredType = known.inferredType;
     info.priority = known.priority;
@@ -692,8 +697,6 @@ function sameInferences(a: readonly InferenceInfo[], b: readonly InferenceInfo[]
     const y = b[k]!;
     if (
       !sameTypes(x.candidates, y.candidates) ||
-      x.candidateDepths.length !== y.candidateDepths.length ||
-      x.candidateDepths.some((d, i) => d !== y.candidateDepths[i]) ||
       !sameTypes(x.contraCandidates, y.contraCandidates) ||
       x.inferredType !== y.inferredType ||
       x.priority !== y.priority ||
@@ -750,9 +753,11 @@ function verifyUnstartedInference(
 }
 
 const enum InferenceAction {
+  AliasTypeArguments,
   ConditionalType,
   GenericMappedTypes,
   ObjectTypes,
+  ReferenceTypeArguments,
 }
 
 const enum MatchKind {
@@ -793,14 +798,27 @@ class InferenceState {
   bivariant = false;
   expandingFlags: ExpandingFlags = ExpandingFlags.None;
   propagationType: Type | undefined = undefined;
-  /** invokeOnce's pairs by packed type ids (`visitKey`), or spelled when an id is too large to pack. */
-  visited: Map<number, InferencePriority> | undefined = undefined;
+  /**
+   * The statuses of the pairs invokeOnce finished, for each priority and variance of the walk (`visitMode`), by
+   * packed type ids (`visitKey`), or spelled when an id is too large to pack. The first pair with packed ids is in
+   * `firstVisitKey` instead: most walks finish at most one.
+   */
+  visited: Map<number, Map<number, InferencePriority>> | undefined = undefined;
   visitedSpelled: Map<string, InferencePriority> | undefined = undefined;
-  /** invokeOnce's recursion stacks; the first `stackDepth` entries of each are live. */
-  readonly sourceStack: Type[] = [];
-  readonly targetStack: Type[] = [];
+  /** The mode `visitedPairs` belongs to, or -1 before the first `visitedPairsOf`. */
+  visitedMode = -1;
+  /** `visited`'s map for `visitedMode`; a walk mostly stays in one mode. */
+  visitedPairs: Map<number, InferencePriority> | undefined = undefined;
+  /** The first finished pair with packed ids (-1 before it), its mode and its status. */
+  firstVisitKey = -1;
+  firstVisitMode = 0;
+  firstVisitStatus: InferencePriority = InferencePriority.MaxValue;
+  /**
+   * Where this walk's entries start on the checker's invokeOnce stacks (`InferenceCaches.invokeSourceStack`). The
+   * `stackDepth` entries from there are live: the pairs being visited.
+   */
+  readonly stackBase: number;
   stackDepth = 0;
-  depth = 0;
 
   constructor(
     c: Checker,
@@ -814,6 +832,7 @@ class InferenceState {
     this.originalTarget = originalTarget;
     this.priority = priority;
     this.contravariant = contravariant;
+    this.stackBase = c.inferenceCaches.invokeStackDepth;
   }
 
   infoFor(t: Type): InferenceInfo | undefined {
@@ -834,18 +853,9 @@ class InferenceState {
     const sourceAlias = source.alias;
     const targetAlias = target.alias;
     if (sourceAlias !== undefined && targetAlias !== undefined && sourceAlias.symbol === targetAlias.symbol) {
-      if (sourceAlias.typeArguments.length !== 0 || targetAlias.typeArguments.length !== 0) {
-        // Instantiations of the same alias: infer between the type arguments, with defaults applied.
-        const params = c.symbolLinks(sourceAlias.symbol).typeParameters ?? [];
-        const minParams = getMinTypeArgumentCount(c, params);
-        const sourceTypes = fillMissingTypeArguments(c, sourceAlias.typeArguments, params, minParams, false);
-        const targetTypes = fillMissingTypeArguments(c, targetAlias.typeArguments, params, minParams, false);
-        this.inferFromTypeArguments(
-          sourceTypes,
-          targetTypes,
-          someTypeCouldHoldInference(c, targetTypes) ? getAliasVariances(c, sourceAlias.symbol) : noVariances,
-        );
-      }
+      // Instantiations of the same alias infer between their type arguments, once for each pair of types, as tsc does.
+      if (sourceAlias.typeArguments.length !== 0 || targetAlias.typeArguments.length !== 0)
+        this.invokeOnce(source, target, InferenceAction.AliasTypeArguments);
       return;
     }
     if (source === target && (source.flags & TypeFlags.UnionOrIntersection) !== 0) {
@@ -855,7 +865,7 @@ class InferenceState {
     if ((target.flags & TypeFlags.Union) !== 0) {
       const sourceTypes = (source.flags & TypeFlags.Union) !== 0 ? typesOf(source) : [source];
       // Infer between identically matching constituents, then closely matching ones, removing them.
-      const temp = this.inferFromMatchingTypes(sourceTypes, distributedTypes(target), MatchKind.TypeOrBaseIdentical);
+      const temp = this.inferFromMatchingTypes(sourceTypes, typesOf(target), MatchKind.TypeOrBaseIdentical);
       const matched = this.inferFromMatchingTypes(temp.sources, temp.targets, MatchKind.CloselyMatched);
       if (matched.targets.length === 0) return;
       target = getUnionType(c, matched.targets);
@@ -908,7 +918,7 @@ class InferenceState {
       (referenceTarget(source) === referenceTarget(target) || (isArrayType(c, source) && isArrayType(c, target))) &&
       !(referenceNode(source) !== undefined && referenceNode(target) !== undefined)
     ) {
-      this.inferFromReferenceTypeArguments(source, target);
+      this.invokeOnce(source, target, InferenceAction.ReferenceTypeArguments);
     } else if ((source.flags & TypeFlags.Index) !== 0 && (target.flags & TypeFlags.Index) !== 0) {
       this.inferFromContravariantTypes((source as IndexType).target, (target as IndexType).target);
     } else if (
@@ -967,7 +977,6 @@ class InferenceState {
       if (candidate === c.blockedStringType) return;
       if (this.priority < inference.priority) {
         inference.candidates = noCandidates;
-        inference.candidateDepths = noCandidateDepths;
         inference.contraCandidates = noCandidates;
         inference.topLevel = true;
         inference.priority = this.priority;
@@ -980,29 +989,10 @@ class InferenceState {
             inference.contraCandidates.push(candidate);
             clearCachedInferences(this.inferences);
           }
-        } else {
-          let index = inference.candidates.indexOf(candidate);
-          if (index < 0 || inference.candidateDepths[index] < this.depth) {
-            if (index >= 0) {
-              inference.candidates.splice(index, 1);
-              inference.candidateDepths.splice(index, 1);
-            }
-            if (inference.candidates === noCandidates) {
-              inference.candidates = [];
-              inference.candidateDepths = [];
-            }
-            // Keep candidates with the highest depth first.
-            index = 0;
-            while (index < inference.candidateDepths.length && inference.candidateDepths[index] >= this.depth) index++;
-            if (index === inference.candidates.length) {
-              inference.candidates.push(candidate);
-              inference.candidateDepths.push(this.depth);
-            } else {
-              inference.candidates.splice(index, 0, candidate);
-              inference.candidateDepths.splice(index, 0, this.depth);
-            }
-            clearCachedInferences(this.inferences);
-          }
+        } else if (!inference.candidates.includes(candidate)) {
+          if (inference.candidates === noCandidates) inference.candidates = [];
+          inference.candidates.push(candidate);
+          clearCachedInferences(this.inferences);
         }
       }
       if (
@@ -1035,14 +1025,12 @@ class InferenceState {
   }
 
   inferFromTypeArguments(sourceTypes: Type[], targetTypes: Type[], variances: VarianceFlags[]): void {
-    this.depth++;
     const count = Math.min(sourceTypes.length, targetTypes.length);
     for (let i = 0; i < count; i++) {
       if (i < variances.length && (variances[i] & VarianceFlags.VarianceMask) === VarianceFlags.Contravariant)
         this.inferFromContravariantTypes(sourceTypes[i]!, targetTypes[i]!);
       else this.inferFromTypes(sourceTypes[i]!, targetTypes[i]!);
     }
-    this.depth--;
   }
 
   inferWithPriority(source: Type, target: Type, newPriority: InferencePriority): void {
@@ -1073,27 +1061,38 @@ class InferenceState {
 
   /** Runs `action` once per source and target pair, stopping at circularities. */
   invokeOnce(source: Type, target: Type, action: InferenceAction): void {
+    // As in tsc, a pair is visited once for each priority and variance it is inferred with.
+    const mode = visitMode(this.priority, this.contravariant, this.bivariant);
     const key = visitKey(source, target);
-    const status = key >= 0 ? this.visited?.get(key) : this.visitedSpelled?.get(source.id + ',' + target.id);
+    const status = this.getVisited(source, target, key, mode);
     if (status !== undefined) {
       this.inferencePriority = Math.min(this.inferencePriority, status);
       return;
     }
-    this.setVisited(source, target, key, InferencePriority.Circularity);
     const saveInferencePriority = this.inferencePriority;
     this.inferencePriority = InferencePriority.MaxValue;
     // Duplicate recursion identities on both sides mean a circularity.
     const saveExpandingFlags = this.expandingFlags;
+    const caches = this.c.inferenceCaches;
     const stackDepth = this.stackDepth;
-    setStackEntry(this.sourceStack, stackDepth, source);
-    setStackEntry(this.targetStack, stackDepth, target);
+    const start = this.stackBase;
+    const end = start + stackDepth + 1;
+    setStackEntry(caches.invokeSourceStack, end - 1, source);
+    setStackEntry(caches.invokeTargetStack, end - 1, target);
+    setNumberEntry(caches.invokeModeStack, end - 1, mode);
+    setNumberEntry(caches.invokeSourceIdentities, end - 1, 0);
+    setNumberEntry(caches.invokeTargetIdentities, end - 1, 0);
     this.stackDepth = stackDepth + 1;
-    if (isDeeplyNestedType(this.c, source, this.sourceStack, stackDepth + 1, 2))
+    caches.invokeStackDepth = end;
+    if (isDeeplyNestedStackEntry(this.c, caches.invokeSourceStack, caches.invokeSourceIdentities, start, end, 2))
       this.expandingFlags |= ExpandingFlags.Source;
-    if (isDeeplyNestedType(this.c, target, this.targetStack, stackDepth + 1, 2))
+    if (isDeeplyNestedStackEntry(this.c, caches.invokeTargetStack, caches.invokeTargetIdentities, start, end, 2))
       this.expandingFlags |= ExpandingFlags.Target;
     if (this.expandingFlags !== ExpandingFlags.Both) {
       switch (action) {
+        case InferenceAction.AliasTypeArguments:
+          this.inferFromAliasTypeArguments(source, target);
+          break;
         case InferenceAction.ConditionalType:
           this.inferToConditionalType(source, target as ConditionalType);
           break;
@@ -1103,30 +1102,96 @@ class InferenceState {
         case InferenceAction.ObjectTypes:
           this.inferFromObjectTypes(source, target);
           break;
+        case InferenceAction.ReferenceTypeArguments:
+          this.inferFromReferenceTypeArguments(source, target);
+          break;
       }
     } else this.inferencePriority = InferencePriority.Circularity;
     this.stackDepth = stackDepth;
+    caches.invokeStackDepth = end - 1;
     this.expandingFlags = saveExpandingFlags;
-    this.setVisited(source, target, key, this.inferencePriority);
+    this.setVisited(source, target, key, mode, this.inferencePriority);
     this.inferencePriority = Math.min(this.inferencePriority, saveInferencePriority);
   }
 
-  setVisited(source: Type, target: Type, key: number, status: InferencePriority): void {
+  /**
+   * The status of the pair in `mode`: its status once it is finished, Circularity while it is being visited, and
+   * undefined before its first visit.
+   */
+  getVisited(source: Type, target: Type, key: number, mode: number): InferencePriority | undefined {
     if (key >= 0) {
-      let visited = this.visited;
-      if (visited === undefined) {
-        visited = new Map<number, InferencePriority>();
-        this.visited = visited;
-      }
-      visited.set(key, status);
+      if (key === this.firstVisitKey && mode === this.firstVisitMode) return this.firstVisitStatus;
+      const status = this.visited !== undefined ? this.visitedPairsOf(mode)?.get(key) : undefined;
+      if (status !== undefined) return status;
     } else {
+      const status = this.visitedSpelled?.get(source.id + ',' + target.id + ',' + mode);
+      if (status !== undefined) return status;
+    }
+    const caches = this.c.inferenceCaches;
+    const targetStack = caches.invokeTargetStack;
+    const end = this.stackBase + this.stackDepth;
+    for (let i = this.stackBase; i < end; i++)
+      if (targetStack[i] === target && caches.invokeSourceStack[i] === source && caches.invokeModeStack[i] === mode)
+        return InferencePriority.Circularity;
+    return undefined;
+  }
+
+  /** Records the status of a finished pair. */
+  setVisited(source: Type, target: Type, key: number, mode: number, status: InferencePriority): void {
+    if (key < 0) {
       let visited = this.visitedSpelled;
       if (visited === undefined) {
         visited = new Map<string, InferencePriority>();
         this.visitedSpelled = visited;
       }
-      visited.set(source.id + ',' + target.id, status);
+      visited.set(source.id + ',' + target.id + ',' + mode, status);
+    } else if (this.firstVisitKey < 0) {
+      this.firstVisitKey = key;
+      this.firstVisitMode = mode;
+      this.firstVisitStatus = status;
+    } else {
+      let modes = this.visited;
+      if (modes === undefined) {
+        modes = new Map<number, Map<number, InferencePriority>>();
+        this.visited = modes;
+      }
+      let pairs = this.visitedPairsOf(mode);
+      if (pairs === undefined) {
+        pairs = new Map<number, InferencePriority>();
+        modes.set(mode, pairs);
+        this.visitedMode = mode;
+        this.visitedPairs = pairs;
+      }
+      pairs.set(key, status);
     }
+  }
+
+  // Source and target are instantiations of the same type alias: infers between the type arguments, with defaults
+  // applied.
+  inferFromAliasTypeArguments(source: Type, target: Type): void {
+    const c = this.c;
+    const sourceAlias = source.alias!;
+    const params = c.symbolLinks(sourceAlias.symbol).typeParameters ?? [];
+    const minParams = getMinTypeArgumentCount(c, params);
+    const isJavaScript = isInJSFile(sourceAlias.symbol.valueDeclaration);
+    const sourceTypes = fillMissingTypeArguments(c, sourceAlias.typeArguments, params, minParams, isJavaScript);
+    const targetTypes = fillMissingTypeArguments(c, target.alias!.typeArguments, params, minParams, isJavaScript);
+    this.inferFromTypeArguments(
+      sourceTypes,
+      targetTypes,
+      someTypeCouldHoldInference(c, targetTypes) ? getAliasVariances(c, sourceAlias.symbol) : noVariances,
+    );
+  }
+
+  /** `visited`'s map of the pairs finished in `mode`, if there is one. */
+  visitedPairsOf(mode: number): Map<number, InferencePriority> | undefined {
+    if (mode === this.visitedMode) return this.visitedPairs;
+    const pairs = this.visited?.get(mode);
+    if (pairs !== undefined) {
+      this.visitedMode = mode;
+      this.visitedPairs = pairs;
+    }
+    return pairs;
   }
 
   inferFromMatchingTypes(sources: Type[], targets: Type[], kind: MatchKind): MatchedTypes {
@@ -1136,10 +1201,19 @@ class InferenceState {
     for (const t of targets)
       for (const s of sources)
         if (typesMatch(c, s, t, kind)) {
-          this.inferFromTypes(s, t);
+          if (kind !== MatchKind.CloselyMatched) this.inferFromTypes(s, t);
           if (!matchedSources.includes(s)) matchedSources.push(s);
           if (!matchedTargets.includes(t)) matchedTargets.push(t);
         }
+    if (kind === MatchKind.CloselyMatched) {
+      // Infer to closely matched targets in decreasing depth of generic instantiations: an inference
+      // from a more deeply nested type argument has had more layers of instantiation stripped away. For
+      // example, from `string[] | string[][]` to `T[] | T[][]`, relating `string[][]` to `T[][]` infers
+      // `string`, a better inference than the `string[]` that relating `string[][]` to `T[]` infers.
+      matchedTargets.sort((t1, t2) => compareTypesAndDepth(c, t1, t2));
+      for (const t of matchedTargets)
+        for (const s of matchedSources) if (typesMatch(c, s, t, kind)) this.inferFromTypes(s, t);
+    }
     return new MatchedTypes(
       matchedSources.length !== 0 ? sources.filter((t) => !matchedSources.includes(t)) : sources,
       matchedTargets.length !== 0 ? targets.filter((t) => !matchedTargets.includes(t)) : targets,
@@ -1223,10 +1297,17 @@ class InferenceState {
     const c = this.c;
     if ((source.flags & TypeFlags.Conditional) !== 0) {
       const s = source as ConditionalType;
-      this.inferFromTypes(s.checkType, target.checkType);
-      this.inferFromTypes(s.extendsType, target.extendsType);
-      this.inferFromTypes(getTrueTypeFromConditionalType(c, s), getTrueTypeFromConditionalType(c, target));
-      this.inferFromTypes(getFalseTypeFromConditionalType(c, s), getFalseTypeFromConditionalType(c, target));
+      // A source's distributed type parameters infer as the type parameters they were made from.
+      this.inferFromTypes(getNonDistributedTypeParameter(s.checkType), target.checkType);
+      this.inferFromTypes(getNonDistributedTypeParameter(s.extendsType), target.extendsType);
+      this.inferFromTypes(
+        getNonDistributedTypeParameter(getTrueTypeFromConditionalType(c, s)),
+        getTrueTypeFromConditionalType(c, target),
+      );
+      this.inferFromTypes(
+        getNonDistributedTypeParameter(getFalseTypeFromConditionalType(c, s)),
+        getFalseTypeFromConditionalType(c, target),
+      );
     } else {
       const savePriority = this.priority;
       this.priority |= this.contravariant ? InferencePriority.ContravariantConditional : 0;
@@ -1569,9 +1650,43 @@ class InferenceState {
 // ---- Helpers
 
 function getInferenceInfoForType(inferences: InferenceInfo[], t: Type): InferenceInfo | undefined {
-  if ((t.flags & TypeFlags.TypeVariable) !== 0)
-    for (const inference of inferences) if (t === inference.typeParameter) return inference;
+  if ((t.flags & TypeFlags.TypeVariable) !== 0) {
+    const typeVariable = getNonDistributedTypeParameter(t);
+    for (const inference of inferences) if (typeVariable === inference.typeParameter) return inference;
+  }
   return undefined;
+}
+
+/** Orders types by decreasing depth, then by the regular type ordering. */
+function compareTypesAndDepth(c: Checker, t1: Type, t2: Type): number {
+  const d1 = getTypeDepth(c, t1, 3);
+  const d2 = getTypeDepth(c, t2, 3);
+  if (d1 !== d2) return d2 - d1;
+  return compareTypes(c, t1, t2);
+}
+
+/**
+ * The depth of a type, up to `maxDepth`: one plus the largest type argument depth for generic aliased
+ * types and type references, the largest constituent depth for unions and intersections, and zero
+ * otherwise. The maximum keeps circular types from recursing forever.
+ */
+function getTypeDepth(c: Checker, t: Type, maxDepth: number): number {
+  if (maxDepth !== 0) {
+    if (t.alias !== undefined && t.alias.typeArguments.length !== 0)
+      return getTypeListDepth(c, t.alias.typeArguments, maxDepth - 1) + 1;
+    if ((t.objectFlags & ObjectFlags.Reference) !== 0) {
+      const typeArguments = getTypeArguments(c, t);
+      if (typeArguments.length !== 0) return getTypeListDepth(c, typeArguments, maxDepth - 1) + 1;
+    }
+    if ((t.flags & TypeFlags.UnionOrIntersection) !== 0) return getTypeListDepth(c, typesOf(t), maxDepth);
+  }
+  return 0;
+}
+
+function getTypeListDepth(c: Checker, types: readonly Type[], maxDepth: number): number {
+  let depth = 0;
+  for (const t of types) depth = Math.max(depth, getTypeDepth(c, t, maxDepth));
+  return depth;
 }
 
 function distributedTypes(t: Type): Type[] {
@@ -1596,15 +1711,21 @@ function someTypeCouldHoldInference(c: Checker, targets: readonly Type[]): boole
 
 /**
  * `couldContainTypeVariables` without two of its conservative answers: a deferred reference without an
- * alias, once its type arguments are resolved, holds type variables only through them, like any other
- * reference; and the static side of a class declared at the top level of a file or module holds none
- * outside its generic signatures, which inference erases.
+ * alias holds type variables only through its type arguments, like any other reference; and the static
+ * side of a class declared at the top level of a file or module holds none outside its generic
+ * signatures, which inference erases. A deferred reference's type arguments are resolved here unless
+ * they are being resolved already, where resolving them would report a circularity.
  */
 function couldHoldInference(c: Checker, t: Type, depth: number): boolean {
   if (!couldContainTypeVariables(c, t)) return false;
   if (t.alias !== undefined || depth === 4) return true;
   if ((t.objectFlags & ObjectFlags.Reference) !== 0) {
-    const resolved = (t as TypeReference).resolvedTypeArguments ?? sideOf(c, t as TypeReference).resolvedTypeArguments;
+    const resolved =
+      (t as TypeReference).resolvedTypeArguments ??
+      sideOf(c, t as TypeReference).resolvedTypeArguments ??
+      (findResolutionCycleStartIndex(c, t, TypeSystemPropertyName.ResolvedTypeArguments) < 0
+        ? getTypeArguments(c, t)
+        : undefined);
     if (resolved === undefined) return true;
     for (const a of resolved) if (couldHoldInference(c, a, depth + 1)) return true;
     return false;
@@ -1821,7 +1942,8 @@ export function isConstTypeVariable(c: Checker, t: Type | undefined, depth: numb
 export function isMutableArrayLikeType(c: Checker, t: Type): boolean {
   return (
     isMutableArrayOrTuple(c, t) ||
-    ((t.flags & (TypeFlags.Any | TypeFlags.Nullable)) === 0 && isTypeAssignableTo(c, t, c.anyArrayType))
+    ((t.flags & (TypeFlags.Any | TypeFlags.Nullable | TypeFlags.Never)) === 0 &&
+      isTypeAssignableTo(c, t, c.anyArrayType))
   );
 }
 
@@ -1989,10 +2111,15 @@ export function isUnmatchedTemplateLiteralKey(source: Type, target: TemplateLite
 }
 
 /** The types matched by `target`'s placeholders in `source`, or undefined if it doesn't match. */
+/**
+ * The types that `source` gives the placeholders of `target`. A placeholder of a source template with the same
+ * texts keeps its type where `compareTypes` (assignability by default) relates their base constraints.
+ */
 export function inferTypesFromTemplateLiteralType(
   c: Checker,
   source: Type,
   target: TemplateLiteralType,
+  compareTypes?: TemplateTypeComparer,
 ): Type[] | undefined {
   if ((source.flags & TypeFlags.StringLiteral) !== 0) {
     // Most string literals fail the start and end text test; apply it before building the
@@ -2006,11 +2133,13 @@ export function inferTypesFromTemplateLiteralType(
       const result: Type[] = [];
       for (let i = 0; i < s.types.length; i++) {
         const t = s.types[i]!;
-        result.push(
-          isTypeAssignableTo(c, getBaseConstraintOrType(c, t), getBaseConstraintOrType(c, target.types[i]!))
-            ? t
-            : getStringLikeTypeForType(c, t),
-        );
+        const sourceConstraint = getBaseConstraintOrType(c, t);
+        const targetConstraint = getBaseConstraintOrType(c, target.types[i]!);
+        const related =
+          compareTypes !== undefined
+            ? compareTypes(sourceConstraint, targetConstraint)
+            : isTypeAssignableTo(c, sourceConstraint, targetConstraint);
+        result.push(related ? t : getStringLikeTypeForType(c, t));
       }
       return result;
     }
@@ -2470,7 +2599,12 @@ export function getInferredType(c: Checker, context: InferenceContext, index: nu
   const constraint = getConstraintOfTypeParameter(c, inference.typeParameter);
   if (constraint !== undefined) {
     const instantiatedConstraint = instantiateType(c, constraint, context.nonFixingMapper);
-    if (inferredType !== undefined) {
+    // A pure return type inference is still filtered in a recursive call resolution: its result can become
+    // the type of the enclosing declaration.
+    if (
+      inferredType !== undefined &&
+      ((context.flags & InferenceFlags.NoConstraintChecks) === 0 || inference.priority === InferencePriority.ReturnType)
+    ) {
       const constraintWithThis = getTypeWithThisArgument(c, instantiatedConstraint, inferredType, false);
       if (context.compareTypes.compare(inferredType, constraintWithThis, false) === Ternary.False) {
         // A pure return type inference may still succeed without the constituents the constraint rejects.
@@ -2503,8 +2637,18 @@ function clearActiveMapperCaches(c: Checker): void {
   for (const cache of c.activeMapperAliasCaches) if (cache !== undefined) cache.clear();
 }
 
+function setNumberEntry(stack: number[], depth: number, value: number): void {
+  if (depth < stack.length) stack[depth] = value;
+  else stack.push(value);
+}
+
 /** Type ids below this bound pack in pairs into one exact number. */
 const VisitKeyIdLimit = 1 << 26;
+
+/** The priority and variance of an inference walk, packed. */
+function visitMode(priority: number, contravariant: boolean, bivariant: boolean): number {
+  return priority * 4 + (contravariant ? 2 : 0) + (bivariant ? 1 : 0);
+}
 
 /** invokeOnce's key for a pair of types: both ids in one number, or -1 when an id is too large. */
 function visitKey(source: Type, target: Type): number {
@@ -2730,6 +2874,18 @@ export class InferenceCaches {
   readonly contextFreeTypes = new Map<Node, Type>();
   readonly reverseMapped = new Map<string, Type | undefined>();
   readonly reverseHomomorphicMapped = new Map<string, Type | undefined>();
+  /**
+   * invokeOnce's recursion stacks, shared by the checker's inference walks, with the mode of each visit and the
+   * recursion identities isDeeplyNestedStackEntry keeps for each entry. The first `invokeStackDepth` entries are live.
+   * A walk's entries start where the live entries end when it starts (`InferenceState.stackBase`), so a walk started
+   * during another one keeps the other's entries.
+   */
+  readonly invokeSourceStack: Type[] = [];
+  readonly invokeTargetStack: Type[] = [];
+  readonly invokeModeStack: number[] = [];
+  readonly invokeSourceIdentities: RecursionId[] = [];
+  readonly invokeTargetIdentities: RecursionId[] = [];
+  invokeStackDepth = 0;
   /** inferReverseMappedType's recursion stacks; the first `reverseStackDepth` entries of each are live. */
   readonly reverseSourceStack: Type[] = [];
   readonly reverseTargetStack: Type[] = [];

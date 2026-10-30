@@ -39,7 +39,11 @@ import { type Checker, ExternalModuleContainerIndex, SymbolAccessibilityCaches, 
 import { getEffectiveDeclarationFlags } from './checker-declarations.js';
 import { getDeclaredTypeOfSymbol } from './checker-declared-types.js';
 import { checkExpressionCached } from './checker-expressions.js';
-import { resolveExternalModuleName, resolveExternalModuleSymbol } from './checker-modules.js';
+import {
+  getImportAttributesTypeForModuleSpecifier,
+  resolveExternalModuleName,
+  resolveExternalModuleSymbol,
+} from './checker-modules.js';
 import {
   getExportsOfSymbol,
   getMergedSymbol,
@@ -351,7 +355,13 @@ function getAlternativeContainingModules(c: Checker, symbol: Symbol, enclosingDe
     for (const importRef of containingFile.imports) {
       // Synthesized specifiers can't be resolved.
       if ((importRef.flags & NodeFlags.Synthesized) !== 0) continue;
-      const resolvedModule = resolveExternalModuleName(c, enclosingDeclaration, importRef, true);
+      const resolvedModule = resolveExternalModuleName(
+        c,
+        enclosingDeclaration,
+        importRef,
+        true,
+        getImportAttributesTypeForModuleSpecifier(c, importRef),
+      );
       if (resolvedModule === undefined) continue;
       if (getAliasForSymbolInContainer(c, resolvedModule, symbol) === undefined) continue;
       results.push(resolvedModule);
@@ -718,11 +728,24 @@ class ChainSearch {
   isAccessible(fromTable: Symbol, resolvedAlias: Symbol | undefined, ignoreQualification: boolean): boolean {
     const c = this.c;
     const symbol = getMergedSymbol(c, this.symbol);
-    const likeSymbols =
+    let likeSymbols =
       this.symbol === resolvedAlias ||
       this.symbol === fromTable ||
       (resolvedAlias !== undefined && symbol === getMergedSymbol(c, resolvedAlias)) ||
       symbol === getMergedSymbol(c, fromTable);
+    // An alias of an alias, such as `export =` of a class that a top-level export also names, resolves further.
+    if (!likeSymbols && resolvedAlias !== undefined && (resolvedAlias.flags & SymbolFlags.Alias) !== 0) {
+      const seen = new Set<Symbol>();
+      let alias = resolvedAlias;
+      while ((alias.flags & SymbolFlags.Alias) !== 0 && !seen.has(alias)) {
+        seen.add(alias);
+        alias = getMergedSymbol(c, resolveAlias(c, alias));
+        if (symbol === alias) {
+          likeSymbols = true;
+          break;
+        }
+      }
+    }
     if (!likeSymbols) return false;
     // An external module in the global table isn't accessible by name; otherwise the name must be qualifiable.
     return (

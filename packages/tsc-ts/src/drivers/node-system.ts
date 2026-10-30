@@ -17,7 +17,7 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { DirectoryEntries } from '../compiler/file-system.js';
-import { normalizePath } from '../compiler/path.js';
+import { isNetworkPath, normalizePath } from '../compiler/path.js';
 import type { Program } from '../compiler/program.js';
 import { ParseThread } from '../compiler/parse-thread.js';
 import {
@@ -66,6 +66,10 @@ class NodeSystem extends System {
     return process.env[name] ?? '';
   }
 
+  hasEnvironmentVariable(name: string): boolean {
+    return process.env[name] !== undefined;
+  }
+
   write(text: string): void {
     // A pipe may be non-blocking (EAGAIN): retry a while until everything is written.
     const bytes = Buffer.from(text);
@@ -88,7 +92,10 @@ class NodeSystem extends System {
     return path;
   }
 
+  // Network paths are never accessed (`isNetworkPath`).
+
   readFile(path: string): string | undefined {
+    if (isNetworkPath(path)) return undefined;
     try {
       return readFileSync(this.toOsPath(path), 'utf8');
     } catch {
@@ -97,6 +104,7 @@ class NodeSystem extends System {
   }
 
   writeFile(path: string, text: string): boolean {
+    if (isNetworkPath(path)) return false;
     // Most outputs go to directories that exist: write first, and create the directory only when that fails.
     try {
       writeFileSync(path, text);
@@ -114,6 +122,7 @@ class NodeSystem extends System {
   }
 
   fileExists(path: string): boolean {
+    if (isNetworkPath(path)) return false;
     try {
       return statSync(this.toOsPath(path)).isFile();
     } catch {
@@ -122,6 +131,7 @@ class NodeSystem extends System {
   }
 
   directoryExists(path: string): boolean {
+    if (isNetworkPath(path)) return false;
     try {
       return statSync(this.toOsPath(path)).isDirectory();
     } catch {
@@ -134,6 +144,7 @@ class NodeSystem extends System {
     const directories: string[] = [];
     const symlinks = new Set<string>();
     let entries: Dirent[];
+    if (isNetworkPath(path)) return new DirectoryEntries(files, directories, symlinks);
     try {
       entries = readdirSync(this.toOsPath(path), { withFileTypes: true });
     } catch {
@@ -178,14 +189,18 @@ class NodeSystem extends System {
   }
 
   realpath(path: string): string {
+    if (isNetworkPath(path)) return path;
     try {
-      return normalizePath(realpathSync(path));
+      // A local path may resolve to a network location (a mapped network drive): keep the original.
+      const real = normalizePath(realpathSync(path));
+      return isNetworkPath(real) ? path : real;
     } catch {
       return path;
     }
   }
 
   getMTime(path: string): number | undefined {
+    if (isNetworkPath(path)) return undefined;
     try {
       return statSync(this.toOsPath(path)).mtimeMs;
     } catch {
@@ -194,6 +209,7 @@ class NodeSystem extends System {
   }
 
   setMTime(path: string, time: number): boolean {
+    if (isNetworkPath(path)) return false;
     try {
       const date = new Date(time);
       utimesSync(path, date, date);
@@ -204,6 +220,7 @@ class NodeSystem extends System {
   }
 
   removeFile(path: string): boolean {
+    if (isNetworkPath(path)) return false;
     try {
       unlinkSync(path);
       return true;

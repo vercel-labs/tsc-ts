@@ -19,6 +19,7 @@ import {
   ImportEqualsDeclaration,
   NewExpression,
   type Node,
+  NodeFlags,
   NodeVisitor,
   type NodeList,
   type SourceFile,
@@ -882,6 +883,14 @@ export class CaseClauseTracker {
   hasBigInt(value: string): boolean {
     return this.bigInts.has(value);
   }
+
+  addString(value: string): void {
+    this.strings.add(value);
+  }
+
+  addNumber(value: number): void {
+    this.numbers.add(value);
+  }
 }
 
 function literalText(node: Node): string {
@@ -901,9 +910,10 @@ export const enum QuotePreference {
   Single,
 }
 
+// The quotes of the file's first module specifier, without the import of tslib that importHelpers adds.
 export function getQuotePreference(file: SourceFile): QuotePreference {
   for (const specifier of file.imports) {
-    if (specifier instanceof StringLiteral)
+    if (specifier instanceof StringLiteral && specifier.parent!.pos >= 0)
       return (specifier.tokenFlags & TokenFlags.SingleQuote) !== 0 ? QuotePreference.Single : QuotePreference.Double;
   }
   return QuotePreference.Double;
@@ -941,13 +951,15 @@ function stripQuotes(name: string): string {
 export function quote(file: SourceFile, text: string): string {
   const quoted = stringifyJson(text);
   if (getQuotePreference(file) === QuotePreference.Single)
-    return stripQuotes(quoted).replaceAll("'", "\\'").replaceAll('\\"', '"');
+    return "'" + stripQuotes(quoted).replaceAll("'", "\\'").replaceAll('\\"', '"') + "'";
   return quoted;
 }
 
+// A property name as an element access writes it: a numeric name as it is, any other name quoted. A name that
+// starts with a digit but is not a number's text, such as `0]; f(); x[`, is quoted too.
 export function quotePropertyName(file: SourceFile, name: string): string {
   const ch = name.charCodeAt(0);
-  if (ch >= 0x30 && ch <= 0x39) return name;
+  if (ch >= 0x30 && ch <= 0x39 && String(Number(name)) === name) return name;
   return quote(file, name);
 }
 
@@ -1034,4 +1046,49 @@ function findNextToken(previousToken: Node, file: SourceFile): Node | undefined 
   // The token that starts where `previousToken` ends.
   const token = findPrecedingToken(file, skipTrivia(file.text, previousToken.end, false, false, false) + 1);
   return token !== undefined && token.pos === previousToken.end ? token : undefined;
+}
+
+/**
+ * Whether the file probably ends statements with semicolons, from its first five statements and members that need a
+ * semicolon or a line break: when one has a semicolon for each five without, or when at most one lacks one.
+ */
+export function probablyUsesSemicolons(file: SourceFile): boolean {
+  const counter = new SemicolonCounter(file);
+  file.forEachChild(counter);
+  // One statement without a semicolon may be one being written.
+  if (counter.withSemicolon === 0 && counter.withoutSemicolon <= 1) return true;
+  if (counter.withoutSemicolon === 0) return true;
+  return counter.withSemicolon * statementsToObserve > counter.withoutSemicolon;
+}
+
+const statementsToObserve = 5;
+
+class SemicolonCounter extends NodeVisitor {
+  withSemicolon = 0;
+  withoutSemicolon = 0;
+
+  constructor(private readonly file: SourceFile) {
+    super();
+  }
+
+  visitNode(node: Node): boolean {
+    const file = this.file;
+    if ((node.flags & NodeFlags.Reparsed) !== 0) return false;
+    if (syntaxRequiresTrailingSemicolonOrASI(node.kind)) {
+      const lastToken = getLastToken(node, file);
+      if (lastToken !== undefined && lastToken.kind === SyntaxKind.SemicolonToken) this.withSemicolon++;
+      else this.withoutSemicolon++;
+    } else if (syntaxRequiresTrailingCommaOrSemicolonOrASI(node.kind)) {
+      const lastToken = getLastToken(node, file);
+      if (lastToken !== undefined && lastToken.kind === SyntaxKind.SemicolonToken) this.withSemicolon++;
+      else if (lastToken !== undefined && lastToken.kind !== SyntaxKind.CommaToken) {
+        const lastTokenLine = getLineOfPosition(file, getStartOfNode(lastToken, file, false));
+        const nextTokenLine = getLineOfPosition(file, skipTrivia(file.text, lastToken.end));
+        // A missing semicolon in a single-line object type is insignificant.
+        if (lastTokenLine !== nextTokenLine) this.withoutSemicolon++;
+      }
+    }
+    if (this.withSemicolon + this.withoutSemicolon >= statementsToObserve) return true;
+    return node.forEachChild(this);
+  }
 }

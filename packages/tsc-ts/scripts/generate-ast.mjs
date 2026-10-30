@@ -1,5 +1,5 @@
 // Generates the node classes and shared-field accessors in src/compiler/ast.ts from
-// typescript-go's _scripts/ast.json. Only the marked regions of ast.ts are rewritten.
+// TypeScript's tools/scripts/tsc/ast.json. Only the marked regions of ast.ts are rewritten.
 //
 // Usage: node scripts/generate-ast.mjs [--schema PATH]
 import { execFileSync } from 'node:child_process';
@@ -11,7 +11,7 @@ const root = resolve(import.meta.dirname, '..');
 const args = process.argv.slice(2);
 const schemaAt = args.indexOf('--schema');
 const schemaPath =
-  schemaAt >= 0 ? resolve(args[schemaAt + 1]) : resolve(root, '../../upstream/typescript-go/_scripts/ast.json');
+  schemaAt >= 0 ? resolve(args[schemaAt + 1]) : resolve(root, '../../upstream/TypeScript/tools/scripts/tsc/ast.json');
 const astPath = join(root, 'src/compiler/ast.ts');
 
 const spec = JSON.parse(readFileSync(schemaPath, 'utf8'));
@@ -68,6 +68,7 @@ const classTypes = new Set([
   'TemplateHead',
   'TypeParameterDeclaration',
   'ExpressionWithTypeArguments',
+  'TypeLiteralNode',
 ]);
 const tokenTypes = new Set([
   'AssertsKeyword',

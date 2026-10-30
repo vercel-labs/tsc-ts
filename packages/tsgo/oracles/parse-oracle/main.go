@@ -8,14 +8,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/parser"
-	"github.com/microsoft/typescript-go/internal/tspath"
+	"github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/parser"
+	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
 
 func parse(name, text string) *ast.SourceFile {
-	opts := ast.SourceFileParseOptions{FileName: "/" + name, Path: tspath.Path("/" + name)}
+	opts := ast.SourceFileParseOptions{FileName: tspath.RootedFilePath("/" + name), PathKey: tspath.PathKey("/" + name)}
 	return parser.ParseSourceFile(opts, text, core.ScriptKindTS)
 }
 

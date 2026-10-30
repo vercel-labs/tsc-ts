@@ -7,6 +7,7 @@ import {
   ExternalModuleReference,
   Identifier,
   ImportClause,
+  ImportDeclaration,
   ImportEqualsDeclaration,
   ImportTypeNode,
   JsxNamespacedName,
@@ -19,12 +20,15 @@ import {
   PartiallyEmittedExpression,
   PropertyAccessExpression,
   StringLiteral,
+  TypeReferenceNode,
   getExpression,
   getIsTypeOnly,
   getModuleSpecifier,
   getText,
   getType,
 } from './ast.js';
+import { isTypeNodeKind } from './binder-utilities.js';
+import { CharacterCodes, isLineBreak, isWhiteSpaceLike } from './character-codes.js';
 import { skipTrivia } from './scanner.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { TokenFlags } from './types.js';
@@ -394,10 +398,45 @@ export function tagNamesAreEquivalent(lhs: Node, rhs: Node): boolean {
   throw new Error('Unhandled case in tagNamesAreEquivalent');
 }
 
+/** Whether `node` is a JSDoc type expression or a type node in one. */
+export function isJSDocTypeExpressionOrChild(node: Node): boolean {
+  if (node.kind === SyntaxKind.JSDocTypeExpression) return true;
+  if ((node.flags & (NodeFlags.JSDoc | NodeFlags.Reparsed)) === 0) return false;
+  for (let current: Node | undefined = node; current !== undefined; current = current.parent)
+    if (isTypeNodeKind(current.kind)) return true;
+  return false;
+}
+
+/** The text of a JSDoc type with the leading whitespace and `*` of each line removed, and LF line breaks. */
+export function normalizeJSDocTypeSourceText(text: string): string {
+  let result = '';
+  let lineStart = 0;
+  let multiline = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    if (!isLineBreak(ch)) continue;
+    result += stripLeadingJSDocComment(text.substring(lineStart, i)) + '\n';
+    multiline = true;
+    if (ch === CharacterCodes.carriageReturn && text.charCodeAt(i + 1) === CharacterCodes.lineFeed) i++;
+    lineStart = i + 1;
+  }
+  if (!multiline) return stripLeadingJSDocComment(text);
+  return result + stripLeadingJSDocComment(text.substring(lineStart));
+}
+
+function stripLeadingJSDocComment(line: string): string {
+  let start = 0;
+  while (start < line.length && isWhiteSpaceLike(line.charCodeAt(start))) start++;
+  if (start < line.length && line.charCodeAt(start) === CharacterCodes.asterisk) start++;
+  while (start < line.length && isWhiteSpaceLike(line.charCodeAt(start))) start++;
+  return start === 0 ? line : line.substring(start);
+}
+
 /** The source text of a node, without leading trivia. */
 export function getTextOfNodeFromSourceText(sourceText: string, node: Node): string {
   if (nodeIsMissing(node)) return '';
-  const text = sourceText.substring(skipTrivia(sourceText, node.pos), node.end);
+  let text = sourceText.substring(skipTrivia(sourceText, node.pos), node.end);
+  if (isJSDocTypeExpressionOrChild(node)) text = normalizeJSDocTypeSourceText(text);
   if ((node.flags & NodeFlags.ReparserTransformedLiteral) !== 0) {
     if (node instanceof StringLiteral)
       return ((node as StringLiteral).tokenFlags & TokenFlags.SingleQuote) !== 0 ? "'" + text + "'" : '"' + text + '"';
@@ -415,14 +454,46 @@ export function isImportMeta(node: Node): boolean {
   );
 }
 
-/** `import(…)` or `import.defer(…)`. */
+/** `import(…)`, `import.defer(…)` or `import.source(…)`. */
 export function isImportCall(node: Node): boolean {
   if (!(node instanceof CallExpression)) return false;
   const e = (node as CallExpression).expression;
-  if (e.kind === SyntaxKind.ImportKeyword) return true;
-  if (!(e instanceof MetaProperty)) return false;
-  const meta = e as MetaProperty;
-  return meta.keywordToken === SyntaxKind.ImportKeyword && meta.name.text === 'defer';
+  return e.kind === SyntaxKind.ImportKeyword || isImportPhaseMetaProperty(e);
+}
+
+/** `import.defer` or `import.source`. */
+export function isImportPhaseMetaProperty(node: Node): boolean {
+  return isImportMetaPropertyNamed(node, 'defer') || isImportMetaPropertyNamed(node, 'source');
+}
+
+export function isImportDeferMetaProperty(node: Node): boolean {
+  return isImportMetaPropertyNamed(node, 'defer');
+}
+
+export function isImportSourceMetaProperty(node: Node): boolean {
+  return isImportMetaPropertyNamed(node, 'source');
+}
+
+function isImportMetaPropertyNamed(node: Node, name: string): boolean {
+  return (
+    node instanceof MetaProperty &&
+    (node as MetaProperty).keywordToken === SyntaxKind.ImportKeyword &&
+    (node as MetaProperty).name.text === name
+  );
+}
+
+/** `import source x from "m"` or `import.source("m")`. */
+export function isSourcePhaseImport(node: Node): boolean {
+  if (node instanceof ImportDeclaration) {
+    const clause = (node as ImportDeclaration).importClause;
+    return clause !== undefined && (clause as ImportClause).phaseModifier === SyntaxKind.SourceKeyword;
+  }
+  return isSourcePhaseImportCall(node);
+}
+
+/** `import.source(…)`. */
+export function isSourcePhaseImportCall(node: Node): boolean {
+  return node instanceof CallExpression && isImportSourceMetaProperty((node as CallExpression).expression);
 }
 
 /** `require(x)` with one argument, a string literal if `requireStringLiteralLikeArgument`. */
@@ -512,7 +583,8 @@ export function isTypeDeclaration(node: Node): boolean {
     case SyntaxKind.EnumDeclaration:
       return true;
     case SyntaxKind.ImportClause:
-      return isTypeOnly(node);
+      // `import type { a } from "m"` declares no type of its own.
+      return isTypeOnly(node) && (node as ImportClause).name !== undefined;
     case SyntaxKind.ImportSpecifier:
     case SyntaxKind.ExportSpecifier:
       return isTypeOnly(node.parent!.parent!);
@@ -545,4 +617,24 @@ export function getEffectiveCheckNode(argument: Node): Node {
     else if (node.kind === SyntaxKind.SatisfiesExpression) node = getExpression(node)!;
     else return node;
   }
+}
+
+/** The entity name of a heritage clause element: a type reference's type name, or an
+ * `ExpressionWithTypeArguments`'s expression. */
+export function getHeritageClauseElementName(node: Node): Node {
+  if (node.kind === SyntaxKind.TypeReference) return (node as TypeReferenceNode).typeName;
+  return getExpression(node)!;
+}
+
+/** Whether a name, or the rightmost name of a qualified name, is the type name of a type reference in a
+ * heritage clause. */
+export function isNameOfHeritageClauseTypeReference(nodeIn: Node): boolean {
+  let node = nodeIn;
+  while (node.parent!.kind === SyntaxKind.QualifiedName) node = node.parent!;
+  const parent = node.parent!;
+  return (
+    parent.kind === SyntaxKind.TypeReference &&
+    (parent as TypeReferenceNode).typeName === node &&
+    parent.parent?.kind === SyntaxKind.HeritageClause
+  );
 }

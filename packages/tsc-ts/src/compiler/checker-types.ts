@@ -167,8 +167,7 @@ export const enum ObjectFlags {
   // Type references only.
   IdenticalBaseTypeCalculated = 1 << 27,
   IdenticalBaseTypeExists = 1 << 28,
-  UnresolvedMembers = 1 << 29,
-  FromTypeNode = 1 << 30,
+  FromTypeNode = 1 << 29,
   /**
    * The type keeps the state that is computed lazily in the checker's side tables instead of its
    * own fields, which stay unset (`sideOf`). Every type with `TSC_TS_SIDE_STATE=1`.
@@ -183,6 +182,9 @@ export const enum ObjectFlags {
   ContainsIntersections = 1 << 25,
   IsUnknownLikeUnionComputed = 1 << 26,
   IsUnknownLikeUnion = 1 << 27,
+  IsUniformEnumComputed = 1 << 28,
+  /** A primitive union in which no two literal constituents are comparable (`isUniformUnionType`). */
+  IsUniformEnum = 1 << 29,
   // Intersections only.
   IsNeverIntersectionComputed = 1 << 25,
   IsNeverIntersection = 1 << 26,
@@ -361,6 +363,8 @@ export const enum CachedTypeKind {
   PromisedTypeOfPromise,
   Optional,
   OptionalProperty,
+  SimplifiedConditionalForReading,
+  SimplifiedConditionalForWriting,
 }
 
 export function cachedTypeKey(kind: CachedTypeKind, id: number): number {
@@ -953,6 +957,62 @@ export class MemberNames {
   }
 }
 
+/**
+ * The properties of the instantiations of one source without base types, as `getNamedMembers` orders them
+ * for `container`: the source positions of the named members in that order, and their names
+ * (`PropertyMembers`). The other members are skipped, so the named members are all of an instantiation's table.
+ */
+export class NamedMemberOrder {
+  readonly container: Symbol | undefined;
+  readonly positions: number[];
+  readonly names: MemberNames;
+
+  constructor(container: Symbol | undefined, positions: number[], names: MemberNames) {
+    this.container = container;
+    this.positions = positions;
+    this.names = names;
+  }
+}
+
+/**
+ * What the pending instantiations of a declared members table share whatever their mapper: the members in
+ * table order, which of them are named (the others are skipped), and the members whose resolved type keeps
+ * them under any instantiation (`keepsSymbolTypeUnderInstantiation`), found so far.
+ */
+export class DeclaredMemberPlan {
+  readonly table: SymbolTable;
+  /**
+   * Whether instantiations build the table eagerly: tsgo's table wouldn't be keyed by symbol names, or an
+   * own member could be replaced by an inherited one. The other fields are then incomplete.
+   */
+  readonly eager: boolean;
+  readonly members: Symbol[];
+  /** 1 for a named member, 0 for a skipped one, by position. */
+  readonly named: number[];
+  /** Bits by position: the member's type keeps it under instantiation. Set when found, never cleared. */
+  readonly keptByType: number[];
+  readonly hasOwnMembers: boolean;
+  readonly hasRequiredOwnMembers: boolean;
+
+  constructor(
+    table: SymbolTable,
+    eager: boolean,
+    members: Symbol[],
+    named: number[],
+    hasOwnMembers: boolean,
+    hasRequiredOwnMembers: boolean,
+  ) {
+    this.table = table;
+    this.eager = eager;
+    this.members = members;
+    this.named = named;
+    this.keptByType = [];
+    for (let i = 0; i < members.length; i += 32) this.keptByType.push(0);
+    this.hasOwnMembers = hasOwnMembers;
+    this.hasRequiredOwnMembers = hasRequiredOwnMembers;
+  }
+}
+
 /** A type with members: object types, unions and intersections. */
 export class StructuredType extends Type {
   membersValue: SymbolTable | undefined;
@@ -1060,6 +1120,10 @@ export class InterfaceType extends TypeReference {
   declaredIndexInfos: IndexInfo[];
   /** Positions of the declared members by name, for lazily instantiated members of instantiations. */
   declaredMemberPositions: Map<string, number> | undefined;
+  /** The property order of instantiations (`NamedMemberOrder`); null where it can't be cached. */
+  namedMemberOrder: NamedMemberOrder | null | undefined;
+  /** What pending instantiations of the declared members share (`DeclaredMemberPlan`). */
+  declaredMemberPlan: DeclaredMemberPlan | undefined;
   /** The member states of the last pending instantiation of the type's members (`sharedStates`). */
   lastMemberStates: number[] | undefined;
   /** The property names of the last instantiation whose members table is built on demand. */
@@ -1074,6 +1138,8 @@ export class InterfaceType extends TypeReference {
     this.references = undefined;
     this.checking = undefined;
     this.declaredMemberPositions = undefined;
+    this.namedMemberOrder = undefined;
+    this.declaredMemberPlan = undefined;
     this.lastMemberStates = undefined;
     this.lastMemberNames = undefined;
     this.allTypeParameters = emptyTypes;
@@ -1345,7 +1411,14 @@ export class TypeParameter extends Type {
   target: Type | undefined;
   mapper: TypeMapper | undefined;
   isThisType: boolean;
+  /**
+   * A type parameter as referenced inside a distributive conditional type on it, which stands for each
+   * constituent in turn; its constraint is the type parameter it was made from (`getDistributedTypeParameter`).
+   */
+  isDistributed: boolean;
   resolvedDefaultType: Type | undefined;
+  /** The distributed form of this type parameter, made on first use. */
+  distributedType: TypeParameter | undefined;
 
   constructor(id: number, symbol: Symbol | undefined) {
     super(TypeFlags.TypeParameter, ObjectFlags.None, id, symbol);
@@ -1353,8 +1426,27 @@ export class TypeParameter extends Type {
     this.target = undefined;
     this.mapper = undefined;
     this.isThisType = false;
+    this.isDistributed = false;
     this.resolvedDefaultType = undefined;
+    this.distributedType = undefined;
   }
+}
+
+/** Whether `t` is the distributed form of a type parameter. */
+export function isDistributedTypeParameter(t: Type): boolean {
+  return (t.flags & TypeFlags.TypeParameter) !== 0 && (t as TypeParameter).isDistributed;
+}
+
+/** The type parameter a distributed type parameter was made from; other types as they are. */
+export function getNonDistributedTypeParameter(t: Type): Type {
+  return (t.flags & TypeFlags.TypeParameter) !== 0 && (t as TypeParameter).isDistributed
+    ? (t as TypeParameter).constraint!
+    : t;
+}
+
+/** What `mapper` maps `t` to, a distributed type parameter as the type parameter it was made from. */
+export function getMappedType(t: Type, mapper: TypeMapper): Type {
+  return mapper.map(getNonDistributedTypeParameter(t));
 }
 
 /** `keyof T`. */
@@ -1759,8 +1851,17 @@ export const enum TypeMapperKind {
   Merged = 3,
 }
 
+/** The id of the next mapper this thread creates. */
+let nextTypeMapperId = 0;
+
 /** Maps type parameters to types. Subclasses replace tsgo's function mappers. */
 export abstract class TypeMapper {
+  /**
+   * A number for the mapper, unique among the mappers this thread creates (until it wraps at 2^31), so the
+   * stack of active mappers can be searched by id instead of by reference.
+   */
+  readonly id: number = (nextTypeMapperId = (nextTypeMapperId + 1) | 0);
+
   abstract map(type: Type): Type;
 
   kind(): TypeMapperKind {
@@ -1956,12 +2057,12 @@ export function mergeTypeMappers(m1: TypeMapper | undefined, m2: TypeMapper): Ty
 }
 
 export function prependTypeMapping(source: Type, target: Type, mapper: TypeMapper | undefined): TypeMapper {
-  const simple = new SimpleTypeMapper(source, target);
+  const simple = new SimpleTypeMapper(getNonDistributedTypeParameter(source), target);
   return mapper === undefined ? simple : new MergedTypeMapper(simple, mapper);
 }
 
 export function appendTypeMapping(mapper: TypeMapper | undefined, source: Type, target: Type): TypeMapper {
-  const simple = new SimpleTypeMapper(source, target);
+  const simple = new SimpleTypeMapper(getNonDistributedTypeParameter(source), target);
   return mapper === undefined ? simple : new MergedTypeMapper(mapper, simple);
 }
 
@@ -2129,6 +2230,16 @@ export class SymbolLinks implements ProgramLifetime {
     this.rare().enumChecked = value;
   }
 
+  get mergedExportsChecked(): boolean {
+    const rare = this.rareLinks;
+    return rare === undefined ? false : rare.mergedExportsChecked;
+  }
+
+  set mergedExportsChecked(value: boolean) {
+    if (value === false && this.rareLinks === undefined) return;
+    this.rare().mergedExportsChecked = value;
+  }
+
   get variances(): VarianceFlags[] | undefined {
     const rare = this.rareLinks;
     return rare === undefined ? undefined : rare.variances;
@@ -2238,6 +2349,7 @@ export class RareSymbolLinks implements ProgramLifetime {
   indexSignaturesChecked: boolean;
   typeParametersChecked: boolean;
   enumChecked: boolean;
+  mergedExportsChecked: boolean;
   variances: VarianceFlags[] | undefined;
   // Assignment tracking
   lastAssignmentPos: number;
@@ -2265,6 +2377,7 @@ export class RareSymbolLinks implements ProgramLifetime {
     this.indexSignaturesChecked = false;
     this.typeParametersChecked = false;
     this.enumChecked = false;
+    this.mergedExportsChecked = false;
     this.variances = undefined;
     this.lastAssignmentPos = 0;
     this.hasDefiniteAssignment = false;

@@ -26,7 +26,7 @@ import { getAllSuperTypeNodes, getTextOfPropertyName } from './utilities.js';
 import { CheckFlags, getDeclarations, getSymbolId, type Symbol, SymbolFlags } from '../compiler/symbol.js';
 
 export function isExternalModuleSymbol(symbol: Symbol): boolean {
-  return (symbol.flags & SymbolFlags.Module) !== 0 && symbol.name.startsWith('"');
+  return symbol.isExternalModule();
 }
 
 /** The declared symbols a union, mapped, spread or instantiated symbol comes from. */

@@ -18,7 +18,7 @@ import { tscTs, tscTsMissing } from './toolchain.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 const skip = (!existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo') || tscTsMissing;
 const workers = Number(process.env.TEST_WORKERS ?? 8);
 // Lets the many Node processes share compiled code (https://nodejs.org/api/module.html#module-compile-cache).

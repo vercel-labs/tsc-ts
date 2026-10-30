@@ -8,13 +8,14 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { scriptcDist, tscTs, tscTsMissing } from './toolchain.mjs';
 import { tempDir } from './temp.mjs';
@@ -30,6 +31,14 @@ function toolchain(marker) {
   mkdirSync(join(root, 'bin'));
   for (const name of readdirSync(join(source, 'bin'))) copyFileSync(join(source, 'bin', name), join(root, 'bin', name));
   chmodSync(join(root, 'bin/scriptc'), 0o755);
+  // The compiler finds its LLVM helper and runtime pack packages from its own directory, as Node resolves its
+  // dependencies. The copy names the installed ones in its manifest instead.
+  const manifestPath = join(root, 'bin/scriptc.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const scope = dirname(dirname(source));
+  manifest.llvm_package = join(scope, `llvm-${manifest.target}`);
+  manifest.runtime_pack = join(scope, `runtime-${manifest.target}`);
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
   const link = (from, to, skipName) => {
     mkdirSync(to, { recursive: true });
     for (const name of readdirSync(from)) if (name !== skipName) symlinkSync(join(from, name), join(to, name));

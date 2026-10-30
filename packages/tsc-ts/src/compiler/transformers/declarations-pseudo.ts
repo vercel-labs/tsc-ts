@@ -389,10 +389,8 @@ export class PseudoChecker {
     const initializer = declaration.initializer;
     // As tsgo, the file's own declarations; merged ones are left to the checker's type comparison.
     const symbol = declaration.symbol;
-    if (
-      initializer !== undefined &&
-      (symbol === undefined || countVariableDeclarations(getDeclarations(symbol)) === 1)
-    ) {
+    // A binding pattern has no symbol, and its initializer's type isn't the variable's.
+    if (initializer !== undefined && symbol !== undefined && countVariableDeclarations(getDeclarations(symbol)) === 1) {
       if (!isContextuallyTyped(declaration)) {
         // Const template literals may become literal types, so they aren't inferred.
         if (

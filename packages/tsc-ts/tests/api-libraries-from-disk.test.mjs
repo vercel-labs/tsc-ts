@@ -21,7 +21,7 @@ async function session(dir, args, libDir = lib) {
     return reply.type === 'response' && method !== 'getSourceFile' ? JSON.parse(reply.payload.toString()) : undefined;
   };
   await call('initialize');
-  const update = await call('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+  const update = await call('createSnapshot', { openProjects: [join(dir, 'tsconfig.json')], ensurePrograms: true });
   const base = { snapshot: update.snapshot, project: update.projects[0].id };
   for (const file of await call('getSourceFileNames', base)) await call('getSourceFile', { ...base, file });
   for (const method of ['getProgramDiagnostics', 'getGlobalDiagnostics', 'getSemanticDiagnostics'])

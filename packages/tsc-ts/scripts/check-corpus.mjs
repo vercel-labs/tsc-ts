@@ -39,8 +39,8 @@ const jsOnly = args.includes('--js');
 const checkOptions = option('--options', '');
 const env = { ...process.env, TSC_TS_CHECK_OPTIONS: checkOptions };
 const inputs = args.filter((a, i) => !a.startsWith('--') && !valued.has(args[i - 1]));
-const libs = join(repo, 'upstream/typescript-go/internal/bundled/libs');
-const cases = join(repo, 'upstream/TypeScript/tests/cases');
+const libs = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
+const cases = join(repo, 'upstream/TypeScript/tsc/testdata/tests/cases');
 const oracle = join(repo, 'packages/tsgo/dist/check-oracle');
 const work = tempDir('tsc-ts-check-corpus-');
 
@@ -125,6 +125,10 @@ async function expectedResults(paths) {
 
 const code = (line) => line.split(' ')[1];
 
+// tsgo's program reports each set of equal diagnostics once (SortAndDeduplicateDiagnostics); the oracle prints the
+// checker's diagnostics as it collects them, so both sides keep the first of each set of equal lines.
+const unique = (lines) => (lines === undefined ? undefined : [...new Set(lines)]);
+
 /** Whether a test case is checked as JavaScript, as the check drivers decide. */
 function isCheckedJS(path) {
   if (path.endsWith('.tsx')) return false;
@@ -170,14 +174,14 @@ const filesByCode = new Map();
 const differing = [];
 const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
 for (const file of paths) {
-  const want = expected.get(file);
+  const want = unique(expected.get(file));
   if (want === undefined || want.includes('!! panic')) continue;
   compared++;
   const isJS = jsCases.has(file);
   if (isJS) jsCompared++;
   const isJsx = file.endsWith('.tsx');
   if (isJsx) jsxCompared++;
-  const got = actual.get(file);
+  const got = unique(actual.get(file));
   if (want.length === 0) clean++;
   if (got !== undefined && JSON.stringify(want) === JSON.stringify(got)) {
     matched++;

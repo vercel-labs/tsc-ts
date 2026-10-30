@@ -203,7 +203,7 @@ import { protocolVersion } from './encoder.js';
 import { SyntaxKind } from './syntax-kind.js';
 
 const nodeSize = 28;
-const headerSize = 44;
+const headerSize = 64;
 const nodeListKind = 0xffffffff;
 
 const fieldKind = 0;
@@ -533,6 +533,13 @@ class Decoder {
     throw unexpected(node);
   }
 
+  typeLiteral(bit: number): TypeLiteralNode | undefined {
+    const node = this.node(bit);
+    if (node === undefined) return undefined;
+    if (node instanceof TypeLiteralNode) return node as TypeLiteralNode;
+    throw unexpected(node);
+  }
+
   importAttributes(bit: number): ImportAttributes | undefined {
     const node = this.node(bit);
     if (node === undefined) return undefined;
@@ -596,7 +603,7 @@ class Decoder {
   createWithChildren(kind: SyntaxKind, common: number): Node {
     switch (kind) {
       case SyntaxKind.QualifiedName:
-        return new QualifiedName(this.required(0), this.requiredIdentifier(1));
+        return new QualifiedName(this.required(0), this.required(1));
       case SyntaxKind.ComputedPropertyName:
         return new ComputedPropertyName(this.required(0));
       case SyntaxKind.Decorator:
@@ -1110,7 +1117,8 @@ class Decoder {
           this.modifiers(0),
           (common & 1) !== 0 ? SyntaxKind.NamespaceKeyword : SyntaxKind.ModuleKeyword,
           this.required(1),
-          this.node(2),
+          this.typeLiteral(2),
+          this.node(3),
         );
       case SyntaxKind.ImportEqualsDeclaration:
         return new ImportEqualsDeclaration(
@@ -1163,7 +1171,7 @@ class Decoder {
           this.list(3),
         );
     }
-    if (kind <= SyntaxKind.DeferKeyword) return new Token(kind);
+    if (kind <= SyntaxKind.LastToken) return new Token(kind);
     throw invalid(`unhandled node kind ${kind} with ${this.children.length} children`);
   }
 }
@@ -1201,6 +1209,7 @@ function typeOperator(index: number): SyntaxKind {
 function importPhase(index: number): SyntaxKind | undefined {
   if (index === 1) return SyntaxKind.TypeKeyword;
   if (index === 2) return SyntaxKind.DeferKeyword;
+  if (index === 3) return SyntaxKind.SourceKeyword;
   return undefined;
 }
 

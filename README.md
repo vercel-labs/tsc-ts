@@ -62,7 +62,7 @@ npm run build            # the Node build of tsc-ts (packages/tsc-ts/dist) and t
 npm run build:oracle     # tsgo reference builds in packages/tsgo/dist
 ```
 
-`package.json` pins scriptc `0.4.5`, with its `@scriptc/threads` package. The build fails with any other version.
+`package.json` pins scriptc `0.4.6`, with its `@scriptc/threads` package. The build fails with any other version.
 
 ## Compiler
 
@@ -98,20 +98,20 @@ Native builds read lib files from the executable's directory, or from `TSC_TS_LI
 ```sh
 npm run build:native -w tsc-ts       # packages/tsc-ts/dist/tsc
 npm run build:native:dev -w tsc-ts   # unoptimized, faster to build
-TSC_TS_LIB_DIR=upstream/typescript-go/internal/bundled/libs packages/tsc-ts/dist/tsc -p path/to/project
+TSC_TS_LIB_DIR=upstream/TypeScript/tsc/internal/bundled/libs packages/tsc-ts/dist/tsc -p path/to/project
 ```
 
-`build:native` optimizes with the committed profile `packages/tsc-ts/profiles/tsc-ts.profdata`. `npm run refresh-profile -w tsc-ts` collects it again on Linux: it builds an instrumented tsc-ts, checks the tsc-ts sources and the eight projects in `packages/tsc-ts/profiles/projects.json` with it at `--checkers 1` (tRPC, Playwright, TypeORM, Excalidraw, Sentry, VS Code, T3 Code server and T3 Code web, at pinned commits), and merges the results. The first run clones and installs the projects into `~/.cache/tsc-ts/profile-projects` (`--projects-dir` chooses another directory); later runs reuse them. `--project <dir>[:<tsconfig>]` adds a project, and `--jobs <n>` sets how many checks run at once.
+`build:native` optimizes with a committed profile. `npm run refresh-profile -w tsc-ts` collects it again on Linux: it builds an instrumented tsc-ts, checks the tsc-ts sources and the eight projects in `packages/tsc-ts/profiles/projects.json` with it at `--checkers 1` (tRPC, Playwright, TypeORM, Excalidraw, Sentry, VS Code, T3 Code server and T3 Code web, at pinned commits), and merges the results. The first run clones and installs the projects into `~/.cache/tsc-ts/profile-projects` (`--projects-dir` chooses another directory); later runs reuse them. `--project <dir>[:<tsconfig>]` adds a project, and `--jobs <n>` sets how many checks run at once.
 
-A scriptc with a second profile phase builds with the two-phase profile `packages/tsc-ts/profiles/tsc-ts.cs.profdata` instead, and `refresh-profile` run with such a scriptc collects only that one. The one-phase profile, which the pinned scriptc builds with, is collected with the pinned scriptc: a scriptc with a second phase instruments different code, though it can report the same version.
+The pinned scriptc has a second profile phase, so `build:native` builds with the two-phase profile `packages/tsc-ts/profiles/tsc-ts.cs.profdata`, and `refresh-profile` collects only that one. A scriptc without a second phase builds with the one-phase profile `packages/tsc-ts/profiles/tsc-ts.profdata`, which only such a scriptc collects: a scriptc with a second phase instruments different code, though it can report the same version.
 
-`packages/tsc-ts/profiles/tsc-ts.json` records the scriptc that collected the profile, whether it has a second profile phase, and the number of functions the profile describes. `tests/profile.test.mjs` fails when that scriptc differs from the pinned one, since the code scriptc generates changes between versions, or when it has a second profile phase. A profile from older tsc-ts sources still applies to the functions that did not change. `build:native` reports how many of the described functions the build annotates; below 95% it prints a warning, and below 90% it fails when the `CI` environment variable is set. Both messages name `npm run refresh-profile -w tsc-ts`, which takes about 4 minutes on 16 cores once the projects are installed. A scriptc that prints no profile report, or a `tsc-ts.json` without a function count, skips the check with a note. Windows builds print the match as a note without checking it: scriptc inlines its allocator's fast paths on Linux and macOS but not on Windows, so most functions there have different control flow from the profile collected on Linux.
+`packages/tsc-ts/profiles/tsc-ts.cs.json` and `tsc-ts.json` record the scriptc that collected each profile, whether it has a second profile phase, and the number of functions the profile describes. `tests/profile.test.mjs` fails when neither profile was collected with the pinned scriptc, since the code scriptc generates changes between versions, or when the one-phase profile was collected with a scriptc that has a second profile phase. A profile from older tsc-ts sources still applies to the functions that did not change. `build:native` reports how many of the described functions the build annotates; below 95% it prints a warning, and below 90% it fails when the `CI` environment variable is set. Both messages name `npm run refresh-profile -w tsc-ts`, which takes about 4 minutes on 16 cores once the projects are installed. A scriptc that prints no profile report, or a `tsc-ts.json` without a function count, skips the check with a note. Windows builds print the match as a note without checking it: scriptc inlines its allocator's fast paths on Linux and macOS but not on Windows, so most functions there have different control flow from the profile collected on Linux.
 
 `TSC_TS_BIN=packages/tsc-ts/dist/tsc` runs the tsc-ts tests that take a native build against it.
 
 The server is checked against `tsc --api` 7.0.2 response by response, and scriptc builds the same programs with either. It runs on the tsc-ts compiler, natively or under Node.
 
-Language service methods are supported: `getCompletionsAtPosition`, `getJsDocTags`, `getDocumentationComment`, `getReferencesToSymbolInFile`, `getReferencedSymbolsForNode` and `getSignatureUsages`. Like `tsc --api`, completions that need auto imports (global identifiers, import statements, exhaustive `switch` cases) report `completion list needs auto imports`. The profiling methods (`startCPUProfile`, `stopCPUProfile`, `saveHeapProfile`) are not supported.
+Language service methods are supported: `getCompletionsAtPosition`, `getImportAdderEdits`, `getJsDocTags`, `getDocumentationComment`, `getReferencesToSymbolInFile`, `getReferencedSymbolsForNode` and `getSignatureUsages`. Completions include auto imports from the project and its dependencies, and `getImportAdderEdits` returns the edits that import symbols into a file, as in `tsc --api`. The profiling methods (`startCPUProfile`, `stopCPUProfile`, `saveHeapProfile`) are not supported.
 
 ## Testing
 

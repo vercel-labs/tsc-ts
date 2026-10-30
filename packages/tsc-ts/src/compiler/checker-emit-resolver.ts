@@ -84,7 +84,7 @@ import { isArrayType, isErrorType, isFreshLiteralType, isTupleType } from './che
 import { isTypeAssignableToKind } from './checker-type-operators.js';
 import { type IndexInfo, type LiteralType, SignatureKind, type Type, TypeFlags } from './checker-types.js';
 import { hasLateBindableName } from './checker-utilities.js';
-import { NodeBuilder, isEntityNameVisible, isOptionalParameter } from './node-builder.js';
+import { NodeBuilder, NodeBuilderCaches, isEntityNameVisible, isOptionalParameter } from './node-builder.js';
 import {
   getRegularTypeOfExpression,
   newPseudoChecker,
@@ -92,7 +92,7 @@ import {
 } from './node-builder-pseudo.js';
 import { symbolToExpression } from './node-builder-names.js';
 import { tryReuseExistingNode } from './node-builder-reuse.js';
-import type { CompilerOptions, ModuleKind } from './options.js';
+import type { CompilerOptions } from './options.js';
 import type { EmitContext } from './printer/emit-context.js';
 import { isTypeIdenticalTo } from './relations.js';
 import {
@@ -115,6 +115,7 @@ import { SyntacticEmitResolver } from './transformers/emit-resolver.js';
 import type { Evaluation, ReferenceResolver } from './transformers/reference-resolver.js';
 import { TypeReferenceSerializationKind } from './transformers/type-serialization.js';
 import { TokenFlags } from './types.js';
+import { getSignatureOfFullSignatureType } from './checker-jsdoc.js';
 import { CheckFlags, declarationCount, getDeclarations, type Symbol, SymbolFlags } from './symbol.js';
 
 const declarationEmitInternalFlags = NodeBuilderInternalFlags.AllowUnresolvedNames;
@@ -125,12 +126,17 @@ export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {
   /** Answers the queries that don't need types. */
   private readonly syntactic: SyntacticDeclarationEmitResolver;
   private readonly aliasesMarked: Set<SourceFile>;
+  /** The emit context of the last node builder, and the caches the builders for it share. */
+  private builderContext: EmitContext | undefined;
+  private builderCaches: NodeBuilderCaches | undefined;
 
   constructor(checker: Checker, syntactic: SyntacticDeclarationEmitResolver) {
     super();
     this.checker = checker;
     this.syntactic = syntactic;
     this.aliasesMarked = new Set<SourceFile>();
+    this.builderContext = undefined;
+    this.builderCaches = undefined;
   }
 
   // JavaScript emit
@@ -284,6 +290,8 @@ export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {
     const signatures = getSignaturesOfSymbol(c, getSymbolOfDeclaration(c, node));
     if (signatures.length > 1) return true;
     if (signatures.length === 1) {
+      // A JSDoc `@type` signature of the function itself is not an overload.
+      if (signatures[0] === getSignatureOfFullSignatureType(c, node)) return false;
       const declaration = signatures[0].declaration;
       if (declaration !== node && declaration !== undefined && (declaration.flags & NodeFlags.JSDoc) === 0) return true;
     }
@@ -359,10 +367,6 @@ export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {
     return getPropertiesOfType(c, getTypeOfSymbol(c, symbol));
   }
 
-  getResolutionModeOverride(node: Node): ModuleKind | undefined {
-    return this.syntactic.getResolutionModeOverride(node);
-  }
-
   getSourceFileFromReference(file: SourceFile, reference: FileReference): SourceFile | undefined {
     return this.syntactic.getSourceFileFromReference(file, reference);
   }
@@ -419,6 +423,12 @@ export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {
     );
     b.pseudo = newPseudoChecker(this.checker);
     b.declarationOrder = true;
+    // tsgo's emit resolver, one per emit context, keeps one node builder for all its requests.
+    if (context !== this.builderContext || this.builderCaches === undefined) {
+      this.builderContext = context;
+      this.builderCaches = new NodeBuilderCaches();
+    }
+    b.useCaches(this.builderCaches);
     return b;
   }
 

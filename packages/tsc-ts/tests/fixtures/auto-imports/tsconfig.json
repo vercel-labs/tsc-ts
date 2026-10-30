@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "allowJs": true,
+    "checkJs": true,
+    "types": [],
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "paths": { "@lib/*": ["./src/lib/*"] }
+  },
+  "include": ["src"]
+}

@@ -12,10 +12,10 @@ import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
 const root = resolve(import.meta.dirname, '..');
-const upstream = resolve(root, '../../upstream/typescript-go');
-const cases = resolve(root, '../../upstream/TypeScript/tests/cases');
+const upstream = resolve(root, '../../upstream/TypeScript');
+const cases = resolve(root, '../../upstream/TypeScript/tsc/testdata/tests/cases');
 const parserPath = join(root, 'dist/tsc-ts/src/compiler/parser.js');
-const noUpstream = !existsSync(join(upstream, '_packages/native-preview/src/enums')) && 'run npm run fetch:upstream';
+const noUpstream = !existsSync(join(upstream, 'packages/typescript/src/enums')) && 'run npm run fetch:upstream';
 
 test('the generated API types are current', { skip: noUpstream }, () => {
   execFileSync(process.execPath, [join(root, 'scripts/generate-api.mjs'), '--check'], { stdio: 'pipe' });

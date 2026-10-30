@@ -39,6 +39,13 @@ export const nativeBinaries = {
   TSC_TS_CLI: join(root, 'packages/tsc-ts/dist/cli'),
 };
 
+// The reference compilers from `npm run build:oracle` that the tsc-ts tests compare with: the tsgo
+// command line, and tsgo laid out as TypeScript's npm package for the API tests. Without them those tests skip.
+export const referenceBinaries = [
+  join(root, 'packages/tsgo/dist/tsgo'),
+  join(root, 'packages/tsgo/dist/typescript/tsc'),
+];
+
 /**
  * @typedef {{ id: string, file: string, cwd: string, command: string[], env: Record<string, string>, native: boolean }} Unit
  */

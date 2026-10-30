@@ -19,33 +19,33 @@ import (
 	"strings"
 	"time"
 
-	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/binder"
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/parser"
-	"github.com/microsoft/typescript-go/internal/tspath"
+	"github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/binder"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/parser"
+	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
 
 func parse(text string) *ast.SourceFile {
-	opts := ast.SourceFileParseOptions{FileName: "/input.ts", Path: tspath.Path("/input.ts")}
+	opts := ast.SourceFileParseOptions{FileName: "/input.ts", PathKey: tspath.PathKey("/input.ts")}
 	return parser.ParseSourceFile(opts, text, core.ScriptKindTS)
 }
 
 // As the encode oracle: the base name, its script kind, and default module detection.
 func parseNamed(name string, text string) *ast.SourceFile {
 	fileName := "/" + filepath.Base(name)
-	opts := ast.SourceFileParseOptions{FileName: fileName, Path: tspath.Path(fileName)}
+	opts := ast.SourceFileParseOptions{FileName: tspath.RootedFilePath(fileName), PathKey: tspath.PathKey(fileName)}
 	if !tspath.IsDeclarationFileName(fileName) {
 		opts.ExternalModuleIndicatorOptions.Force = tspath.FileExtensionIsOneOf(fileName, []string{tspath.ExtensionCjs, tspath.ExtensionCts, tspath.ExtensionMjs, tspath.ExtensionMts})
 	}
-	return parser.ParseSourceFile(opts, text, core.GetScriptKindFromFileName(fileName))
+	return parser.ParseSourceFile(opts, text, core.GetScriptKindFromFileName(tspath.RootedFilePath(fileName)))
 }
 
 func symbol(s *ast.Symbol) string {
 	if s == nil {
 		return "-"
 	}
-	return fmt.Sprintf("%q:%d:%d", s.Name, s.Flags, len(s.Declarations))
+	return fmt.Sprintf("%q:%d:%d", s.Name(), s.Flags(), len(s.Declarations()))
 }
 
 func sortedNames(table ast.SymbolTable) []string {
@@ -254,15 +254,15 @@ func main() {
 		for i := 0; i < len(x.symList); i++ {
 			s := x.symList[i]
 			decls := []string{}
-			for _, d := range s.Declarations {
+			for _, d := range s.Declarations() {
 				decls = append(decls, x.node(d))
 			}
-			fmt.Fprintf(w, "symbol #%d %q %d decls=[%s] value=%s parent=%s export=%s", i, s.Name, s.Flags, strings.Join(decls, " "), x.node(s.ValueDeclaration), x.sym(s.Parent), x.sym(s.ExportSymbol))
-			if len(s.Members) > 0 {
-				fmt.Fprintf(w, " members=%s", x.table(s.Members))
+			fmt.Fprintf(w, "symbol #%d %q %d decls=[%s] value=%s parent=%s export=%s", i, s.Name(), s.Flags(), strings.Join(decls, " "), x.node(s.ValueDeclaration()), x.sym(s.Parent()), x.sym(s.ExportSymbol()))
+			if len(s.Members()) > 0 {
+				fmt.Fprintf(w, " members=%s", x.table(s.Members()))
 			}
-			if len(s.Exports) > 0 {
-				fmt.Fprintf(w, " exports=%s", x.table(s.Exports))
+			if len(s.Exports()) > 0 {
+				fmt.Fprintf(w, " exports=%s", x.table(s.Exports()))
 			}
 			fmt.Fprintln(w)
 		}
@@ -285,10 +285,6 @@ func main() {
 			case ast.KindCaseClause, ast.KindDefaultClause:
 				if ft := n.AsCaseOrDefaultClause().FallthroughFlowNode; ft != nil {
 					parts = append(parts, "fallthrough="+x.flow(ft))
-				}
-			case ast.KindSourceFile:
-				if ef := n.AsSourceFile().EndFlowNode; ef != nil {
-					parts = append(parts, "end="+x.flow(ef))
 				}
 			}
 			if ret != nil {

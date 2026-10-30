@@ -2,6 +2,7 @@
 import { checkCollisionsForDeclarationName } from './checker-generated-code.js';
 import { ExternalEmitHelpers, checkExternalEmitHelpers } from './checker-emit-helpers.js';
 import { convertAutoToAny } from './checker-narrowing.js';
+import { grammarErrorOnNode } from './checker-operators.js';
 import { markPropertyAsReferenced } from './checker-unused.js';
 import {
   type BindingElement,
@@ -13,6 +14,7 @@ import {
   type NodeList,
   NodeVisitor,
   type TypeAliasDeclaration,
+  type TypeLiteralNode,
   type TypeParameterDeclaration,
   type VariableDeclarationList,
   type VariableStatement,
@@ -138,7 +140,7 @@ import {
 } from './ast-utilities.js';
 import { getTypeForBindingElementParent } from './checker-destructuring.js';
 import { checkFunctionOrMethodSymbols } from './checker-overloads.js';
-import { checkJSDocFullSignature } from './checker-jsdoc.js';
+import { checkJSDocFullSignature, checkJSDocFullSignatureType } from './checker-jsdoc.js';
 import { checkAliasSymbol } from './checker-modules.js';
 import { checkDecorators } from './checker-decorators.js';
 import {
@@ -400,7 +402,7 @@ function checkParameter(c: Checker, node: Node): void {
   }
 }
 
-function isVariableLike(node: Node): boolean {
+export function isVariableLike(node: Node): boolean {
   switch (node.kind) {
     case SyntaxKind.BindingElement:
     case SyntaxKind.EnumMember:
@@ -444,6 +446,12 @@ function reportNonIdenticalModifiers(c: Checker, name: Node): void {
 function checkBindingElement(c: Checker, element: BindingElement): void {
   // Missing array binding elements have no name.
   if (element.name === undefined) return;
+  if (element.propertyName !== undefined && element.propertyName.kind === SyntaxKind.PrivateIdentifier)
+    grammarErrorOnNode(
+      c,
+      element.propertyName,
+      Diagnostics.Private_identifiers_cannot_be_used_in_destructuring_patterns,
+    );
   if (
     element.propertyName !== undefined &&
     element.name.kind === SyntaxKind.Identifier &&
@@ -598,6 +606,7 @@ export function checkFunctionDeclaration(c: Checker, node: Node): void {
   const symbol = getSymbolOfDeclaration(c, node);
   if (symbol !== undefined) getTypeOfSymbol(c, symbol);
   checkFunctionLikeBody(c, node);
+  checkJSDocFullSignatureType(c, node);
   checkJSDocFullSignature(c, node);
   checkFunctionOrMethodSymbols(c, node);
   checkCollisionsForDeclarationName(c, node, getName(node));
@@ -775,6 +784,8 @@ export function checkEnumMember(c: Checker, node: Node): void {
   const name = getName(node);
   if (name !== undefined && name.kind === SyntaxKind.PrivateIdentifier)
     c.error(node, Diagnostics.An_enum_member_cannot_be_named_with_a_private_identifier);
+  // A computed name is a grammar error, but its expression is checked.
+  if (name !== undefined && name.kind === SyntaxKind.ComputedPropertyName) checkExpression(c, getExpression(name)!);
   const initializer = getInitializer(node);
   if (initializer !== undefined) checkExpression(c, initializer);
 }
@@ -794,7 +805,8 @@ export function checkEnumDeclaration(c: Checker, node: Node): void {
   if (links.enumChecked) return;
   links.enumChecked = true;
   if (declarationCount(symbol) > 1) {
-    const enumIsConst = isEnumConst(node);
+    // Reported against the first enum declaration, whichever declaration is checked first.
+    const enumIsConst = isEnumConst(getDeclarationOfKind(symbol, SyntaxKind.EnumDeclaration)!);
     for (const d of getDeclarations(symbol))
       if (d.kind === SyntaxKind.EnumDeclaration && isEnumConst(d) !== enumIsConst)
         c.error(getNameOfDeclaration(d), Diagnostics.Enum_declarations_must_all_be_const_or_non_const);
@@ -814,6 +826,14 @@ export function checkEnumDeclaration(c: Checker, node: Node): void {
   }
 }
 
+/** An ambient module's import attributes type must be assignable to the global `ImportAttributes`. */
+function checkImportAttributesType(c: Checker, attributes: TypeLiteralNode): void {
+  checkSourceElement(c, attributes);
+  const importAttributesType = getCachedGlobalType(c, 'ImportAttributes', 0, true);
+  if (importAttributesType !== c.emptyObjectType)
+    checkTypeAssignableTo(c, getTypeFromTypeNode(c, attributes), importAttributesType, attributes, undefined);
+}
+
 /** Whether erasableSyntaxOnly applies at `node`: it is set, and `node` is in a TypeScript file. */
 export function shouldCheckErasableSyntax(c: Checker, node: Node): boolean {
   return c.compilerOptions.erasableSyntaxOnly === true && !isInJSFile(node);
@@ -830,6 +850,8 @@ export function checkModuleDeclaration(c: Checker, node: Node): void {
       module.name,
       Diagnostics.Augmentations_for_the_global_scope_should_have_declare_modifier_unless_they_appear_in_already_ambient_context,
     );
+  const attributes = module.attributes;
+  if (attributes !== undefined) checkImportAttributesType(c, attributes);
   const contextMessage = isAmbientModule(node)
     ? Diagnostics.An_ambient_module_declaration_is_only_allowed_at_the_top_level_in_a_file
     : Diagnostics.A_namespace_declaration_is_only_allowed_at_the_top_level_of_a_namespace_or_module;
@@ -888,6 +910,8 @@ export function checkModuleDeclaration(c: Checker, node: Node): void {
   }
   if (!isAmbientModule(node)) return;
   if (isModuleAugmentationExternal(node)) {
+    if (attributes !== undefined)
+      c.error(attributes, Diagnostics.Import_attributes_are_not_allowed_on_a_module_augmentation);
     // Check an augmentation's body only when it merged with its target.
     const checkBody = isGlobalAugmentation || (symbol !== undefined && (symbol.flags & SymbolFlags.Transient) !== 0);
     if (checkBody && body !== undefined && body.kind === SyntaxKind.ModuleBlock)
@@ -1066,7 +1090,10 @@ export function checkExportsOnMergedDeclarations(c: Checker, node: Node): void {
     symbol = getSymbolOfDeclaration(c, node);
     if (symbol === undefined || symbol.exportSymbol === undefined) return;
   }
-  if (getDeclarationOfKind(symbol, node.kind) !== node) return;
+  if (declarationCount(symbol) < 2) return;
+  const links = c.symbolLinks(symbol);
+  if (links.mergedExportsChecked) return;
+  links.mergedExportsChecked = true;
   let exported = DeclarationSpaces.None;
   let nonExported = DeclarationSpaces.None;
   let defaultExported = DeclarationSpaces.None;

@@ -123,6 +123,7 @@ import {
   InternalSymbolName,
   type Symbol,
   SymbolFlags,
+  tryGetAmbientModuleNameFromSymbolName,
 } from '../compiler/symbol.js';
 
 export const enum DefinitionKind {
@@ -898,14 +899,6 @@ function searchIncludes(search: Search, symbol: Symbol | undefined): boolean {
   return symbol !== undefined && search.allSearchSymbols.includes(symbol);
 }
 
-function stripQuotes(name: string): string {
-  if (name.length < 2) return name;
-  const first = name.charCodeAt(0);
-  if (first === name.charCodeAt(name.length - 1) && (first === 0x27 || first === 0x22 || first === 0x60))
-    return name.substring(1, name.length - 1);
-  return name;
-}
-
 class SearchState {
   readonly specialSearchKind: SpecialSearchKind;
   readonly result: SymbolAndEntries[] = [];
@@ -940,7 +933,8 @@ class SearchState {
     if (searchText === undefined) {
       // An external module's name doesn't include its quotes.
       const s = getLocalSymbolForExportDefault(symbol) ?? getNonModuleSymbolOfMergedModuleSymbol(symbol) ?? symbol;
-      searchText = stripQuotes(symbolName(s));
+      const name = symbolName(s);
+      searchText = tryGetAmbientModuleNameFromSymbolName(name) ?? name;
     }
     void location;
     return {

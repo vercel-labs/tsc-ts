@@ -13,7 +13,7 @@ import { compileSources, tempDir } from './temp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 
 const out = compileSources('tsc-ts-module-resolution-', ['main.ts']);
 const load = (path) => import(pathToFileURL(join(out, path)).href);

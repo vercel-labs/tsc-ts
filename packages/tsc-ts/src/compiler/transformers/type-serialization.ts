@@ -22,6 +22,7 @@ import {
   UnionTypeNode,
   VariableDeclaration,
   getIsTypeOnly,
+  getText,
 } from '../ast.js';
 import { getStrictOptionValue } from '../options.js';
 import { SyntaxKind } from '../syntax-kind.js';
@@ -119,10 +120,10 @@ function resolveEntityName(
     const namespace = resolveEntityName(resolver, name.left, SymbolFlags.Namespace, false, location);
     if (namespace === undefined) return undefined;
     if (namespace === unknownSymbol) return namespace;
-    let member = resolver.getExportOfSymbol(namespace, name.right.text);
+    let member = resolver.getExportOfSymbol(namespace, getText(name.right));
     if (member === undefined && (namespace.flags & SymbolFlags.Alias) !== 0) {
       const target = resolver.resolveAlias(namespace);
-      if (target !== undefined) member = resolver.getExportOfSymbol(target, name.right.text);
+      if (target !== undefined) member = resolver.getExportOfSymbol(target, getText(name.right));
     }
     if (member === undefined || (member.flags & (meaning | SymbolFlags.Alias)) === 0) return undefined;
     symbol = member;

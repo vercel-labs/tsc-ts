@@ -18,16 +18,16 @@ import (
 	"unicode/utf16"
 	_ "unsafe"
 
-	tsast "github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/diagnostics"
-	"github.com/microsoft/typescript-go/internal/diagnosticwriter"
-	"github.com/microsoft/typescript-go/internal/locale"
-	tsparser "github.com/microsoft/typescript-go/internal/parser"
-	"github.com/microsoft/typescript-go/internal/tspath"
+	tsast "github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/diagnostics"
+	"github.com/microsoft/TypeScript/tsc/internal/diagnosticwriter"
+	"github.com/microsoft/TypeScript/tsc/internal/locale"
+	tsparser "github.com/microsoft/TypeScript/tsc/internal/parser"
+	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
 
-//go:linkname keyToMessage github.com/microsoft/typescript-go/internal/diagnostics.keyToMessage
+//go:linkname keyToMessage github.com/microsoft/TypeScript/tsc/internal/diagnostics.keyToMessage
 func keyToMessage(key diagnostics.Key) *diagnostics.Message
 
 type file struct {
@@ -114,7 +114,12 @@ func readMessages() []declared {
 		}
 		for _, spec := range gen.Specs {
 			name := spec.(*ast.ValueSpec).Names[0].Name
-			value := spec.(*ast.ValueSpec).Values[0].(*ast.UnaryExpr).X.(*ast.CompositeLit)
+			// Messages are `&Message{...}`; other variables, such as the list of all messages, are skipped.
+			unary, ok := spec.(*ast.ValueSpec).Values[0].(*ast.UnaryExpr)
+			if !ok {
+				continue
+			}
+			value := unary.X.(*ast.CompositeLit)
 			for _, element := range value.Elts {
 				field := element.(*ast.KeyValueExpr)
 				if field.Key.(*ast.Ident).Name != "key" {
@@ -230,7 +235,7 @@ func main() {
 	for _, r := range req.Renders {
 		var files []*tsast.SourceFile
 		for _, f := range r.Files {
-			files = append(files, tsparser.ParseSourceFile(tsast.SourceFileParseOptions{FileName: f.Name, Path: tspath.Path(f.Name)}, f.Text, core.ScriptKindTS))
+			files = append(files, tsparser.ParseSourceFile(tsast.SourceFileParseOptions{FileName: tspath.RootedFilePath(f.Name), PathKey: tspath.PathKey(f.Name)}, f.Text, core.ScriptKindTS))
 		}
 		var diags []*tsast.Diagnostic
 		for _, d := range r.Diagnostics {
@@ -238,7 +243,8 @@ func main() {
 		}
 		opts := &diagnosticwriter.FormattingOptions{
 			Locale:              parseLocale(r.Locale),
-			ComparePathsOptions: tspath.ComparePathsOptions{CurrentDirectory: r.CurrentDirectory, UseCaseSensitiveFileNames: r.UseCaseSensitiveFileNames},
+			CaseSensitivity:     caseSensitivity(r.UseCaseSensitiveFileNames),
+			CurrentDirectory:    tspath.RootedDirectoryPath(r.CurrentDirectory),
 			NewLine:             r.NewLine,
 		}
 		wrapped := diagnosticwriter.FromASTDiagnostics(diags)
@@ -272,4 +278,11 @@ func main() {
 	if err := enc.Encode(res); err != nil {
 		panic(err)
 	}
+}
+
+func caseSensitivity(sensitive bool) tspath.CaseSensitivity {
+	if sensitive {
+		return tspath.CaseSensitive
+	}
+	return tspath.CaseInsensitive
 }

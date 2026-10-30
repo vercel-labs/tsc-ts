@@ -7,7 +7,7 @@ import { compileSources } from './temp.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const repo = resolve(root, '../..');
-const libs = join(repo, 'upstream/typescript-go/internal/bundled/libs');
+const libs = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
 const oracle = join(repo, 'packages/tsgo/dist/check-oracle');
 
 /** `n` declarations named after `prefix`, which a flow walk passes one by one. */
@@ -458,6 +458,30 @@ const cases = [
     differsFromOracle: true,
   },
   {
+    // The protected-base check reads the type of the containing class with getTypeOfNode, which gives a class
+    // expression's constructor type, not its instance type. As in tsgo, `new Base()` in the class expression is an
+    // error, and in the class declaration it is not.
+    name: 'protected base constructors called in a class expression and in a class declaration',
+    source: [
+      'class Base {',
+      '  protected constructor() {}',
+      '}',
+      'const Derived = class extends Base {',
+      '  make() {',
+      '    return new Base();',
+      '  }',
+      '};',
+      'class Declared extends Base {',
+      '  make() {',
+      '    return new Base();',
+      '  }',
+      '}',
+    ],
+    expected: [
+      "/input.ts 2674 103 10 Constructor of class 'Base' is protected and only accessible within the class declaration.",
+    ],
+  },
+  {
     // 70 type parameters: the mappers of the tuple reference and of the call look their sources up in an index.
     name: 'instantiation with more than 64 type parameters',
     source: [
@@ -616,7 +640,8 @@ test(
       expected,
       differsFromOracle,
     } of cases) {
-      const file = corpus !== undefined ? join(repo, 'upstream/TypeScript/tests/cases', corpus) : join(out, fileName);
+      const file =
+        corpus !== undefined ? join(repo, 'upstream/TypeScript/tsc/testdata/tests/cases', corpus) : join(out, fileName);
       if (corpus === undefined) writeFileSync(file, source.join('\n') + '\n');
       const env = { ...process.env, TSC_TS_CHECK_OPTIONS: options };
       const actual = execFileSync(process.execPath, ['--stack-size=16000', join(out, 'drivers/check.js'), file, libs], {

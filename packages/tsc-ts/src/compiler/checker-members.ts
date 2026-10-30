@@ -17,7 +17,9 @@ import {
   type InterfaceType,
   type IntersectionType,
   type MappedType,
+  DeclaredMemberPlan,
   MemberNames,
+  NamedMemberOrder,
   ObjectFlags,
   type ObjectType,
   type Signature,
@@ -44,6 +46,7 @@ import {
   prependTypeMapping,
   LiteralType,
   PendingMembers,
+  getMappedType,
 } from './checker-types.js';
 import {
   UnionReduction,
@@ -79,6 +82,7 @@ import {
   getLateBoundSymbol,
   getMembersOfSymbol,
   getMergedSymbol,
+  getNamedMemberPositions,
   getNamedMembers,
   getSymbolOfDeclaration,
   isReservedMemberName,
@@ -104,6 +108,8 @@ import {
   instantiateSignatures,
   instantiateSymbol,
   instantiateType,
+  isThisless,
+  keepsSymbolTypeUnderInstantiation,
   keepsSymbolUnderInstantiation,
   newInstantiatedSymbol,
   instantiateTypes,
@@ -191,7 +197,7 @@ export function membersHolder(c: Checker, t: Type): StructuredType {
   return side as StructuredType;
 }
 
-/** The `objectFlags` of `t` that resolving its members sets (MembersResolved, UnresolvedMembers). */
+/** The `objectFlags` of `t` that resolving its members sets (MembersResolved). */
 export function memberResolutionFlags(c: Checker, t: Type): ObjectFlags {
   if ((t.flags & TypeFlags.UnionOrIntersection) === 0) return lazyObjectFlags(c, t);
   const side = sideOfIfAny(c, t) as UnionOrIntersectionType | undefined;
@@ -287,8 +293,7 @@ function resolveObjectTypeMembers(
   }
   if (baseTypes.length !== 0) {
     members = !instantiated || members === undefined ? new Map(members ?? []) : members;
-    setStructuredTypeMembers(c, t, members, callSignatures, constructSignatures, indexInfos);
-    t.objectFlags |= ObjectFlags.UnresolvedMembers;
+    // The members are set once the bases are added: a recursive request for them resolves them again.
     for (const baseType of baseTypes) {
       const instantiatedBaseType =
         lastArgument !== undefined
@@ -307,7 +312,6 @@ function resolveObjectTypeMembers(
       for (const info of inherited) if (findIndexInfo(indexInfos, info.keyType) === undefined) added.push(info);
       if (added.length !== 0) indexInfos = indexInfos.concat(added);
     }
-    t.objectFlags &= ~ObjectFlags.UnresolvedMembers;
   }
   setStructuredTypeMembers(c, t, members, callSignatures, constructSignatures, indexInfos);
 }
@@ -345,6 +349,8 @@ export class PendingInstantiatedMembers extends PendingMembers {
   readonly sourceTable: SymbolTable | undefined;
   /** Anonymous type instantiations: the properties of the target, in order. */
   readonly sourceList: Symbol[] | undefined;
+  /** The source's members at their positions: `sourceList`, or the declared members in table order. */
+  readonly sourceMembers: Symbol[];
   readonly mapper: TypeMapper;
   /** MemberState of each member of the source, in order, 16 to a word. */
   readonly states: number[];
@@ -377,6 +383,7 @@ export class PendingInstantiatedMembers extends PendingMembers {
     c: Checker,
     sourceTable: SymbolTable | undefined,
     sourceList: Symbol[] | undefined,
+    sourceMembers: Symbol[],
     mapper: TypeMapper,
     states: number[],
     positions: Map<string, number>,
@@ -384,6 +391,7 @@ export class PendingInstantiatedMembers extends PendingMembers {
     hasRequiredOwnMembers: boolean,
   ) {
     super();
+    this.sourceMembers = sourceMembers;
     this.hasOwnMembers = hasOwnMembers;
     this.hasRequiredOwnMembers = hasRequiredOwnMembers;
     this.c = c;
@@ -512,6 +520,21 @@ export class PendingInstantiatedMembers extends PendingMembers {
   materialize(t: StructuredType): void {
     const c = this.c;
     t.pendingMembers = undefined;
+    if (!this.hasBases) {
+      // The properties are the source's named members, in the order cached for the source
+      // (`NamedMemberOrder`), and they are all of the table, which is built only when asked for.
+      const order = this.namedMemberOrder(t.symbol);
+      if (order !== undefined) {
+        const sourceMembers = this.sourceMembers;
+        const properties: Symbol[] = [];
+        for (const position of order.positions) properties.push(this.memberAt(position, sourceMembers[position]!));
+        this.instantiated = undefined;
+        t.membersValue = undefined;
+        t.propertiesValue = properties;
+        t.pendingMembers = new PropertyMembers(properties, order.names);
+        return;
+      }
+    }
     const members = this.ownTable();
     this.instantiated = undefined;
     if (!this.hasBases) {
@@ -557,6 +580,52 @@ export class PendingInstantiatedMembers extends PendingMembers {
     const pending = t.pendingMembers;
     if (pending !== undefined) pending.materializeTable(t);
   }
+
+  /**
+   * The property order of the source's instantiations for `container` (computed for the first container
+   * asked for), or undefined.
+   */
+  private namedMemberOrder(container: Symbol | undefined): NamedMemberOrder | undefined {
+    const c = this.c;
+    const owner = this.owner;
+    let order = owner !== undefined ? owner.namedMemberOrder : c.namedMemberOrdersOfLists.get(this.sourceList!);
+    if (order === undefined) {
+      order = namedMemberOrderOf(c, this.sourceMembers, container, owner !== undefined);
+      if (owner !== undefined) owner.namedMemberOrder = order;
+      else c.namedMemberOrdersOfLists.set(this.sourceList!, order);
+    }
+    return order !== null && order.container === container ? order : undefined;
+  }
+}
+
+/**
+ * The `NamedMemberOrder` of instantiations of `members` for `container`; null where `getNamedMemberPositions`
+ * has none. With `skipsUnnamed` (declared members), an instantiation's table holds the named members, the
+ * others being skipped, in the order of `members`; without it, every member must be named.
+ */
+function namedMemberOrderOf(
+  c: Checker,
+  members: Symbol[],
+  container: Symbol | undefined,
+  skipsUnnamed: boolean,
+): NamedMemberOrder | null {
+  const positions = getNamedMemberPositions(c, members, container);
+  // Members of a list are never skipped (`pendingInstantiatedList`): its table holds them all.
+  if (positions === undefined || (!skipsUnnamed && positions.length !== members.length)) return null;
+  const names: string[] = [];
+  const byName = new Map<string, number>();
+  // The index in `positions` of each member's position, or -1 for a member that isn't a property.
+  const indexes: number[] = [];
+  for (let i = 0; i < members.length; i++) indexes.push(-1);
+  for (let i = 0; i < positions.length; i++) {
+    const name = members[positions[i]!]!.name;
+    names.push(name);
+    byName.set(name, i);
+    indexes[positions[i]!] = i;
+  }
+  const tableOrder: number[] = [];
+  for (const index of indexes) if (index >= 0) tableOrder.push(index);
+  return new NamedMemberOrder(container, positions, new MemberNames(names, byName, tableOrder));
 }
 
 /**
@@ -658,43 +727,82 @@ function pendingInstantiatedTable(
   const declared = sideOf(c, source);
   const table = declared.declaredMembers;
   if (table === undefined || table.size === 0) return undefined;
+  const plan = declaredMemberPlan(c, declared, table);
+  if (plan.eager) return undefined;
+  const members = plan.members;
+  const named = plan.named;
+  const keptByType = plan.keptByType;
   const states: number[] = [];
   let word = 0;
-  let i = 0;
-  let hasOwnMembers = false;
-  let hasRequiredOwnMembers = false;
-  for (const [id, symbol] of table) {
-    if (id !== symbol.name) return undefined;
+  const count = members.length;
+  for (let i = 0; i < count; i++) {
     let state = MemberState.Skipped;
-    if (isNamedMember(c, symbol, id)) {
-      // A named member without a value flag (an alias) could be replaced by an inherited one; keep
-      // such tables eager, so that an own member always stands.
-      if ((symbol.flags & SymbolFlags.Value) === 0) return undefined;
-      state = keepsSymbolUnderInstantiation(c, symbol, mapper) ? MemberState.Kept : MemberState.Instantiated;
-      // Instantiated symbols have the flags of their source.
-      hasOwnMembers = true;
-      if ((symbol.flags & SymbolFlags.Optional) === 0) hasRequiredOwnMembers = true;
+    if (named[i] !== 0) {
+      const bit = 1 << (i & 31);
+      if ((keptByType[i >> 5]! & bit) !== 0) state = MemberState.Kept;
+      else if (mapper.mapsThisOnly() && isThisless(members[i]!)) {
+        getSymbolId(members[i]!);
+        state = MemberState.Kept;
+      } else if (keepsSymbolTypeUnderInstantiation(c, members[i]!)) {
+        keptByType[i >> 5] = keptByType[i >> 5]! | bit;
+        state = MemberState.Kept;
+      } else state = MemberState.Instantiated;
     }
     word |= state << ((i & 15) * 2);
     if ((i & 15) === 15) {
       states.push(word);
       word = 0;
     }
-    i++;
   }
-  if ((i & 15) !== 0) states.push(word);
+  if ((count & 15) !== 0) states.push(word);
   const pending = new PendingInstantiatedMembers(
     c,
     table,
     undefined,
+    members,
     mapper,
     sharedStates(declared, states),
     declaredMemberPositions(declared, table),
-    hasOwnMembers,
-    hasRequiredOwnMembers,
+    plan.hasOwnMembers,
+    plan.hasRequiredOwnMembers,
   );
   pending.owner = declared;
   return pending;
+}
+
+/** What the pending instantiations of `table`, the declared members of `declared`, share. */
+function declaredMemberPlan(c: Checker, declared: InterfaceType, table: SymbolTable): DeclaredMemberPlan {
+  const known = declared.declaredMemberPlan;
+  if (known !== undefined && known.table === table) return known;
+  const members: Symbol[] = [];
+  const named: number[] = [];
+  let hasOwnMembers = false;
+  let hasRequiredOwnMembers = false;
+  let eager = false;
+  for (const [id, symbol] of table) {
+    if (id !== symbol.name) {
+      eager = true;
+      break;
+    }
+    members.push(symbol);
+    if (!isNamedMember(c, symbol, id)) {
+      named.push(0);
+      continue;
+    }
+    // A named member without a value flag (an alias) could be replaced by an inherited one; keep
+    // such tables eager, so that an own member always stands.
+    if ((symbol.flags & SymbolFlags.Value) === 0) {
+      eager = true;
+      break;
+    }
+    named.push(1);
+    // Instantiated symbols have the flags of their source.
+    hasOwnMembers = true;
+    if ((symbol.flags & SymbolFlags.Optional) === 0) hasRequiredOwnMembers = true;
+  }
+  const plan = new DeclaredMemberPlan(table, eager, members, named, hasOwnMembers, hasRequiredOwnMembers);
+  declared.declaredMemberPlan = plan;
+  return plan;
 }
 
 /**
@@ -730,6 +838,7 @@ function pendingInstantiatedList(c: Checker, list: Symbol[], mapper: TypeMapper)
   return new PendingInstantiatedMembers(
     c,
     undefined,
+    list,
     list,
     mapper,
     states,
@@ -845,11 +954,13 @@ function resolvePendingObjectTypeMembers(
   constructSignatures: Signature[],
   indexInfos: IndexInfo[],
 ): void {
-  setPendingStructuredTypeMembers(c, t, pending, callSignatures, constructSignatures, indexInfos);
-  if (baseTypes.length === 0) return;
+  if (baseTypes.length === 0) {
+    setPendingStructuredTypeMembers(c, t, pending, callSignatures, constructSignatures, indexInfos);
+    return;
+  }
+  // The members are set once the bases are added: a recursive request for them resolves them again.
   pending.hasBases = true;
   pending.resolving = true;
-  t.objectFlags |= ObjectFlags.UnresolvedMembers;
   for (const baseType of baseTypes) {
     const instantiatedBaseType =
       thisArgument !== undefined
@@ -874,8 +985,7 @@ function resolvePendingObjectTypeMembers(
         lazyBase = resolved;
     }
     const baseProperties = lazyBase === undefined ? getPropertiesOfType(c, instantiatedBaseType) : undefined;
-    if (t.pendingMembers === pending) pending.addBase(lazyBase, baseProperties);
-    else addInheritedMembers(t.membersValue!, baseProperties ?? lazyBase!.properties);
+    pending.addBase(lazyBase, baseProperties);
     const baseCallSignatures = getSignaturesOfType(c, instantiatedBaseType, SignatureKind.Call);
     if (baseCallSignatures.length !== 0) callSignatures = callSignatures.concat(baseCallSignatures);
     const baseConstructSignatures = getSignaturesOfType(c, instantiatedBaseType, SignatureKind.Construct);
@@ -886,11 +996,8 @@ function resolvePendingObjectTypeMembers(
     for (const info of inherited) if (findIndexInfo(indexInfos, info.keyType) === undefined) added.push(info);
     if (added.length !== 0) indexInfos = indexInfos.concat(added);
   }
-  t.objectFlags &= ~ObjectFlags.UnresolvedMembers;
   pending.resolving = false;
-  if (t.pendingMembers === pending)
-    setPendingStructuredTypeMembers(c, t, pending, callSignatures, constructSignatures, indexInfos);
-  else setStructuredTypeMembers(c, t, t.membersValue, callSignatures, constructSignatures, indexInfos);
+  setPendingStructuredTypeMembers(c, t, pending, callSignatures, constructSignatures, indexInfos);
 }
 
 function setPendingStructuredTypeMembers(
@@ -1117,7 +1224,7 @@ function getArrayMemberCallSignatures(c: Checker, t: UnionType): Signature[] {
   }
   const arrayArg = mapType(c, t, (u) => {
     const generic = isReadonlyArraySymbol(c, u.symbol!.parent!) ? c.globalReadonlyArrayType : c.globalArrayType;
-    return (u as ObjectType).mapper!.map((generic as InterfaceType).typeParameters()[0]!);
+    return getMappedType((generic as InterfaceType).typeParameters()[0]!, (u as ObjectType).mapper!);
   });
   const arrayType = createArrayTypeEx(
     c,
@@ -1848,6 +1955,18 @@ export function getUnionOrIntersectionProperty(
 }
 
 export function getDeclarationModifierFlagsFromSymbol(c: Checker, s: Symbol, isWrite: boolean): ModifierFlags {
+  const checkFlags = s.checkFlags;
+  if ((checkFlags & CheckFlags.Synthetic) !== 0) {
+    // The least restricted access of the constituents, for reading or for writing.
+    let access = ModifierFlags.None;
+    if ((checkFlags & (isWrite ? CheckFlags.ContainsWritePublic : CheckFlags.ContainsPublic)) !== 0)
+      access = ModifierFlags.Public;
+    else if ((checkFlags & (isWrite ? CheckFlags.ContainsWriteProtected : CheckFlags.ContainsProtected)) !== 0)
+      access = ModifierFlags.Protected;
+    else if ((checkFlags & (isWrite ? CheckFlags.ContainsWritePrivate : CheckFlags.ContainsPrivate)) !== 0)
+      access = ModifierFlags.Private;
+    return (checkFlags & CheckFlags.ContainsStatic) !== 0 ? access | ModifierFlags.Static : access;
+  }
   if (s.valueDeclaration !== undefined) {
     let declaration: Node | undefined;
     if (isWrite) declaration = getDeclarationOfKind(s, SyntaxKind.SetAccessor);
@@ -1858,16 +1977,6 @@ export function getDeclarationModifierFlagsFromSymbol(c: Checker, s: Symbol, isW
     return s.parent !== undefined && (s.parent.flags & SymbolFlags.Class) !== 0
       ? flags
       : flags & ~ModifierFlags.AccessibilityModifier;
-  }
-  if ((s.checkFlags & CheckFlags.Synthetic) !== 0) {
-    const access =
-      (s.checkFlags & CheckFlags.ContainsPrivate) !== 0
-        ? ModifierFlags.Private
-        : (s.checkFlags & CheckFlags.ContainsPublic) !== 0
-          ? ModifierFlags.Public
-          : ModifierFlags.Protected;
-    const staticModifier = (s.checkFlags & CheckFlags.ContainsStatic) !== 0 ? ModifierFlags.Static : 0;
-    return access | staticModifier;
   }
   if ((s.flags & SymbolFlags.Prototype) !== 0) return ModifierFlags.Public | ModifierFlags.Static;
   return 0;
@@ -1895,6 +2004,7 @@ export function createUnionOrIntersectionProperty(
     const prop = getPropertyOfTypeEx(c, t, name, skipObjectFunctionPropertyAugment, false);
     if (prop !== undefined) {
       const modifiers = getDeclarationModifierFlagsFromSymbol(c, prop, false);
+      const writeModifiers = getDeclarationModifierFlagsFromSymbol(c, prop, true);
       if ((prop.flags & SymbolFlags.ClassMember) !== 0) {
         if (isUnion) optionalFlag |= prop.flags & SymbolFlags.Optional;
         else optionalFlag &= prop.flags;
@@ -1922,9 +2032,16 @@ export function createUnionOrIntersectionProperty(
       }
       if (isUnion && isReadonlySymbol(c, prop)) checkFlags |= CheckFlags.Readonly;
       else if (!isUnion && !isReadonlySymbol(c, prop)) checkFlags &= ~CheckFlags.Readonly;
-      if ((modifiers & ModifierFlags.NonPublicAccessibilityModifier) === 0) checkFlags |= CheckFlags.ContainsPublic;
-      if ((modifiers & ModifierFlags.Protected) !== 0) checkFlags |= CheckFlags.ContainsProtected;
-      if ((modifiers & ModifierFlags.Private) !== 0) checkFlags |= CheckFlags.ContainsPrivate;
+      if ((modifiers & (ModifierFlags.Protected | ModifierFlags.Public)) === ModifierFlags.Protected)
+        checkFlags |= CheckFlags.ContainsProtected;
+      else if ((modifiers & (ModifierFlags.Private | ModifierFlags.Public)) === ModifierFlags.Private)
+        checkFlags |= CheckFlags.ContainsPrivate;
+      else checkFlags |= CheckFlags.ContainsPublic;
+      if ((writeModifiers & (ModifierFlags.Protected | ModifierFlags.Public)) === ModifierFlags.Protected)
+        checkFlags |= CheckFlags.ContainsWriteProtected;
+      else if ((writeModifiers & (ModifierFlags.Private | ModifierFlags.Public)) === ModifierFlags.Private)
+        checkFlags |= CheckFlags.ContainsWritePrivate;
+      else checkFlags |= CheckFlags.ContainsWritePublic;
       if ((modifiers & ModifierFlags.Static) !== 0) checkFlags |= CheckFlags.ContainsStatic;
       if (!isPrototypeProperty(prop)) syntheticFlag = CheckFlags.SyntheticProperty;
     } else if (isUnion) {
@@ -1939,15 +2056,26 @@ export function createUnionOrIntersectionProperty(
       } else checkFlags |= CheckFlags.ReadPartial;
     }
   }
+  if (singleProp === undefined) return undefined;
   if (
-    singleProp === undefined ||
-    (isUnion &&
-      (propSet !== undefined || (checkFlags & CheckFlags.Partial) !== 0) &&
-      (checkFlags & (CheckFlags.ContainsPrivate | CheckFlags.ContainsProtected)) !== 0 &&
-      !(propSet !== undefined && hasCommonDeclaration(propSet)))
-  )
-    // Missing, or private/protected in one constituent but missing or different in another.
-    return undefined;
+    isUnion &&
+    (propSet !== undefined || (checkFlags & CheckFlags.Partial) !== 0) &&
+    (checkFlags &
+      (CheckFlags.ContainsPrivate |
+        CheckFlags.ContainsProtected |
+        CheckFlags.ContainsWritePrivate |
+        CheckFlags.ContainsWriteProtected)) !==
+      0 &&
+    !(propSet !== undefined && hasCommonDeclaration(propSet))
+  ) {
+    // The property is private or protected in one constituent but missing or different in another.
+    // Private or protected reading leaves no property; private or protected writing restricts write
+    // access to that of the most restricted constituent.
+    if ((checkFlags & (CheckFlags.ContainsPrivate | CheckFlags.ContainsProtected)) !== 0) return undefined;
+    if ((checkFlags & CheckFlags.ContainsWritePrivate) !== 0)
+      checkFlags &= ~(CheckFlags.ContainsWritePublic | CheckFlags.ContainsWriteProtected);
+    else if ((checkFlags & CheckFlags.ContainsWriteProtected) !== 0) checkFlags &= ~CheckFlags.ContainsWritePublic;
+  }
   if (propSet === undefined && (checkFlags & CheckFlags.ReadPartial) === 0 && indexTypes.length === 0) {
     if (!mergedInstantiations) return singleProp;
     // Merged instantiations get a clone without a union parent, so `Array<T>.length` prints as such.
@@ -1978,7 +2106,7 @@ export function createUnionOrIntersectionProperty(
     if (firstValueDeclaration === undefined) firstValueDeclaration = prop.valueDeclaration;
     else if (prop.valueDeclaration !== undefined && prop.valueDeclaration !== firstValueDeclaration)
       hasNonUniformValueDeclaration = true;
-    for (const d of getDeclarations(prop)) declarations.push(d);
+    for (const d of getDeclarations(prop)) if (!declarations.includes(d)) declarations.push(d);
     const t = getTypeOfSymbol(c, prop);
     if (firstType === undefined) {
       firstType = t;
@@ -2307,11 +2435,25 @@ export function getReducedType(c: Checker, t: Type): Type {
     const side = sideOf(c, t);
     if ((side.objectFlags & ObjectFlags.IsNeverIntersectionComputed) === 0) {
       side.objectFlags |= ObjectFlags.IsNeverIntersectionComputed;
-      if (hasNeverReducedProperty(c, t as IntersectionType)) side.objectFlags |= ObjectFlags.IsNeverIntersection;
+      if (!isMappingOfSameObjectType(c, typesOf(t)) && hasNeverReducedProperty(c, t as IntersectionType))
+        side.objectFlags |= ObjectFlags.IsNeverIntersection;
     }
     if ((side.objectFlags & ObjectFlags.IsNeverIntersection) !== 0) return c.neverType;
   }
   return t;
+}
+
+/** Whether `types` are mapped types that all map the same object type. */
+function isMappingOfSameObjectType(c: Checker, types: readonly Type[]): boolean {
+  if (types.length === 0 || (types[0]!.objectFlags & ObjectFlags.Mapped) === 0) return false;
+  const first = getModifiersTypeFromMappedType(c, types[0] as MappedType);
+  if ((first.flags & TypeFlags.Object) === 0) return false;
+  for (let i = 1; i < types.length; i++) {
+    const t = types[i]!;
+    if ((t.objectFlags & ObjectFlags.Mapped) === 0 || getModifiersTypeFromMappedType(c, t as MappedType) !== first)
+      return false;
+  }
+  return true;
 }
 
 /**
@@ -2494,7 +2636,7 @@ export function getResolvedBaseConstraint(c: Checker, t: Type, stack?: Recursion
   if (!pushTypeResolution(c, t, TypeSystemPropertyName.ResolvedBaseConstraint)) return c.circularConstraintType;
   let constraint: Type | undefined;
   // At least 10 levels; up to 50 without deeply nested types on the stack.
-  const identity = getRecursionIdentity(t);
+  const identity = getRecursionIdentity(c, t);
   const current = stack ?? [];
   if (current.length < 10 || (current.length < 50 && !current.includes(identity)))
     constraint = computeBaseConstraint(c, getSimplifiedType(c, t, false), current.concat([identity]));

@@ -366,7 +366,7 @@ export function createExternalHelpersImportDeclarationIfNeeded(
     const name = names[i];
     // Aliased when the name is used in the file.
     specifiers.push(
-      isFileLevelUniqueName(file, name)
+      isFileLevelUniqueName(context.mostOriginal(file) as SourceFile, name)
         ? factory.created(new ImportSpecifier(false, undefined, factory.createIdentifier(name)))
         : factory.created(
             new ImportSpecifier(false, factory.createIdentifier(name), factory.createUnscopedHelperName(name)),

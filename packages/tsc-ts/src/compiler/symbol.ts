@@ -124,22 +124,26 @@ export const enum CheckFlags {
   ContainsPublic = 1 << 8,
   ContainsProtected = 1 << 9,
   ContainsPrivate = 1 << 10,
-  ContainsStatic = 1 << 11,
+  /** A synthetic property with public, protected or private write access in a constituent. */
+  ContainsWritePublic = 1 << 11,
+  ContainsWriteProtected = 1 << 12,
+  ContainsWritePrivate = 1 << 13,
+  ContainsStatic = 1 << 14,
   /** Late-bound from a computed property name. */
-  Late = 1 << 12,
-  ReverseMapped = 1 << 13,
-  OptionalParameter = 1 << 14,
-  RestParameter = 1 << 15,
+  Late = 1 << 15,
+  ReverseMapped = 1 << 16,
+  OptionalParameter = 1 << 17,
+  RestParameter = 1 << 18,
   /** The type is computed on demand. */
-  DeferredType = 1 << 16,
-  HasNeverType = 1 << 17,
-  Mapped = 1 << 18,
-  StripOptional = 1 << 19,
-  Unresolved = 1 << 20,
-  IsDiscriminantComputed = 1 << 21,
-  IsDiscriminant = 1 << 22,
+  DeferredType = 1 << 19,
+  HasNeverType = 1 << 20,
+  Mapped = 1 << 21,
+  StripOptional = 1 << 22,
+  Unresolved = 1 << 23,
+  IsDiscriminantComputed = 1 << 24,
+  IsDiscriminant = 1 << 25,
   /** Created from an index signature. */
-  IndexSymbol = 1 << 23,
+  IndexSymbol = 1 << 26,
   Synthetic = SyntheticProperty | SyntheticMethod,
   NonUniformAndLiteral = HasNonUniformType | HasLiteralType,
   Partial = ReadPartial | WritePartial,
@@ -320,7 +324,7 @@ export class Symbol implements ProgramLifetime {
 
   /** Whether this is the symbol of an external module, named by its quoted path. */
   isExternalModule(): boolean {
-    return (this.flags & SymbolFlags.Module) !== 0 && this.name.charCodeAt(0) === 0x22;
+    return (this.flags & SymbolFlags.Module) !== 0 && tryGetAmbientModuleNameFromSymbolName(this.name) !== undefined;
   }
 
   /** The flags of this symbol and its export symbol. */
@@ -503,6 +507,19 @@ export function getMembers(symbol: Symbol): SymbolTable {
  * vanishingly unlikely in a string-literal property name.
  */
 export const internalSymbolNamePrefix = '￾';
+
+/**
+ * The module name of an ambient module symbol's name: `"name"`, or for a pattern module with import
+ * attributes, the internal symbol name prefix, `"name"pattern@` and the id of the attributes node.
+ */
+export function tryGetAmbientModuleNameFromSymbolName(name: string): string | undefined {
+  if (name.length >= 2 && name.charCodeAt(0) === 0x22 && name.charCodeAt(name.length - 1) === 0x22)
+    return name.substring(1, name.length - 1);
+  if (!name.startsWith(internalSymbolNamePrefix + '"')) return undefined;
+  const markerIndex = name.lastIndexOf('"pattern@');
+  if (markerIndex < internalSymbolNamePrefix.length + 2) return undefined;
+  return name.substring(internalSymbolNamePrefix.length + 1, markerIndex);
+}
 
 export const enum InternalSymbolName {
   /** Call signatures. */

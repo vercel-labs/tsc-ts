@@ -88,8 +88,10 @@ export function getStringLiteralCompletions(
   contextToken: Node | undefined,
   includeSymbols: boolean,
 ): CompletionList | undefined {
-  if (isInReferenceComment(file, position))
-    return convertPathCompletions(getTripleSlashReferenceCompletions(program, file, position), file, position);
+  if (isInReferenceComment(file, position)) {
+    const completions = getTripleSlashReferenceCompletions(program, file, position);
+    return completions === undefined ? undefined : convertPathCompletions(completions, file, position);
+  }
   if (!isInString(file, position, contextToken)) return undefined;
   if (contextToken === undefined || !isStringLiteralLike(contextToken)) return undefined;
   const entries = getStringLiteralCompletionEntries(c, program, file, contextToken, position);
@@ -106,21 +108,21 @@ function convertStringLiteralCompletions(
   includeSymbols: boolean,
 ): CompletionList | undefined {
   if (completion === undefined) return undefined;
-  // An empty path list is no completion list, as in tsgo.
-  if (completion.fromPaths !== undefined && completion.fromPaths.length > 0)
-    return convertPathCompletions(completion.fromPaths, file, position);
+  // The literal's quote: completions insert their names between its quotes, escaped for it.
+  let quote = 0x22;
+  if (contextToken.kind === SyntaxKind.NoSubstitutionTemplateLiteral) quote = 0x60;
+  else if (file.text.charCodeAt(getStartOfNode(contextToken, file, false)) === 0x27) quote = 0x27;
+  if (completion.fromPaths !== undefined)
+    return escapeEntryNames(convertPathCompletions(completion.fromPaths, file, position), quote);
   if (completion.fromProperties !== undefined) {
     const data = newCompletionData(file, contextToken);
     data.symbols = completion.fromProperties.symbols;
     data.completionKind = CompletionKind.String;
     data.isNewIdentifierLocation = completion.fromProperties.hasIndexSignature;
     const { entries } = getCompletionEntriesFromSymbols(c, options, data, contextToken, position, file, includeSymbols);
-    return { isIncomplete: false, entries };
+    return escapeEntryNames({ isIncomplete: false, entries }, quote);
   }
   if (completion.fromTypes !== undefined) {
-    let quote = 0x22;
-    if (contextToken.kind === SyntaxKind.NoSubstitutionTemplateLiteral) quote = 0x60;
-    else if (file.text.charCodeAt(getStartOfNode(contextToken, file, false)) === 0x27) quote = 0x27;
     const entries = completion.fromTypes.types.map((t) =>
       createEntry(
         escapeString((t as LiteralType).stringValue, quote, LiteralTextFlags.NeverAsciiEscape),
@@ -136,6 +138,20 @@ function convertStringLiteralCompletions(
     return { isIncomplete: false, entries };
   }
   return undefined;
+}
+
+// Property names and file names written into a string literal, escaped as the literal's text, like the literal
+// types' values: a name that holds the quote, a backslash or a line break does not end the literal. Other names are
+// unchanged.
+function escapeEntryNames(list: CompletionList, quote: number): CompletionList {
+  for (const entry of list.entries) {
+    const name = escapeString(entry.name, quote, LiteralTextFlags.NeverAsciiEscape);
+    if (name === entry.name) continue;
+    entry.name = name;
+    if (entry.insertText !== undefined)
+      entry.insertText = escapeString(entry.insertText, quote, LiteralTextFlags.NeverAsciiEscape);
+  }
+  return list;
 }
 
 function convertPathCompletions(pathCompletions: PathCompletion[], file: SourceFile, position: number): CompletionList {

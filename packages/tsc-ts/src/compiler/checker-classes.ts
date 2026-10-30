@@ -46,7 +46,7 @@ import {
   isPrivateIdentifierClassElementDeclaration,
   isStatic,
 } from './binder-utilities.js';
-import { isFunctionLike, nodeIsMissing, nodeIsPresent } from './ast-utilities.js';
+import { isFunctionLike, isInJSFile, nodeIsMissing, nodeIsPresent } from './ast-utilities.js';
 import { ScriptTarget, getEmitScriptTarget, getUseDefineForClassFields } from './options.js';
 import { hasDynamicName, hasLateBindableName } from './checker-utilities.js';
 import { type DiagnosticMessage, Diagnostics } from './diagnostics.js';
@@ -78,7 +78,13 @@ import { getSymbolOfDeclaration } from './checker-symbols.js';
 import { getOptionalType, getTypeOfSymbol } from './checker-symbol-types.js';
 import { convertAutoToAny, getFlowTypeOfReference } from './checker-narrowing.js';
 import { TypeFacts, hasTypeFacts } from './checker-flow.js';
-import { getIndexInfosOfType, getSignaturesOfType, getTypeOfPropertyOfType } from './checker-members.js';
+import {
+  getIndexInfosOfType,
+  getPropertiesOfType,
+  getSignaturesOfType,
+  getTypeOfPropertyOfType,
+} from './checker-members.js';
+import { isConstructorDeclaredThisProperty } from './checker-javascript.js';
 import {
   checkJSDocLinksOfNode,
   checkNodeDeferred,
@@ -91,7 +97,7 @@ import {
   checkExportsOnMergedDeclarations,
 } from './checker-declarations.js';
 import { checkFunctionLikeBody } from './checker-functions.js';
-import { checkJSDocFullSignature } from './checker-jsdoc.js';
+import { checkJSDocFullSignature, checkJSDocFullSignatureType } from './checker-jsdoc.js';
 import { checkComputedPropertyName } from './checker-expressions.js';
 import { checkFunctionOrConstructorSymbol, checkFunctionOrMethodSymbols } from './checker-overloads.js';
 import {
@@ -100,6 +106,7 @@ import {
   checkInterfaceHeritage,
 } from './checker-heritage.js';
 import { checkDecorators, getFirstTransformableStaticClassElement } from './checker-decorators.js';
+import { getTypeOfNode } from './checker-services.js';
 
 export function checkClassDeclaration(c: Checker, node: Node): void {
   checkClassLikeDeclaration(c, node);
@@ -148,6 +155,23 @@ export function checkClassLikeDeferred(c: Checker, node: Node): void {
 
 function checkClassMembers(c: Checker, node: Node): void {
   for (const member of getMembers(node)!.nodes) checkClassMember(c, member);
+  checkConstructorDeclaredProperties(c, node);
+}
+
+/**
+ * Resolves the types of a JavaScript class's properties declared by `this.x` assignments in its
+ * constructor, so the diagnostics of their initializers don't depend on which use is checked first.
+ */
+function checkConstructorDeclaredProperties(c: Checker, node: Node): void {
+  if (!isInJSFile(node)) return;
+  const symbol = getSymbolOfDeclaration(c, node);
+  if (symbol === undefined) return;
+  for (const property of getPropertiesOfType(c, getDeclaredTypeOfSymbol(c, symbol)))
+    if (
+      isConstructorDeclaredThisProperty(c, property) &&
+      c.symbolLinks(property).thisAssignmentLocation!.parent === node
+    )
+      getTypeOfSymbol(c, property);
 }
 
 function checkClassLikeDeclaration(c: Checker, node: Node): void {
@@ -241,6 +265,7 @@ function checkClassMember(c: Checker, member: Node): void {
       if (symbol !== undefined && member.kind !== SyntaxKind.Constructor) getTypeOfSymbol(c, symbol);
       checkFunctionLikeBody(c, member);
       if (member.kind === SyntaxKind.MethodDeclaration) {
+        checkJSDocFullSignatureType(c, member);
         checkJSDocFullSignature(c, member);
         checkFunctionOrMethodSymbols(c, member);
         if (hasSyntacticModifier(member, ModifierFlags.Abstract) && getBody(member) !== undefined)
@@ -612,35 +637,64 @@ function containsUndefinedType(t: Type): boolean {
   return (first.flags & TypeFlags.Undefined) !== 0;
 }
 
-/** Whether `new` at `node` may call a constructor, reporting private and protected ones out of reach. */
-export function isConstructorAccessible(c: Checker, node: Node, signature: Signature | undefined): boolean {
-  if (signature === undefined || signature.declaration === undefined) return true;
-  const declaration = signature.declaration;
-  const modifiers = getModifierFlags(declaration) & ModifierFlags.NonPublicAccessibilityModifier;
-  // Public constructors and constructor functions are always accessible.
-  if (modifiers === 0 || declaration.kind !== SyntaxKind.Constructor) return true;
-  const classSymbol = getSymbol(declaration.parent!)!;
-  const declaringClassDeclaration = getClassLikeDeclarationOfSymbol(classSymbol);
-  const declaringClass = getDeclaredTypeOfSymbol(c, classSymbol);
-  // Private and protected constructors are only callable within their class, or subclasses if protected.
-  for (let container = getContainingClass(node); container !== undefined; container = getContainingClass(container))
-    if (container === declaringClassDeclaration) return true;
-  const containingClass = getContainingClass(node);
-  if (containingClass !== undefined && (modifiers & ModifierFlags.Protected) !== 0) {
-    const containingType = getDeclaredTypeOfSymbol(c, getSymbol(containingClass)!);
-    if (typeHasProtectedAccessibleBase(c, classSymbol, containingType)) return true;
+/** A constructor that `node` may not call: the modifiers that forbid it, and the class that declares it. */
+export class ConstructorAccessibilityError {
+  constructor(
+    readonly kind: ModifierFlags,
+    readonly declaringClass: Type,
+  ) {}
+}
+
+/**
+ * The first of `signatures` whose constructor `node` may not call because of the modifiers in `modifiersMask`:
+ * private and protected constructors are only callable within their class, or subclasses if protected.
+ */
+export function getConstructorAccessibilityError(
+  c: Checker,
+  node: Node,
+  signatures: readonly Signature[],
+  modifiersMask: ModifierFlags,
+): ConstructorAccessibilityError | undefined {
+  for (const signature of signatures) {
+    const declaration = signature.declaration;
+    if (declaration === undefined) continue;
+    const modifiers = getModifierFlags(declaration) & modifiersMask;
+    // Public constructors and constructor functions are always accessible.
+    if (modifiers === 0 || declaration.kind !== SyntaxKind.Constructor) continue;
+    const classSymbol = getSymbol(declaration.parent!)!;
+    const declaringClassDeclaration = getClassLikeDeclarationOfSymbol(classSymbol);
+    let withinClass = false;
+    for (let container = getContainingClass(node); container !== undefined; container = getContainingClass(container))
+      if (container === declaringClassDeclaration) {
+        withinClass = true;
+        break;
+      }
+    if (withinClass) continue;
+    const containingClass = getContainingClass(node);
+    if (containingClass !== undefined && (modifiers & ModifierFlags.Protected) !== 0) {
+      const containingType = getTypeOfNode(c, containingClass);
+      if (typeHasProtectedAccessibleBase(c, classSymbol, containingType)) continue;
+    }
+    return new ConstructorAccessibilityError(modifiers, getDeclaredTypeOfSymbol(c, classSymbol));
   }
-  if ((modifiers & ModifierFlags.Private) !== 0)
+  return undefined;
+}
+
+/** Whether `new` at `node` may call the constructors of `signatures`, reporting private and protected ones out of reach. */
+export function isConstructorAccessible(c: Checker, node: Node, signatures: readonly Signature[]): boolean {
+  const error = getConstructorAccessibilityError(c, node, signatures, ModifierFlags.NonPublicAccessibilityModifier);
+  if (error === undefined) return true;
+  if ((error.kind & ModifierFlags.Private) !== 0)
     c.error(
       node,
       Diagnostics.Constructor_of_class_0_is_private_and_only_accessible_within_the_class_declaration,
-      typeToString(c, declaringClass),
+      typeToString(c, error.declaringClass),
     );
-  if ((modifiers & ModifierFlags.Protected) !== 0)
+  if ((error.kind & ModifierFlags.Protected) !== 0)
     c.error(
       node,
       Diagnostics.Constructor_of_class_0_is_protected_and_only_accessible_within_the_class_declaration,
-      typeToString(c, declaringClass),
+      typeToString(c, error.declaringClass),
     );
   return false;
 }

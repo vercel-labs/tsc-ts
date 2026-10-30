@@ -259,12 +259,14 @@ export class CommonJSModuleTransformer extends Transformer {
         statement !== undefined ? statement : factory.created(new EmptyStatement()),
       );
     }
-    if (node instanceof WithStatement)
+    if (node instanceof WithStatement) {
+      const statement = nested.visitStatement(node.statement);
       return factory.updateWithStatement(
         node as WithStatement,
         this.visitNode(node.expression)!,
-        nested.visitStatement(node.statement)!,
+        statement !== undefined ? statement : factory.created(new EmptyStatement()),
       );
+    }
     if (node instanceof IfStatement) {
       const thenStatement = nested.visitStatement(node.thenStatement);
       return factory.updateIfStatement(
@@ -310,7 +312,7 @@ export class CommonJSModuleTransformer extends Transformer {
         this.discarded.visitNode(node.initializer),
         this.visitNode(node.condition),
         this.discarded.visitNode(node.incrementor),
-        this.topLevelNested.visitIterationBody(node.statement)!,
+        this.visitIterationBody(node.statement)!,
       );
     if (node instanceof ForInOrOfStatement)
       return this.factory.updateForInOrOfStatement(
@@ -318,7 +320,7 @@ export class CommonJSModuleTransformer extends Transformer {
         node.awaitModifier,
         this.discarded.visitNode(node.initializer)!,
         this.visitNode(node.expression)!,
-        this.topLevelNested.visitIterationBody(node.statement)!,
+        this.visitIterationBody(node.statement)!,
       );
     if (node instanceof ExpressionStatement || node instanceof VoidExpression)
       return this.discarded.visitEachChild(node);
@@ -1241,7 +1243,9 @@ export class CommonJSModuleTransformer extends Transformer {
     const rewrite =
       this.options.rewriteRelativeImportExtensions === true &&
       ((isImportCall(node) && node.arguments.nodes.length > 0) || (isInJSFile(node) && isRequireCall(node, false)));
-    if (isImportCall(node) && this.shouldTransformImportCall()) return this.visitImportCallExpression(node, rewrite);
+    // `import.source()` and the other phase imports stay as written.
+    if (node.expression.kind === SyntaxKind.ImportKeyword && this.shouldTransformImportCall())
+      return this.visitImportCallExpression(node, rewrite);
     if (rewrite) return this.rewriteImportOrRequireCall(node);
     const callee = node.expression;
     if (callee instanceof Identifier) {
@@ -1331,14 +1335,14 @@ export class CommonJSModuleTransformer extends Transformer {
     let args = node.arguments;
     const nodes = args.nodes;
     if (nodes.length > 0) {
-      const first = nodes[0];
+      const first = this.visitNode(nodes[0])!;
       const rewritten =
         first instanceof StringLiteral || first.kind === SyntaxKind.NoSubstitutionTemplateLiteral
           ? rewriteModuleSpecifier(this.context, first, this.options)
           : factory.createRewriteRelativeImportExtensionsHelper(first, this.options.jsx === JsxEmit.Preserve);
       const rest = nodes.slice(1);
       const visitedRest = this.visitArray(rest);
-      if (rewritten !== first || visitedRest !== rest)
+      if (rewritten !== nodes[0] || visitedRest !== rest)
         args = new NodeList(args.pos, args.end, [rewritten].concat(visitedRest));
     }
     return factory.updateCallExpression(node, expression, callQuestionDotToken(node), undefined, args, node.flags);

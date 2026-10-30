@@ -1,4 +1,4 @@
-// The TypeScript/JavaScript/JSX/JSON parser, a port of TypeScript 7.0.2's (tsgo) parser with its
+// The TypeScript/JavaScript/JSX/JSON parser, a port of TypeScript 7.1's (tsgo) parser with its
 // error recovery, parse diagnostics and JavaScript-specific reparsing.
 //
 // ```ts
@@ -218,6 +218,7 @@ import {
   isFunctionLike,
   isImportCall,
   isImportMeta,
+  isImportPhaseMetaProperty,
   isInJSFile,
   isKeyword,
   isKeywordOrPunctuation,
@@ -293,7 +294,11 @@ const enum ListElement {
   ObjectBindingElement,
   ClassElement,
   HeritageClause,
+  /** A heritage clause of an interface declaration. */
+  InterfaceHeritageClause,
   ExpressionWithTypeArguments,
+  /** An element of a type heritage clause: `implements` of a class, `extends` of an interface. */
+  TypeHeritageClauseElement,
   EnumMember,
   ImportSpecifier,
   ExportSpecifier,
@@ -339,6 +344,18 @@ export const enum JSDocScannerInfo {
 }
 
 const noArgs: readonly string[] = [];
+
+/** Whether `operator` binds before an operator of `currentPrecedence`: at equal precedence, only the right-associative `**`. */
+function shouldConsumeBinaryOperator(
+  operator: SyntaxKind,
+  operatorPrecedence: OperatorPrecedence,
+  currentPrecedence: OperatorPrecedence,
+): boolean {
+  return (
+    operatorPrecedence > currentPrecedence ||
+    (operatorPrecedence === currentPrecedence && operator === SyntaxKind.AsteriskAsteriskToken)
+  );
+}
 
 /** Parser state saved by `mark` for speculative parsing. */
 export class ParserState extends ScannerState {
@@ -430,7 +447,7 @@ export function parseSourceFile(fileName: string, text: string, options?: ParseO
 export function parseIsolatedEntityName(text: string): EntityName | undefined {
   const p = new Parser('/', '/', text, ScriptKind.JS, new ExternalModuleIndicatorOptions(false, false));
   p.nextToken();
-  const entityName = p.parseEntityName(true, undefined);
+  const entityName = p.parseEntityName(true, false, undefined);
   return p.token() === SyntaxKind.EndOfFile && p.diagnostics.length === 0 ? entityName : undefined;
 }
 
@@ -981,9 +998,13 @@ export class Parser extends ScannerErrorReporter {
       case ListElement.ClassElement:
         return this.parseClassElement();
       case ListElement.HeritageClause:
-        return this.parseHeritageClause();
+        return this.parseHeritageClause(false);
+      case ListElement.InterfaceHeritageClause:
+        return this.parseHeritageClause(true);
       case ListElement.ExpressionWithTypeArguments:
         return this.parseExpressionWithTypeArguments();
+      case ListElement.TypeHeritageClauseElement:
+        return this.parseTypeHeritageClauseElement();
       case ListElement.EnumMember:
         return this.parseEnumMember();
       case ListElement.ImportSpecifier:
@@ -2204,9 +2225,18 @@ export class Parser extends ScannerErrorReporter {
     // The name isn't parsed in an await context; the checker reports `await` names.
     const name = this.parseNameOfClassDeclarationOrExpression();
     const typeParameters = this.parseTypeParameters();
-    if (modifiers !== undefined && hasModifierOfKind(modifiers, SyntaxKind.ExportKeyword))
+    // An exported class at the top level of a module, not one nested in a block or a namespace, has its
+    // heritage clauses and members parsed in an await context.
+    if (
+      modifiers !== undefined &&
+      (this.parsingContexts & (1 << ParsingContext.SourceElements)) !== 0 &&
+      (this.parsingContexts &
+        ((1 << ParsingContext.BlockStatements) | (1 << ParsingContext.SwitchClauseStatements))) ===
+        0 &&
+      hasModifierOfKind(modifiers, SyntaxKind.ExportKeyword)
+    )
       this.setContextFlags(NodeFlags.AwaitContext, true);
-    const heritageClauses = this.parseHeritageClauses();
+    const heritageClauses = this.parseHeritageClauses(false);
     let members: NodeList;
     if (this.parseExpected(SyntaxKind.OpenBraceToken)) {
       members = this.parseList(ParsingContext.ClassMembers, ListElement.ClassElement);
@@ -2248,21 +2278,45 @@ export class Parser extends ScannerErrorReporter {
     return this.token() === SyntaxKind.ImplementsKeyword && this.lookAhead(nextTokenIsIdentifierOrKeyword);
   }
 
-  parseHeritageClauses(): NodeList | undefined {
+  parseHeritageClauses(isInterface: boolean): NodeList | undefined {
     return this.isHeritageClause()
-      ? this.parseList(ParsingContext.HeritageClauses, ListElement.HeritageClause)
+      ? this.parseList(
+          ParsingContext.HeritageClauses,
+          isInterface ? ListElement.InterfaceHeritageClause : ListElement.HeritageClause,
+        )
       : undefined;
   }
 
-  parseHeritageClause(): Node {
+  parseHeritageClause(isInterface: boolean): Node {
     const pos = this.nodePos();
     const kind = this.token();
     this.nextToken();
+    // A class's `implements` and an interface's `extends` name types: their elements are type references.
+    const isTypeClause = isInterface ? kind === SyntaxKind.ExtendsKeyword : kind === SyntaxKind.ImplementsKeyword;
     const types = this.parseDelimitedList(
       ParsingContext.HeritageClauseElement,
-      ListElement.ExpressionWithTypeArguments,
+      isTypeClause ? ListElement.TypeHeritageClauseElement : ListElement.ExpressionWithTypeArguments,
     )!;
     return this.checkJSSyntax(this.finishNode(new HeritageClause(kind, types), pos));
+  }
+
+  /** A type reference when the element is an entity name with optional type arguments, otherwise the
+   * `ExpressionWithTypeArguments`, which the checker reports. */
+  parseTypeHeritageClauseElement(): Node {
+    const pos = this.nodePos();
+    const element = this.parseExpressionWithTypeArguments() as ExpressionWithTypeArguments;
+    if (!isValidHeritageTypeReferenceExpression(element.expression)) return element;
+    const typeName = this.convertEntityNameExpressionToEntityName(element.expression);
+    return this.finishNode(new TypeReferenceNode(typeName, element.typeArguments), pos);
+  }
+
+  /** The `QualifiedName` chain for an identifier or a chain of property accesses, spanning the same text. */
+  convertEntityNameExpressionToEntityName(node: Node): Node {
+    if (node instanceof Identifier) return node;
+    const access = node as PropertyAccessExpression;
+    // The name can be a private name, as upstream's.
+    const result = new QualifiedName(this.convertEntityNameExpressionToEntityName(access.expression), access.name);
+    return this.finishNodeWithEnd(result, node.pos, node.end);
   }
 
   parseExpressionWithTypeArguments(): Node {
@@ -2556,7 +2610,7 @@ export class Parser extends ScannerErrorReporter {
     this.parseExpected(SyntaxKind.InterfaceKeyword);
     const name = this.parseIdentifier(IdentifierUse.Name);
     const typeParameters = this.parseTypeParameters();
-    const heritageClauses = this.parseHeritageClauses();
+    const heritageClauses = this.parseHeritageClauses(true);
     const members = this.parseObjectTypeMembers();
     const result = this.finishWithJSDoc(
       new InterfaceDeclaration(modifiers, name, typeParameters, heritageClauses, members),
@@ -2650,10 +2704,15 @@ export class Parser extends ScannerErrorReporter {
     } else {
       name = this.parseLiteralExpression(true);
     }
+    // `declare module "*.ext" with { type: "..." }`: the import attributes the module matches.
+    const attributes =
+      keyword === SyntaxKind.ModuleKeyword && this.parseOptional(SyntaxKind.WithKeyword)
+        ? (this.parseTypeLiteral() as TypeLiteralNode)
+        : undefined;
     let body: Node | undefined;
     if (this.token() === SyntaxKind.OpenBraceToken) body = this.parseModuleBlock();
     else this.parseSemicolon();
-    const result = this.finishWithJSDoc(new ModuleDeclaration(modifiers, keyword, name, body), pos, jsdoc);
+    const result = this.finishWithJSDoc(new ModuleDeclaration(modifiers, keyword, name, attributes, body), pos, jsdoc);
     this.statementHasAwaitIdentifier = saveHasAwaitIdentifier;
     return result;
   }
@@ -2696,7 +2755,7 @@ export class Parser extends ScannerErrorReporter {
     } else {
       body = this.parseModuleBlock();
     }
-    const result = this.finishWithJSDoc(new ModuleDeclaration(modifiers, keyword, name, body), pos, jsdoc);
+    const result = this.finishWithJSDoc(new ModuleDeclaration(modifiers, keyword, name, undefined, body), pos, jsdoc);
     this.checkJSSyntax(result);
     this.statementHasAwaitIdentifier = saveHasAwaitIdentifier;
     return result;
@@ -2711,6 +2770,7 @@ export class Parser extends ScannerErrorReporter {
     const afterImportPos = this.nodePos();
     // The identifier isn't parsed in an await context; the checker reports `await`.
     const saveHasAwaitIdentifier = this.statementHasAwaitIdentifier;
+    const phaseModifierCandidate = this.currentImportPhaseModifier();
     let identifier = this.isIdentifier() ? this.parseIdentifier(IdentifierUse.Name) : undefined;
     let phaseModifier = SyntaxKind.Unknown;
     if (
@@ -2722,20 +2782,19 @@ export class Parser extends ScannerErrorReporter {
     ) {
       phaseModifier = SyntaxKind.TypeKeyword;
       identifier = this.isIdentifier() ? this.parseIdentifier(IdentifierUse.Name) : undefined;
-    } else if (identifier !== undefined && identifier.text === 'defer') {
-      const shouldParseAsDeferModifier =
-        this.token() === SyntaxKind.FromKeyword
-          ? !this.lookAhead(nextTokenIsTokenStringLiteral)
-          : this.token() !== SyntaxKind.CommaToken && this.token() !== SyntaxKind.EqualsToken;
-      if (shouldParseAsDeferModifier) {
-        phaseModifier = SyntaxKind.DeferKeyword;
-        identifier = this.isIdentifier() ? this.parseIdentifier(IdentifierUse.Name) : undefined;
-      }
+    } else if (
+      identifier !== undefined &&
+      phaseModifierCandidate !== SyntaxKind.Unknown &&
+      this.shouldParseImportPhaseModifier()
+    ) {
+      phaseModifier = phaseModifierCandidate;
+      identifier = this.isIdentifier() ? this.parseIdentifier(IdentifierUse.Name) : undefined;
     }
     if (
       identifier !== undefined &&
       !this.tokenAfterImportedIdentifierDefinitelyProducesImportDeclaration() &&
-      phaseModifier !== SyntaxKind.DeferKeyword
+      phaseModifier !== SyntaxKind.DeferKeyword &&
+      phaseModifier !== SyntaxKind.SourceKeyword
     ) {
       const importEquals = this.checkJSSyntax(
         this.parseImportEqualsDeclaration(pos, jsdoc, modifiers, identifier, phaseModifier === SyntaxKind.TypeKeyword),
@@ -2763,6 +2822,30 @@ export class Parser extends ScannerErrorReporter {
     return this.token() === SyntaxKind.AsteriskToken || this.token() === SyntaxKind.OpenBraceToken;
   }
 
+  /** In `import defer ___` or `import source ___`, whether `defer` or `source` is a phase modifier rather than the
+   * default import's name. */
+  shouldParseImportPhaseModifier(): boolean {
+    switch (this.token()) {
+      case SyntaxKind.CommaToken:
+      case SyntaxKind.EqualsToken:
+        return false;
+      case SyntaxKind.FromKeyword:
+        return !this.lookAhead(nextTokenIsTokenStringLiteral);
+    }
+    return true;
+  }
+
+  /** The phase modifier the current token's text spells, written without escapes, or `Unknown`. */
+  currentImportPhaseModifier(): SyntaxKind {
+    switch (this.scanner.getTokenText()) {
+      case 'defer':
+        return SyntaxKind.DeferKeyword;
+      case 'source':
+        return SyntaxKind.SourceKeyword;
+    }
+    return SyntaxKind.Unknown;
+  }
+
   /** In `import id ___`, whether the token makes this an ImportDeclaration rather than ImportEqualsDeclaration. */
   tokenAfterImportedIdentifierDefinitelyProducesImportDeclaration(): boolean {
     return this.token() === SyntaxKind.CommaToken || this.token() === SyntaxKind.FromKeyword;
@@ -2788,7 +2871,7 @@ export class Parser extends ScannerErrorReporter {
   parseModuleReference(): Node {
     if (this.token() === SyntaxKind.RequireKeyword && this.lookAhead(nextTokenIsOpenParen))
       return this.parseExternalModuleReference();
-    return this.parseEntityName(false, undefined);
+    return this.parseEntityName(false, false, undefined);
   }
 
   parseExternalModuleReference(): Node {
@@ -2826,6 +2909,9 @@ export class Parser extends ScannerErrorReporter {
       this.parseExpected(SyntaxKind.FromKeyword);
       return importClause;
     }
+    // A phase modifier without bindings still makes an import clause; the checker reports it.
+    if (phaseModifier === SyntaxKind.DeferKeyword || phaseModifier === SyntaxKind.SourceKeyword)
+      return this.finishNode(new ImportClause(phaseModifier, undefined, undefined), pos) as ImportClause;
     return undefined;
   }
 
@@ -3391,12 +3477,16 @@ export class Parser extends ScannerErrorReporter {
   }
 
   parseEntityNameOfTypeReference(): EntityName {
-    return this.parseEntityName(true, Diagnostics.Type_expected);
+    return this.parseEntityName(true, false, Diagnostics.Type_expected);
   }
 
-  /** An entity name; `use` is for its first identifier, the qualified names' right sides are names. */
+  /**
+   * An entity name; `use` is for its first identifier, the qualified names' right sides are names.
+   * Only a type query allows private names on the right (`typeof this.#x`).
+   */
   parseEntityName(
     allowReservedWords: boolean,
+    allowPrivateName: boolean,
     diagnosticMessage: DiagnosticMessage | undefined,
     use: IdentifierUse = IdentifierUse.Name,
   ): EntityName {
@@ -3408,7 +3498,7 @@ export class Parser extends ScannerErrorReporter {
       // A JSDoc-style generic; the checker reports the gap between the name and the type arguments.
       if (this.token() === SyntaxKind.LessThanToken) break;
       entity = this.finishNode(
-        new QualifiedName(entity, this.parseRightSideOfDotIdentifier(allowReservedWords, true)),
+        new QualifiedName(entity, this.parseRightSideOfDot(allowReservedWords, allowPrivateName, true)),
         pos,
       );
     }
@@ -3614,7 +3704,7 @@ export class Parser extends ScannerErrorReporter {
   parseTypeQuery(): TypeNode {
     const pos = this.nodePos();
     this.parseExpected(SyntaxKind.TypeOfKeyword);
-    const entityName = this.parseEntityName(true, undefined, IdentifierUse.Reference);
+    const entityName = this.parseEntityName(true, true, undefined, IdentifierUse.Reference);
     // ASI: don't parse the next line's type arguments as part of an instantiation expression.
     const typeArguments = this.hasPrecedingLineBreak() ? undefined : this.parseTypeArguments();
     return this.finishNode(new TypeQueryNode(entityName, typeArguments), pos);
@@ -4736,15 +4826,13 @@ export class Parser extends ScannerErrorReporter {
       // Take a left-associative operator when its precedence is higher than the current one (so
       // `a - b - c` returns `b` as the right operand of the first `-`), and `**` (right
       // associative) when it is at least as high.
-      const consumeCurrentOperator =
-        operator === SyntaxKind.AsteriskAsteriskToken ? newPrecedence >= precedence : newPrecedence > precedence;
-      if (!consumeCurrentOperator) break;
+      if (!shouldConsumeBinaryOperator(operator, newPrecedence, precedence)) break;
       if (operator === SyntaxKind.InKeyword && this.inDisallowInContext()) break;
       if (operator === SyntaxKind.AsKeyword || operator === SyntaxKind.SatisfiesKeyword) {
         // ASI applies before `as`: `var x = foo \n as (Bar)` is a declaration and a call to `as`.
         if (this.hasPrecedingLineBreak()) break;
         this.nextToken();
-        // In `a ## b as T`, stop at a following operator with a higher precedence than `##`: the
+        // In `a ## b as T $$ c`, stop when `$$` would bind before `##` once the `as` is erased: the
         // `as` couldn't be erased without changing the meaning (TypeScript#63527).
         const lastPrecedence =
           lastOperand instanceof BinaryExpression
@@ -4754,7 +4842,8 @@ export class Parser extends ScannerErrorReporter {
           operator === SyntaxKind.SatisfiesKeyword
             ? this.makeSatisfiesExpression(leftOperand, this.parseType())
             : this.makeAsExpression(leftOperand, this.parseType());
-        if (getBinaryOperatorPrecedence(this.reScanGreaterThanToken()) > lastPrecedence) break;
+        const nextOperator = this.reScanGreaterThanToken();
+        if (shouldConsumeBinaryOperator(nextOperator, getBinaryOperatorPrecedence(nextOperator), lastPrecedence)) break;
       } else {
         leftOperand = this.makeBinaryExpression(
           leftOperand,
@@ -5170,8 +5259,9 @@ export class Parser extends ScannerErrorReporter {
     if (this.token() === SyntaxKind.EqualsToken) {
       if (this.scanJsxAttributeValue() === SyntaxKind.StringLiteral) return this.parseLiteralExpression(false);
       if (this.token() === SyntaxKind.OpenBraceToken) return this.parseJsxExpression(true);
+      // An attribute value is a single element: sibling-element recovery must not wrap it in a binary expression.
       if (this.token() === SyntaxKind.LessThanToken)
-        return this.parseJsxElementOrSelfClosingElementOrFragment(true, -1, undefined, false);
+        return this.parseJsxElementOrSelfClosingElementOrFragment(true, -1, undefined, true);
       this.parseErrorAtCurrentToken(Diagnostics.X_or_JSX_element_expected);
     }
     return undefined;
@@ -5290,9 +5380,9 @@ export class Parser extends ScannerErrorReporter {
         // An `import.*` meta property, such as `import.meta`.
         this.nextToken();
         this.nextToken();
-        const name = this.parseIdentifierName(IdentifierUse.Name);
+        const name = this.parseImportMetaPropertyName();
         expression = this.finishNode(new MetaProperty(SyntaxKind.ImportKeyword, name), pos);
-        if (name.text === 'defer') {
+        if (isImportPhaseMetaProperty(expression)) {
           if (this.token() === SyntaxKind.OpenParenToken || this.token() === SyntaxKind.LessThanToken)
             this.sourceFlags |= NodeFlags.PossiblyContainsDynamicImport;
         } else {
@@ -5308,6 +5398,16 @@ export class Parser extends ScannerErrorReporter {
     }
     // We may have consumed the start of a call or optional expression; consume the rest.
     return this.parseCallExpressionRest(pos, expression);
+  }
+
+  /** The name after `import.`; `defer` and `source` written with escapes are reported. */
+  parseImportMetaPropertyName(): Identifier {
+    if (
+      (this.token() === SyntaxKind.DeferKeyword || this.token() === SyntaxKind.SourceKeyword) &&
+      this.currentImportPhaseModifier() === SyntaxKind.Unknown
+    )
+      this.parseErrorAtCurrentToken(Diagnostics.Keywords_cannot_contain_escape_characters);
+    return this.parseIdentifierName(IdentifierUse.Name);
   }
 
   parseSuperExpression(): Expression {
@@ -5504,13 +5604,18 @@ export class Parser extends ScannerErrorReporter {
   ): Expression {
     let argumentExpression: Expression;
     if (this.token() === SyntaxKind.CloseBracketToken) {
+      // The missing argument is created before the error, so the error marks the element access.
+      argumentExpression = this.createMissingIdentifier();
       this.parseErrorAt(
         this.nodePos(),
         this.nodePos(),
         Diagnostics.An_element_access_expression_should_take_an_argument,
       );
-      argumentExpression = this.createMissingIdentifier();
     } else {
+      // tsgo creates the missing argument first and drops it when there is one. Finishing that node takes the
+      // error flag of an error before the argument (`i[01]`), so the argument doesn't get it.
+      this.identifierCount++;
+      this.hasParseError = false;
       const argument = this.parseExpressionAllowIn();
       if (
         argument.kind === SyntaxKind.StringLiteral ||
@@ -6794,7 +6899,9 @@ export class Parser extends ScannerErrorReporter {
   }
 
   jsonError(node: Node, message: DiagnosticMessage): void {
-    this.diagnostics.push(new Diagnostic(undefined, skipTrivia(this.sourceText, node.pos), node.end, message, noArgs));
+    // A missing node (a property without a value) keeps its position: trivia after it isn't its own.
+    const pos = nodeIsMissing(node) ? node.pos : skipTrivia(this.sourceText, node.pos);
+    this.diagnostics.push(new Diagnostic(undefined, pos, node.end, message, noArgs));
   }
 
   validateJsonValue(sourceFile: SourceFile, value: Node): void {
@@ -7166,6 +7273,16 @@ function nextTokenIsIdentifier(p: Parser): boolean {
 
 function nextTokenIsOpenParen(p: Parser): boolean {
   return p.nextToken() === SyntaxKind.OpenParenToken;
+}
+
+/** An identifier or a chain of property accesses without optional chaining, each name present. */
+function isValidHeritageTypeReferenceExpression(node: Node): boolean {
+  if (node instanceof Identifier) return nodeIsPresent(node);
+  if (!(node instanceof PropertyAccessExpression) || (node.flags & NodeFlags.OptionalChain) !== 0) return false;
+  return (
+    nodeIsPresent((node as PropertyAccessExpression).name) &&
+    isValidHeritageTypeReferenceExpression((node as PropertyAccessExpression).expression)
+  );
 }
 
 function nextTokenIsOpenBrace(p: Parser): boolean {
@@ -7753,7 +7870,7 @@ export function isNodeCoreModule(moduleName: string): boolean {
 }
 
 // `require('module').builtinModules`, without and with only the `node:` prefix.
-const unprefixedNodeCoreModules = new Set<string>([
+export const unprefixedNodeCoreModules = new Set<string>([
   'assert',
   'assert/strict',
   'async_hooks',
@@ -7810,7 +7927,7 @@ const unprefixedNodeCoreModules = new Set<string>([
   'zlib',
 ]);
 
-const exclusivelyPrefixedNodeCoreModules = new Set<string>([
+export const exclusivelyPrefixedNodeCoreModules = new Set<string>([
   'node:quic',
   'node:sea',
   'node:sqlite',

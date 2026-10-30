@@ -89,6 +89,7 @@ import {
   createArrayType,
   isTupleType,
   newObjectType,
+  unionContainsTypeOrPrimitive,
 } from './checker-type-factory.js';
 import {
   areTypesComparable,
@@ -119,7 +120,7 @@ import {
   getInferenceContext,
   isContextSensitiveFunctionOrObjectLiteralMethod,
 } from './checker-contextual.js';
-import { instantiateType } from './instantiation.js';
+import { instantiateType, isNodeDescendantOf } from './instantiation.js';
 import { IterationUse, checkIteratedTypeOrElementType } from './checker-iteration.js';
 import { checkSuperExpression } from './checker-super.js';
 import { getSymbolNameForPrivateIdentifier } from './binder.js';
@@ -160,7 +161,7 @@ import {
   getRangeOfTokenAtPosition,
   getSourceFileOfNode,
 } from './binder-utilities.js';
-import { getDeclaredTypeOfSymbol, isConstructorType } from './checker-declared-types.js';
+import { getDeclaredTypeOfSymbol, getParentOfSymbol, isConstructorType } from './checker-declared-types.js';
 import {
   getErasedSignature,
   getReturnTypeFromAnnotation,
@@ -946,6 +947,16 @@ function getTypeOfDottedName(c: Checker, node: Node): Type | undefined {
 
 function getExplicitTypeOfSymbol(c: Checker, original: Symbol): Type | undefined {
   const symbol = resolveSymbol(c, original) ?? original;
+  // `for (const x of x.y)` asks for the explicit type of `x` while finding it.
+  const resolving = c.resolvingExplicitTypeOfSymbol;
+  if (resolving.has(symbol)) return undefined;
+  resolving.add(symbol);
+  const result = getExplicitTypeOfResolvedSymbol(c, symbol);
+  resolving.delete(symbol);
+  return result;
+}
+
+function getExplicitTypeOfResolvedSymbol(c: Checker, symbol: Symbol): Type | undefined {
   if ((symbol.flags & (SymbolFlags.Function | SymbolFlags.Method | SymbolFlags.Class | SymbolFlags.ValueModule)) !== 0)
     return getTypeOfSymbol(c, symbol);
   if ((symbol.flags & (SymbolFlags.Variable | SymbolFlags.Property)) !== 0) {
@@ -1194,7 +1205,7 @@ function writeFlowCacheKey(
       return writeFlowCacheKey(c, getExpression(node)!, declaredType, initialType, flowContainer);
     case SyntaxKind.QualifiedName: {
       const left = writeFlowCacheKey(c, (node as QualifiedName).left, declaredType, initialType, flowContainer);
-      return left === undefined ? undefined : left + '.' + (node as QualifiedName).right.text;
+      return left === undefined ? undefined : left + '.' + getText((node as QualifiedName).right);
     }
     case SyntaxKind.PropertyAccessExpression:
     case SyntaxKind.ElementAccessExpression: {
@@ -1556,6 +1567,10 @@ function narrowTypeByEqualityWorker(
         return valueType;
       if ((valueType.flags & TypeFlags.Object) !== 0) return c.nonPrimitiveType;
     }
+    if (!doubleEquals && (valueType.flags & TypeFlags.Primitive) !== 0 && isUniformUnionType(c, t)) {
+      const regularType = getRegularTypeOfLiteralType(c, valueType);
+      if (unionContainsTypeOrPrimitive(c, t as UnionType, regularType, false)) return regularType;
+    }
     const filtered = filterType(
       c,
       t,
@@ -1563,9 +1578,45 @@ function narrowTypeByEqualityWorker(
     );
     return replacePrimitivesWithLiterals(c, filtered, valueType);
   }
-  if (isUnitType(valueType))
+  if (isUnitType(valueType)) {
+    if (isUniformUnionType(c, t)) {
+      const filtered = removeType(c, t, getRegularTypeOfLiteralType(c, valueType));
+      if (filtered !== t) return filtered;
+    }
     return filterType(c, t, (u) => !(isUnitLikeType(u) && areTypesComparable(c, u, valueType)));
+  }
   return t;
+}
+
+/**
+ * Whether `t` is a primitive union in which no two literal constituents are comparable: it has no
+ * literals of two enums, and not both enum literals and string or number literals. Comparing such a
+ * union with one of its literals matches only that literal.
+ */
+function isUniformUnionType(c: Checker, t: Type): boolean {
+  if ((t.objectFlags & ObjectFlags.PrimitiveUnion) === 0) return false;
+  const side = sideOf(c, t);
+  if ((side.objectFlags & ObjectFlags.IsUniformEnumComputed) === 0)
+    side.objectFlags |=
+      ObjectFlags.IsUniformEnumComputed | (computeIsUniformUnionType(c, typesOf(t)) ? ObjectFlags.IsUniformEnum : 0);
+  return (side.objectFlags & ObjectFlags.IsUniformEnum) !== 0;
+}
+
+function computeIsUniformUnionType(c: Checker, types: readonly Type[]): boolean {
+  let enumSymbol: Symbol | undefined;
+  let hasStringOrNumberLiteral = false;
+  for (const t of types) {
+    if ((t.flags & TypeFlags.EnumLike) !== 0) {
+      if (hasStringOrNumberLiteral) return false;
+      const parent = getParentOfSymbol(c, t.symbol!);
+      if (enumSymbol === undefined) enumSymbol = parent;
+      else if (enumSymbol !== parent) return false;
+    } else if ((t.flags & TypeFlags.StringOrNumberLiteral) !== 0) {
+      if (enumSymbol !== undefined) return false;
+      hasStringOrNumberLiteral = true;
+    }
+  }
+  return true;
 }
 
 function isCoercibleUnderDoubleEquals(source: Type, target: Type): boolean {
@@ -2184,14 +2235,20 @@ function narrowTypeBySwitchOnDiscriminantWorker(c: Checker, t: Type, flow: FlowS
     return getUnionType(c, ground);
   }
   const discriminantType = getUnionType(c, clauseTypes);
-  const caseType =
-    (discriminantType.flags & TypeFlags.Never) !== 0
-      ? c.neverType
-      : replacePrimitivesWithLiterals(
-          c,
-          filterType(c, t, (u) => areTypesComparable(c, discriminantType, u)),
-          discriminantType,
-        );
+  let caseType: Type | undefined;
+  if ((discriminantType.flags & TypeFlags.Never) !== 0) caseType = c.neverType;
+  else {
+    if ((discriminantType.flags & TypeFlags.Primitive) !== 0 && isUniformUnionType(c, t)) {
+      const regularType = getRegularTypeOfLiteralType(c, discriminantType);
+      if (unionContainsTypeOrPrimitive(c, t as UnionType, regularType, false)) caseType = regularType;
+    }
+    if (caseType === undefined)
+      caseType = replacePrimitivesWithLiterals(
+        c,
+        filterType(c, t, (u) => areTypesComparable(c, discriminantType, u)),
+        discriminantType,
+      );
+  }
   if (!hasDefaultClause) return caseType;
   const defaultType = filterType(c, t, (u) => {
     const unit = extractUnitType(u);
@@ -2400,7 +2457,7 @@ export function isMatchingReference(c: Checker, source: Node, target: Node): boo
         const targetName = getAccessedPropertyName(c, target);
         if (targetName !== undefined)
           return (
-            (source as QualifiedName).right.text === targetName &&
+            getText((source as QualifiedName).right) === targetName &&
             isMatchingReference(c, (source as QualifiedName).left, getExpression(target)!)
           );
       }
@@ -2416,10 +2473,16 @@ export function isMatchingReference(c: Checker, source: Node, target: Node): boo
 
 /** Whether `expr` is `reference.constructor`. */
 function isMatchingConstructorReference(c: Checker, f: FlowState, expr: Node): boolean {
+  // Only a literal name is read here; resolving an entity name argument could start a circularity.
+  let name: Node | undefined = undefined;
+  if (expr.kind === SyntaxKind.PropertyAccessExpression) name = (expr as PropertyAccessExpression).name;
+  else if (
+    expr.kind === SyntaxKind.ElementAccessExpression &&
+    isStringLiteralLike((expr as ElementAccessExpression).argumentExpression)
+  )
+    name = (expr as ElementAccessExpression).argumentExpression;
   return (
-    isAccessExpression(expr) &&
-    getAccessedPropertyName(c, expr) === 'constructor' &&
-    isMatchingReference(c, f.reference, getExpression(expr)!)
+    name !== undefined && getText(name) === 'constructor' && isMatchingReference(c, f.reference, getExpression(expr)!)
   );
 }
 
@@ -2646,7 +2709,11 @@ function isCallChain(node: Node): boolean {
 // ---- Reachability
 
 export function isReachableFlowNode(c: Checker, flow: FlowNode): boolean {
+  // The reduce labels of an enclosing flow analysis don't apply.
+  const outerReduceLabels = c.flowReduceLabels;
+  if (outerReduceLabels.length !== 0) c.flowReduceLabels = [];
   const result = isReachableFlowNodeWorker(c, flow, false);
+  c.flowReduceLabels = outerReduceLabels;
   c.lastFlowNode = flow;
   c.lastFlowNodeReachable = result;
   return result;
@@ -2659,7 +2726,8 @@ function isReachableFlowNodeWorker(c: Checker, start: FlowNode, noCacheCheckIn: 
     if (flow === c.lastFlowNode) return c.lastFlowNodeReachable;
     const flags = flow.flags;
     if ((flags & FlowFlags.Shared) !== 0) {
-      if (!noCacheCheck) {
+      // A result found through a reduce label holds only for that label's antecedents.
+      if (!noCacheCheck && c.flowReduceLabels.length === 0) {
         const cached = c.flowNodeReachable.get(flow);
         if (cached !== undefined) return cached;
         const reachable = isReachableFlowNodeWorker(c, flow, true);
@@ -2829,7 +2897,6 @@ function findFunctionOrSourceFile(node: Node | undefined): Node | undefined {
 }
 
 function ensureAssignmentsMarked(c: Checker, symbol: Symbol): void {
-  if (c.symbolLinks(symbol).lastAssignmentPos !== 0) return;
   const parent = findFunctionOrSourceFile(symbol.valueDeclaration);
   if (parent === undefined) return;
   const links = c.nodeLinks(parent);
@@ -3142,12 +3209,25 @@ export function getNarrowedTypeOfSymbol(c: Checker, symbol: Symbol, location: No
     )
   )
     return t;
+  // A reference in the declaration's own initializer would need the declaration's type; defaults of
+  // the binding elements and nested functions are narrowed.
+  const rootInitializer = getInitializer(rootDeclaration);
+  if (
+    rootInitializer !== undefined &&
+    location.pos >= rootInitializer.pos &&
+    location.end <= rootInitializer.end &&
+    isNodeDescendantOf(location, rootInitializer) &&
+    getControlFlowContainer(declaration) === getControlFlowContainer(location)
+  )
+    return t;
   const links = c.nodeLinks(parent);
   if ((links.flags & NodeCheckFlags.InCheckIdentifier) !== 0) return t;
   links.flags |= NodeCheckFlags.InCheckIdentifier;
   let result = t;
   const parentType = getTypeForBindingElementParent(c, parent, CheckMode.Normal);
   const parentTypeConstraint = parentType !== undefined ? mapToBaseConstraintOrType(c, parentType) : undefined;
+  // Only the parent's type is guarded; flow analysis may narrow the binding elements again.
+  links.flags &= ~NodeCheckFlags.InCheckIdentifier;
   if (
     parentTypeConstraint !== undefined &&
     (parentTypeConstraint.flags & TypeFlags.Union) !== 0 &&
@@ -3167,7 +3247,6 @@ export function getNarrowedTypeOfSymbol(c: Checker, symbol: Symbol, location: No
         ? c.neverType
         : getBindingElementTypeFromParentType(c, declaration as BindingElement, narrowedType, true);
   }
-  links.flags &= ~NodeCheckFlags.InCheckIdentifier;
   return result;
 }
 

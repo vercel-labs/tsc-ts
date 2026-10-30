@@ -295,8 +295,8 @@ export function isIdentifierPart(codePoint: number, languageVariant = LanguageVa
     isWordCharacter(codePoint) ||
     codePoint === CharacterCodes.$ ||
     (codePoint > CharacterCodes.maxAsciiCharacter && isUnicodeIdentifierPart(codePoint)) ||
-    (languageVariant === LanguageVariant.JSX &&
-      (codePoint === CharacterCodes.minus || codePoint === CharacterCodes.colon))
+    // `:` is part of a JSX namespaced name, but not of a JSX identifier.
+    (languageVariant === LanguageVariant.JSX && codePoint === CharacterCodes.minus)
   );
 }
 

@@ -64,6 +64,8 @@ export abstract class System extends CommandLineHost {
 
   /** Returns `''` for unset variables. */
   abstract getEnvironmentVariable(name: string): string;
+  /** Whether the variable is set, perhaps to `''`. */
+  abstract hasEnvironmentVariable(name: string): boolean;
   abstract write(text: string): void;
   abstract fileExists(path: string): boolean;
   abstract directoryExists(path: string): boolean;

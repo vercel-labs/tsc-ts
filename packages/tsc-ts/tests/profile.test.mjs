@@ -4,16 +4,19 @@ import test from 'node:test';
 import { FAIL_BELOW, WARN_BELOW, judgeProfileMatch, parseProfileReport } from '../scripts/profile-match.mjs';
 import { SINGLE_PHASE_PROFILE, TWO_PHASE_PROFILE, profileInfoPath } from '../scripts/profile-phases.mjs';
 
-// build:native optimizes with profiles/tsc-ts.profdata. Functions whose generated code differs between scriptc
-// versions lose their profile data, so the profile is collected again when the pinned scriptc changes
-// (npm run refresh-profile, which records its scriptc in profiles/tsc-ts.json).
-test('the committed profile was collected with the pinned scriptc', () => {
+// build:native optimizes with profiles/tsc-ts.cs.profdata when the pinned scriptc has a second profile phase, and with
+// profiles/tsc-ts.profdata otherwise. Functions whose generated code differs between scriptc versions lose their
+// profile data, so the profile the pinned scriptc builds with is collected again when it changes (npm run
+// refresh-profile, which records its scriptc in profiles/tsc-ts.cs.json or profiles/tsc-ts.json).
+test('the profile the pinned scriptc builds with was collected with it', () => {
   const pinned = JSON.parse(readFileSync('../../package.json', 'utf8')).devDependencies.scriptc;
-  const collected = JSON.parse(readFileSync('profiles/tsc-ts.json', 'utf8')).scriptc;
-  assert.equal(
-    collected,
-    pinned,
-    `profiles/tsc-ts.profdata was collected with scriptc ${collected}, but package.json pins ${pinned}: run npm run refresh-profile`,
+  const collected = [TWO_PHASE_PROFILE, SINGLE_PHASE_PROFILE].map((profile) => ({
+    profile,
+    scriptc: JSON.parse(readFileSync(profileInfoPath(profile), 'utf8')).scriptc,
+  }));
+  assert.ok(
+    collected.some((c) => c.scriptc === pinned),
+    `package.json pins scriptc ${pinned}, but ${collected.map((c) => `${c.profile} was collected with ${c.scriptc}`).join(' and ')}: run npm run refresh-profile`,
   );
 });
 

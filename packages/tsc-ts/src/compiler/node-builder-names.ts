@@ -36,11 +36,24 @@ import {
   getSourceFileOfNode,
   isModuleAugmentationExternal,
 } from './binder-utilities.js';
-import { getExternalModuleName, isAmbientModule, isGlobalScopeAugmentation, isRequireCall } from './ast-utilities.js';
+import {
+  getExternalModuleName,
+  isAmbientModule,
+  isGlobalScopeAugmentation,
+  isImportCall,
+  isRequireCall,
+} from './ast-utilities.js';
 import { getSymbolAtLocation } from './checker-services.js';
 import { checkExpression } from './checker-expressions.js';
-import { getExportsOfSymbol, getMembersOfSymbol, isAmbientModuleSymbolName, resolveAlias } from './checker-symbols.js';
-import { compareSymbols } from './checker-type-factory.js';
+import { getExportsOfSymbol, getMembersOfSymbol, getMergedSymbol, resolveAlias } from './checker-symbols.js';
+import {
+  getImportAttributesTypeForModuleSpecifier,
+  getTypeOfModuleImportAttributes,
+  resolveExternalModule,
+} from './checker-modules.js';
+import { getPropertiesOfType } from './checker-members.js';
+import { getTypeOfSymbol } from './checker-symbol-types.js';
+import { compareSymbols, isEmptyObjectType } from './checker-type-factory.js';
 import { TypeFlags, type LiteralType, type Type } from './checker-types.js';
 import { isLateBoundName } from './checker-utilities.js';
 import { isExternalModuleNameRelative, pathIsRelative } from './path.js';
@@ -67,6 +80,7 @@ import {
   getQualifiedLeftMeaning,
   getSymbolIfSameReference,
   hasNonGlobalAugmentationExternalModuleDeclaration,
+  isSymbolAccessibleByFlags,
   needsQualification,
 } from './symbol-accessibility.js';
 import { SyntaxKind } from './syntax-kind.js';
@@ -82,6 +96,7 @@ import {
   InternalSymbolName,
   type Symbol,
   SymbolFlags,
+  tryGetAmbientModuleNameFromSymbolName,
 } from './symbol.js';
 
 // ---- Symbol chains
@@ -94,6 +109,16 @@ export function lookupSymbolChain(
   yieldModuleSymbol: boolean,
 ): Symbol[] {
   b.trackSymbol(symbol, b.enclosingDeclaration, meaning);
+  return lookupSymbolChainWorker(b, symbol, meaning, yieldModuleSymbol);
+}
+
+/** `lookupSymbolChain` without tracking the symbol's accessibility. */
+function lookupSymbolChainWorker(
+  b: NodeBuilder,
+  symbol: Symbol,
+  meaning: SymbolFlags,
+  yieldModuleSymbol: boolean,
+): Symbol[] {
   // Qualified only with somewhere to qualify from, and never for type parameters.
   if (
     (symbol.flags & SymbolFlags.TypeParameter) === 0 &&
@@ -132,7 +157,7 @@ function getSymbolChain(
         order.push(specifiers.length);
         specifiers.push(
           hasNonGlobalAugmentationExternalModuleDeclaration(p)
-            ? getSpecifierForModuleSymbol(b, p, ModuleKind.None)
+            ? getSpecifierForModuleSymbol(b, p, ModuleKind.None).specifier
             : '',
         );
       }
@@ -197,8 +222,8 @@ export function symbolToTypeNode(
     const nonRootParts =
       chain.length > 1 ? createAccessFromSymbolChain(b, chain, chain.length - 1, 1, typeArguments) : undefined;
     const typeParameterNodes = typeArguments ?? lookupTypeParameterNodes(b, chain, 0);
-    let specifier = '';
-    let attributes: ImportAttributes | undefined = undefined;
+    let specifier = new ModuleSpecifierResult('', undefined);
+    let importModeOverride = ModuleKind.None;
     const c = b.c;
     const resolution = getModuleResolutionKind(c.compilerOptions);
     const nodeNext = resolution === ModuleResolutionKind.Node16 || resolution === ModuleResolutionKind.NodeNext;
@@ -213,29 +238,33 @@ export function symbolToTypeNode(
         const targetFormat = c.host.getEmitModuleFormatOfFile(targetFile);
         if (targetFormat === ModuleKind.ESNext && targetFormat !== c.host.getEmitModuleFormatOfFile(contextFile)) {
           specifier = getSpecifierForModuleSymbol(b, chain[0]!, ModuleKind.ESNext);
-          attributes = resolutionModeAttributes(b, 'import');
+          importModeOverride = ModuleKind.ESNext;
         }
       }
     }
-    if (specifier === '') specifier = getSpecifierForModuleSymbol(b, chain[0]!, ModuleKind.None);
-    if ((b.flags & NodeBuilderFlags.AllowNodeModulesRelativePaths) === 0 && specifier.includes('/node_modules/')) {
+    if (specifier.specifier === '') specifier = getSpecifierForModuleSymbol(b, chain[0]!, ModuleKind.None);
+    if (
+      (b.flags & NodeBuilderFlags.AllowNodeModulesRelativePaths) === 0 &&
+      specifier.specifier.includes('/node_modules/')
+    ) {
       const oldSpecifier = specifier;
       if (nodeNext && contextFile !== undefined) {
         // The other mode may reach the module portably.
         const swappedMode =
           c.host.getEmitModuleFormatOfFile(contextFile) === ModuleKind.ESNext ? ModuleKind.CommonJS : ModuleKind.ESNext;
         specifier = getSpecifierForModuleSymbol(b, chain[0]!, swappedMode);
-        if (specifier.includes('/node_modules/')) specifier = oldSpecifier;
-        else attributes = resolutionModeAttributes(b, swappedMode === ModuleKind.ESNext ? 'import' : 'require');
+        if (specifier.specifier.includes('/node_modules/')) specifier = oldSpecifier;
+        else importModeOverride = swappedMode;
       }
-      if (attributes === undefined) {
+      if (importModeOverride === ModuleKind.None) {
         // A reference into `node_modules` is likely to break when published.
         b.encounteredError = true;
-        b.tracker.reportLikelyUnsafeImportRequiredError(oldSpecifier, symbol.name);
+        b.tracker.reportLikelyUnsafeImportRequiredError(oldSpecifier.specifier, symbol.name);
       }
     }
-    const literal = b.created(new LiteralTypeNode(b.stringLiteral(specifier, false)));
-    b.approximateLength += specifier.length + 10;
+    const attributes = createImportAttributesForModuleSpecifier(b, specifier, importModeOverride);
+    const literal = b.created(new LiteralTypeNode(b.stringLiteral(specifier.specifier, false)));
+    b.approximateLength += specifier.specifier.length + 10;
     if (nonRootParts === undefined || isEntityName(nonRootParts))
       return b.created(new ImportTypeNode(isTypeOf, literal, attributes, nonRootParts, typeParameterNodes));
     const splitNode = getTopmostIndexedAccessType(nonRootParts as IndexedAccessTypeNode);
@@ -263,12 +292,48 @@ function isEntityName(node: Node): boolean {
   return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.QualifiedName;
 }
 
-/** `with { "resolution-mode": "import" }` or `"require"`. */
-function resolutionModeAttributes(b: NodeBuilder, mode: string): ImportAttributes {
-  const attribute = b.created(
-    new ImportAttribute(b.stringLiteral('resolution-mode', false), b.stringLiteral(mode, false)),
-  );
-  return b.created(new ImportAttributes(SyntaxKind.WithKeyword, b.list([attribute]), false));
+/**
+ * The attributes of an `import()` type: a `resolution-mode` for `importModeOverride`, then the
+ * string literal properties of the specifier's import attributes type, by name.
+ */
+function createImportAttributesForModuleSpecifier(
+  b: NodeBuilder,
+  result: ModuleSpecifierResult,
+  importModeOverride: ModuleKind,
+): ImportAttributes | undefined {
+  const c = b.c;
+  const attributesType = result.importAttributesType;
+  const isEmptyAttributesType = attributesType === undefined || isEmptyObjectType(c, attributesType);
+  if (isEmptyAttributesType && importModeOverride === ModuleKind.None) return undefined;
+  const attributes: Node[] = [];
+  if (importModeOverride !== ModuleKind.None) {
+    const mode = importModeOverride === ModuleKind.ESNext ? 'import' : 'require';
+    attributes.push(
+      b.created(new ImportAttribute(b.stringLiteral('resolution-mode', false), b.stringLiteral(mode, false))),
+    );
+    b.approximateLength += 'resolution-mode'.length + mode.length + 6;
+  }
+  if (!isEmptyAttributesType) {
+    const properties = getPropertiesOfType(c, attributesType).slice();
+    properties.sort((x: Symbol, y: Symbol) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+    for (const property of properties) {
+      const name = property.name;
+      const propertyType = getTypeOfSymbol(c, property);
+      if ((propertyType.flags & TypeFlags.StringLiteral) === 0) continue;
+      const value = (propertyType as LiteralType).stringValue;
+      let nameNode: Node;
+      if (isIdentifierText(name)) nameNode = b.factory.createIdentifier(name);
+      else {
+        nameNode = b.stringLiteral(name, false);
+        b.approximateLength += 2;
+      }
+      attributes.push(b.created(new ImportAttribute(nameNode, b.stringLiteral(value, false))));
+      b.approximateLength += name.length + value.length + 4;
+    }
+  }
+  if (attributes.length === 0) return undefined;
+  b.approximateLength += 16 + 2 * (attributes.length - 1);
+  return b.created(new ImportAttributes(SyntaxKind.WithKeyword, b.list(attributes), false));
 }
 
 function getTopmostIndexedAccessType(node: IndexedAccessTypeNode): IndexedAccessTypeNode {
@@ -355,7 +420,7 @@ function createAccessFromSymbolChain(
       return b.created(new IndexedAccessTypeNode(b.created(new TypeReferenceNode(lhs, typeParameterNodes)), literal));
     }
   }
-  const identifier = b.identifier(symbolName);
+  const identifier = b.symbolIdentifier(symbolName, symbol);
   b.context.addEmitFlags(identifier, EmitFlags.NoAsciiEscaping);
   if (index > stopper) {
     const lhs = createAccessFromSymbolChain(b, chain, index - 1, stopper, overrideTypeArguments);
@@ -467,7 +532,7 @@ function createEntityNameFromSymbolChain(b: NodeBuilder, chain: Symbol[], index:
   if (index === 0) b.flags |= NodeBuilderFlags.InInitialEntityName;
   const symbolName = getNameOfSymbolAsWritten(b, symbol);
   if (index === 0) b.flags ^= NodeBuilderFlags.InInitialEntityName;
-  const identifier = b.identifier(symbolName);
+  const identifier = b.symbolIdentifier(symbolName, symbol);
   b.context.addEmitFlags(identifier, EmitFlags.NoAsciiEscaping);
   if (index > 0) return b.created(new QualifiedName(createEntityNameFromSymbolChain(b, chain, index - 1), identifier));
   return identifier;
@@ -482,7 +547,13 @@ export function symbolToEntityNameNode(b: NodeBuilder, symbol: Symbol): Node {
 }
 
 export function symbolToExpression(b: NodeBuilder, symbol: Symbol, meaning: SymbolFlags): Node {
-  const chain = lookupSymbolChain(b, symbol, meaning, false);
+  b.trackSymbol(symbol, b.enclosingDeclaration, meaning);
+  return symbolToExpressionWorker(b, symbol, meaning);
+}
+
+/** `symbolToExpression` without tracking the symbol's accessibility. */
+function symbolToExpressionWorker(b: NodeBuilder, symbol: Symbol, meaning: SymbolFlags): Node {
+  const chain = lookupSymbolChainWorker(b, symbol, meaning, false);
   return createExpressionFromSymbolChain(b, chain, chain.length - 1);
 }
 
@@ -493,7 +564,7 @@ function createExpressionFromSymbolChain(b: NodeBuilder, chain: Symbol[], index:
   let symbolName = getNameOfSymbolAsWritten(b, symbol);
   if (index === 0) b.flags ^= NodeBuilderFlags.InInitialEntityName;
   if (startsWithQuote(symbolName) && hasNonGlobalAugmentationExternalModuleDeclaration(symbol)) {
-    const specifier = getSpecifierForModuleSymbol(b, symbol, ModuleKind.None);
+    const specifier = getSpecifierForModuleSymbol(b, symbol, ModuleKind.None).specifier;
     b.approximateLength += 2 + specifier.length;
     return b.stringLiteral(specifier, false);
   }
@@ -719,7 +790,11 @@ function isSingleQuotedStringNamed(d: Node): boolean {
 }
 
 /** The name node of a property. */
-export function getPropertyNameNodeForSymbol(b: NodeBuilder, symbol: Symbol): Node {
+export function getPropertyNameNodeForSymbol(
+  b: NodeBuilder,
+  symbol: Symbol,
+  enclosingDeclaration: Node | undefined,
+): Node {
   // A private name is the declaration's.
   const valueDeclaration = symbol.valueDeclaration;
   if (valueDeclaration !== undefined) {
@@ -741,7 +816,14 @@ export function getPropertyNameNodeForSymbol(b: NodeBuilder, symbol: Symbol): No
       break;
     }
   const isMethod = (symbol.flags & SymbolFlags.Method) !== 0;
-  const fromNameType = getPropertyNameNodeForSymbolFromNameType(b, symbol, singleQuote, stringNamed, isMethod);
+  const fromNameType = getPropertyNameNodeForSymbolFromNameType(
+    b,
+    symbol,
+    enclosingDeclaration,
+    singleQuote,
+    stringNamed,
+    isMethod,
+  );
   if (fromNameType !== undefined) return fromNameType;
   let name = symbol.name;
   const privateNamePrefix = '￾#';
@@ -775,12 +857,28 @@ function createPropertyNameNodeForIdentifierOrLiteral(
 function getPropertyNameNodeForSymbolFromNameType(
   b: NodeBuilder,
   symbol: Symbol,
+  enclosingDeclaration: Node | undefined,
   singleQuote: boolean,
   stringNamed: boolean,
   isMethod: boolean,
 ): Node | undefined {
   const nameType = b.c.symbolNameTypes.get(getSymbolId(symbol));
   if (nameType === undefined) return undefined;
+  // A name from an enum member stays a computed name, `[E.A]`, where the enum can be named.
+  if ((nameType.flags & TypeFlags.EnumLiteral) !== 0) {
+    const enumEnclosingDeclaration = enclosingDeclaration !== undefined ? enclosingDeclaration : b.enclosingFile;
+    const enumSymbol = nameType.symbol!.parent !== undefined ? nameType.symbol!.parent : nameType.symbol!;
+    if (
+      enumEnclosingDeclaration !== undefined &&
+      isSymbolAccessibleByFlags(b.c, enumSymbol, enumEnclosingDeclaration, SymbolFlags.Value)
+    ) {
+      const saveEnclosingDeclaration = b.enclosingDeclaration;
+      b.enclosingDeclaration = enumEnclosingDeclaration;
+      const result = b.created(new ComputedPropertyName(symbolToExpression(b, nameType.symbol!, SymbolFlags.Value)));
+      b.enclosingDeclaration = saveEnclosingDeclaration;
+      return result;
+    }
+  }
   if ((nameType.flags & TypeFlags.StringOrNumberLiteral) !== 0) {
     const literal = nameType as LiteralType;
     const name = (nameType.flags & TypeFlags.StringLiteral) !== 0 ? literal.stringValue : String(literal.numberValue);
@@ -796,20 +894,44 @@ function getPropertyNameNodeForSymbolFromNameType(
       );
     return createPropertyNameNodeForIdentifierOrLiteral(b, name, singleQuote, stringNamed, isMethod);
   }
+  // The reference is tracked where the name is used; spelling it here must not track it in this scope.
   if ((nameType.flags & TypeFlags.UniqueESSymbol) !== 0)
-    return b.created(new ComputedPropertyName(symbolToExpression(b, nameType.symbol!, SymbolFlags.Value)));
+    return b.created(new ComputedPropertyName(symbolToExpressionWorker(b, nameType.symbol!, SymbolFlags.Value)));
   return undefined;
 }
 
 // ---- Module specifiers
 
+/** A module specifier, and the import attributes type an `import()` type with it needs. */
+export class ModuleSpecifierResult {
+  constructor(
+    readonly specifier: string,
+    readonly importAttributesType: Type | undefined,
+  ) {}
+}
+
 /**
  * The specifier an `import("…")` type names a module with: an ambient module's name, the file
  * name without an enclosing file, else what module specifier generation gives for the enclosing
- * file. `overrideImportMode` is `None` for the mode of the enclosing import or file.
+ * file. `overrideImportMode` is `None` for the mode of the enclosing import or file. A pattern
+ * ambient module's specifier comes with the attributes type that resolves it.
  */
-export function getSpecifierForModuleSymbol(b: NodeBuilder, symbol: Symbol, overrideImportMode: ModuleKind): string {
+export function getSpecifierForModuleSymbol(
+  b: NodeBuilder,
+  symbol: Symbol,
+  overrideImportMode: ModuleKind,
+): ModuleSpecifierResult {
   const c = b.c;
+  const enclosingDeclaration =
+    b.enclosingDeclaration === undefined ? undefined : b.context.mostOriginal(b.enclosingDeclaration);
+  const originalModuleSpecifier =
+    enclosingDeclaration !== undefined && canHaveModuleSpecifier(enclosingDeclaration)
+      ? tryGetModuleSpecifierFromDeclaration(enclosingDeclaration)
+      : undefined;
+  const originalImportAttributesType =
+    originalModuleSpecifier !== undefined
+      ? getImportAttributesTypeForModuleSpecifier(c, originalModuleSpecifier)
+      : undefined;
   let file = asSourceFile(getDeclarationOfKind(symbol, SyntaxKind.SourceFile));
   if (file === undefined)
     for (const d of getDeclarations(symbol)) {
@@ -819,20 +941,27 @@ export function getSpecifierForModuleSymbol(b: NodeBuilder, symbol: Symbol, over
         break;
       }
     }
-  if (file === undefined && isAmbientModuleSymbolName(symbol.name))
-    return symbol.name.substring(1, symbol.name.length - 1);
+  if (file === undefined) {
+    for (const declaration of getDeclarations(symbol))
+      if (isModuleWithStringLiteralName(declaration)) {
+        const specifier = getText(getName(declaration)!);
+        if (
+          originalImportAttributesType !== undefined &&
+          moduleSpecifierResolvesToSymbol(b, specifier, originalImportAttributesType, symbol)
+        )
+          return new ModuleSpecifierResult(specifier, originalImportAttributesType);
+        return new ModuleSpecifierResult(specifier, getTypeOfModuleImportAttributes(c, symbol));
+      }
+    const ambientName = tryGetAmbientModuleNameFromSymbolName(symbol.name);
+    if (ambientName !== undefined) return new ModuleSpecifierResult(ambientName, undefined);
+  }
   const contextFile = b.enclosingFile;
   if (contextFile === undefined) {
-    if (isAmbientModuleSymbolName(symbol.name)) return symbol.name.substring(1, symbol.name.length - 1);
+    const ambientName = tryGetAmbientModuleNameFromSymbolName(symbol.name);
+    if (ambientName !== undefined) return new ModuleSpecifierResult(ambientName, undefined);
     const moduleFile = getSourceFileOfModule(symbol);
-    return moduleFile === undefined ? '' : moduleFile.fileName;
+    return new ModuleSpecifierResult(moduleFile === undefined ? '' : moduleFile.fileName, undefined);
   }
-  const enclosingDeclaration =
-    b.enclosingDeclaration === undefined ? undefined : b.context.mostOriginal(b.enclosingDeclaration);
-  const originalModuleSpecifier =
-    enclosingDeclaration !== undefined && canHaveModuleSpecifier(enclosingDeclaration)
-      ? tryGetModuleSpecifierFromDeclaration(enclosingDeclaration)
-      : undefined;
   let resolutionMode = overrideImportMode;
   if (resolutionMode === ModuleKind.None)
     resolutionMode =
@@ -841,16 +970,57 @@ export function getSpecifierForModuleSymbol(b: NodeBuilder, symbol: Symbol, over
         : c.host.getDefaultResolutionModeForFile(contextFile);
   const key = getSymbolId(symbol) + '|' + contextFile.path + '|' + resolutionMode;
   const cached = c.moduleSpecifiers.get(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return moduleSpecifierResultForSymbol(b, cached, originalImportAttributesType, symbol);
   // Declaration emit prefers project-relative specifiers, with `.js` extensions in ES modules.
   const preferences = new ModuleSpecifierPreferences(
     'project-relative',
     resolutionMode === ModuleKind.ESNext ? 'js' : '',
   );
-  const specifiers = getModuleSpecifiers(c, symbol, contextFile, preferences, overrideImportMode);
-  const specifier = specifiers.length > 0 ? specifiers[0]! : '';
-  c.moduleSpecifiers.set(key, specifier);
-  return specifier;
+  const specifiers = getModuleSpecifiersWithAmbientModule(c, symbol, contextFile, preferences, overrideImportMode);
+  const result = new ModuleSpecifierResult(
+    specifiers.specifiers.length > 0 ? specifiers.specifiers[0]! : '',
+    specifiers.ambientModuleSymbol !== undefined
+      ? getTypeOfModuleImportAttributes(c, specifiers.ambientModuleSymbol)
+      : undefined,
+  );
+  c.moduleSpecifiers.set(key, result);
+  return moduleSpecifierResultForSymbol(b, result, originalImportAttributesType, symbol);
+}
+
+/** `result` with `importAttributesType`, if its specifier resolves to `symbol` with those attributes. */
+function moduleSpecifierResultForSymbol(
+  b: NodeBuilder,
+  result: ModuleSpecifierResult,
+  importAttributesType: Type | undefined,
+  symbol: Symbol,
+): ModuleSpecifierResult {
+  if (
+    importAttributesType !== undefined &&
+    moduleSpecifierResolvesToSymbol(b, result.specifier, importAttributesType, symbol)
+  )
+    return new ModuleSpecifierResult(result.specifier, importAttributesType);
+  return result;
+}
+
+function moduleSpecifierResolvesToSymbol(
+  b: NodeBuilder,
+  specifier: string,
+  importAttributesType: Type,
+  symbol: Symbol,
+): boolean {
+  const location = b.enclosingDeclaration ?? b.enclosingFile;
+  if (location === undefined) return false;
+  const c = b.c;
+  const resolved = resolveExternalModule(c, location, specifier, undefined, undefined, false, importAttributesType);
+  return resolved !== undefined && getMergedSymbol(c, resolved) === getMergedSymbol(c, symbol);
+}
+
+/** The specifiers of `getModuleSpecifiers`, and the ambient module symbol that gives an ambient module's name. */
+class ModuleSpecifiers {
+  constructor(
+    readonly specifiers: string[],
+    readonly ambientModuleSymbol: Symbol | undefined,
+  ) {}
 }
 
 /** Specifiers `importingFile` can import the module `moduleSymbol` with, best first. */
@@ -861,13 +1031,24 @@ export function getModuleSpecifiers(
   preferences: ModuleSpecifierPreferences,
   overrideImportMode: ModuleKind,
 ): string[] {
+  return getModuleSpecifiersWithAmbientModule(c, moduleSymbol, importingFile, preferences, overrideImportMode)
+    .specifiers;
+}
+
+function getModuleSpecifiersWithAmbientModule(
+  c: Checker,
+  moduleSymbol: Symbol,
+  importingFile: SourceFile,
+  preferences: ModuleSpecifierPreferences,
+  overrideImportMode: ModuleKind,
+): ModuleSpecifiers {
   const ambient = tryGetModuleNameFromAmbientModule(c, moduleSymbol);
-  if (ambient !== '') return [ambient];
+  if (ambient !== undefined) return new ModuleSpecifiers([getText(getName(ambient)!)], getSymbol(ambient));
   const moduleFile = getSourceFileOfModule(moduleSymbol);
-  if (moduleFile === undefined) return [];
+  if (moduleFile === undefined) return new ModuleSpecifiers([], undefined);
   const host = getModuleSpecifierHost(c);
   // A referenced project's declaration output is named by its source.
-  return getModuleSpecifiersForFile(
+  const specifiers = getModuleSpecifiersForFile(
     importingFile,
     host.getSourceOfProjectReferenceIfOutputIncluded(moduleFile),
     c.compilerOptions,
@@ -876,6 +1057,7 @@ export function getModuleSpecifiers(
     overrideImportMode,
     false,
   );
+  return new ModuleSpecifiers(specifiers, undefined);
 }
 
 function getModuleSpecifierHost(c: Checker): ModuleSpecifierHost {
@@ -890,12 +1072,12 @@ function getModuleSpecifierHost(c: Checker): ModuleSpecifierHost {
   return host;
 }
 
-/** The name of an ambient module declaring `moduleSymbol`, or of the one whose `export =` it is, else `''`. */
-function tryGetModuleNameFromAmbientModule(c: Checker, moduleSymbol: Symbol): string {
+/** The ambient module declaring `moduleSymbol`, or the one whose `export =` it is. */
+function tryGetModuleNameFromAmbientModule(c: Checker, moduleSymbol: Symbol): Node | undefined {
   for (const d of getDeclarations(moduleSymbol)) {
     const name = isModuleWithStringLiteralName(d) ? getName(d)! : undefined;
     if (name !== undefined && (!isModuleAugmentationExternal(d) || !isExternalModuleNameRelative(getText(name))))
-      return getText(name);
+      return d;
   }
   // A namespace exported with `export =` from an ambient module: `import { c } from "m"` names
   // `ns.c` for `declare module "m" { namespace ns { class c {} } export = ns; }`.
@@ -911,9 +1093,9 @@ function tryGetModuleNameFromAmbientModule(c: Checker, moduleSymbol: Symbol): st
     let exported = getSymbolAtLocation(c, getExpression(assignment)!);
     if (exported === undefined) continue;
     if ((exported.flags & SymbolFlags.Alias) !== 0) exported = resolveAlias(c, exported);
-    if (exported === getSymbol(d)) return getText(getName(container)!);
+    if (exported === getSymbol(d)) return container;
   }
-  return '';
+  return undefined;
 }
 
 function isModuleWithStringLiteralName(node: Node): boolean {
@@ -945,7 +1127,7 @@ function tryGetModuleSpecifierFromDeclaration(node: Node): Node | undefined {
     case SyntaxKind.VariableDeclaration:
     case SyntaxKind.BindingElement: {
       let call = getInitializer(node);
-      while (call !== undefined && !isRequireCall(call, true)) call = call.parent;
+      while (call !== undefined && !isRequireCall(call, true) && !isImportCall(call)) call = call.parent;
       specifier = call === undefined ? undefined : getArguments(call)!.nodes[0];
       break;
     }

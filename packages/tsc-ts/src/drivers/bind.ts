@@ -260,7 +260,7 @@ class Printer extends NodeVisitor {
       const parts: string[] = [];
       const flow = getFlowNode(n);
       if (flow !== undefined) parts.push('flow=' + this.flow(flow));
-      const end = n instanceof SourceFile ? n.endFlowNode : getEndFlowNode(n);
+      const end = getEndFlowNode(n);
       if (end !== undefined) parts.push('end=' + this.flow(end));
       if (n instanceof CaseOrDefaultClause && n.fallthroughFlowNode !== undefined)
         parts.push('fallthrough=' + this.flow(n.fallthroughFlowNode));

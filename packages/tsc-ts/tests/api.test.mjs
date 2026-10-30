@@ -4,12 +4,13 @@ import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, syml
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { Differential, explore, exploreServices } from './differential.mjs';
+import { symbolKey } from './compare.mjs';
 import { Client } from './client.mjs';
 import { typescriptLib as bundledLib, tscTs, tscTsMissing } from './toolchain.mjs';
 import { tempDir } from './temp.mjs';
 
-// The reference: TypeScript 7.0.2's tsc, shipped with scriptc. It reads lib
-// files from its real directory.
+// The reference: TypeScript's tsc at the pinned upstream (npm run build:oracle). It reads lib files from its real
+// directory.
 const typescriptLib = bundledLib !== undefined && existsSync(bundledLib) ? realpathSync(bundledLib) : '';
 const realTsc = join(typescriptLib, 'tsc');
 const env = { TSC_TS_LIB_DIR: typescriptLib };
@@ -38,7 +39,7 @@ test('tsc-ts --api answers like tsc --api', { skip, timeout: 600_000 }, async ()
     await d.call('getServerTiming');
     const config = join(dir, 'tsconfig.json');
     await d.call('parseConfigFile', { file: config });
-    const update = await d.call('updateSnapshot', { openProjects: [config] });
+    const update = await d.snapshot({ openProjects: [config] });
     const snapshot = update.snapshot;
     const project = update.projects[0].id;
     const base = { snapshot, project };
@@ -63,7 +64,7 @@ test('tsc-ts --api answers like tsc --api', { skip, timeout: 600_000 }, async ()
       'getSuggestionDiagnostics',
     ]) {
       await d.call(method, base);
-      for (const { file } of userFiles) await d.call(method, { ...base, file });
+      for (const { file } of userFiles) await d.call(method, { ...base, files: [file] });
     }
 
     for (const name of [
@@ -111,7 +112,16 @@ test('tsc-ts --api answers like tsc --api', { skip, timeout: 600_000 }, async ()
     }
 
     // Errors the API reports for bad requests.
-    await d.call('getTypeOfSymbol', { ...base, symbol: 999999 });
+    await d.call('getTypeOfSymbol', { ...base, symbol: { kind: 1, snapshot, project, id: 999999 } });
+    await d.call('getTypeOfSymbol', { ...base, symbol: { kind: 1, snapshot: snapshot + 50, project, id: 1 } });
+    await d.call('getTypeOfSymbol', { ...base, symbol: { kind: 2, id: 1 } });
+    await d.call('getTypeOfSymbol', { ...base, symbol: { kind: 0, id: 1 } });
+    await d.call('getTypeOfSymbol', { ...base, symbol: null });
+    await d.call('getParentOfSymbol', { symbol: { kind: 1, snapshot, id: 1 } });
+    await d.call('getParentOfSymbol', { symbol: { kind: 1, snapshot: 99, project, id: 1 } });
+    await d.call('getMembersOfSymbol', {
+      symbol: { kind: 0, file: { fileName: 'x', path: 'x', contentHash: '0' }, id: 1 },
+    });
     await d.call('getPropertiesOfType', { ...base, type: 999999 });
     await d.call('getTypeAtLocation', { ...base, location: '1.2' });
     await d.call('getTypeAtLocation', { ...base, location: `99999.79.${userFiles[0].file}` });
@@ -120,15 +130,15 @@ test('tsc-ts --api answers like tsc --api', { skip, timeout: 600_000 }, async ()
     await d.call('noSuchMethod', base);
 
     // Snapshots: an unchanged update reuses the snapshot; edits report changes.
-    const again = await d.call('updateSnapshot', {});
+    const again = await d.snapshot({});
     assert.equal(again.snapshot, snapshot + 1);
     await d.call('release', { snapshot });
     const shapes = join(dir, 'src/shapes.ts');
     writeFileSync(shapes, readFileSync(shapes, 'utf8') + '\nexport const added = 1;\n');
-    const changed = await d.call('updateSnapshot', { fileChanges: { changed: [shapes] } });
+    const changed = await d.snapshot({ fileNotifications: { changed: [shapes] } });
     await d.call('getSourceFile', { snapshot: changed.snapshot, project, file: shapes });
-    await d.call('getSemanticDiagnostics', { snapshot: changed.snapshot, project, file: shapes });
-    await d.call('updateSnapshot', { closeProjects: [config] });
+    await d.call('getSemanticDiagnostics', { snapshot: changed.snapshot, project, files: [shapes] });
+    await d.snapshot({ closeProjects: [config] });
     await d.call('release', { snapshot });
     await d.call('release', { snapshot: changed.snapshot });
     await d.call('release', { snapshot: changed.snapshot });
@@ -136,6 +146,55 @@ test('tsc-ts --api answers like tsc --api', { skip, timeout: 600_000 }, async ()
     await d.close();
   }
   console.log(`compared ${d.count} responses`);
+  report(d);
+});
+
+// A source file lease keeps the file's symbols resolvable by their references after the snapshots that returned them
+// are released.
+test('tsc-ts --api keeps retained source files like tsc --api', { skip, timeout: 300_000 }, async () => {
+  const dir = copyProject();
+  const d = new Differential([realTsc], tscTs, dir, env);
+  try {
+    await d.call('initialize');
+    const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id };
+    const file = join(dir, 'src/shapes.ts');
+    const positions = Array.from({ length: readFileSync(file, 'utf8').length }, (_, i) => i);
+    const symbols = (await d.call('getSymbolsAtPositions', { ...base, file, positions })) ?? [];
+    const owned = symbols.find((s) => s !== null && s.reference.kind === 0 && s.parent !== undefined);
+    assert.ok(owned !== undefined, 'a symbol of shapes.ts');
+    const { reference } = owned;
+    const { lease } = await d.call('retainSourceFile', { file: reference.file });
+    await d.call('retainSourceFile', { file: { ...reference.file, contentHash: '0'.repeat(32) } });
+    await d.call('retainSourceFile', { file: { ...reference.file, contentHash: 'x'.repeat(32) } });
+    await d.call('retainSourceFile', { file: { ...reference.file, parseOptionsKey: '4' } });
+    await d.call('retainSourceFile', { file: { ...reference.file, scriptKind: 5 } });
+    await d.call('retainSourceFile', {});
+    // The file is parsed again in a newer snapshot; the older version stays available through the old snapshot
+    // and the lease.
+    writeFileSync(file, readFileSync(file, 'utf8') + '\nexport const added = 1;\n');
+    const next = await d.snapshot({ fileNotifications: { changed: [file] } });
+    await d.call('getSourceFile', { snapshot: next.snapshot, project: base.project, file });
+    await d.call('getParentOfSymbol', { symbol: reference });
+    // Undoing the edit gives back the file the first snapshot has, and its references.
+    writeFileSync(file, readFileSync(file, 'utf8').replace('\nexport const added = 1;\n', ''));
+    const undone = await d.snapshot({ fileNotifications: { changed: [file] } });
+    const undoneBase = { snapshot: undone.snapshot, project: base.project };
+    await d.call('getSourceFile', { ...undoneBase, file });
+    const undoneSymbols = (await d.call('getSymbolsAtPositions', { ...undoneBase, file, positions })) ?? [];
+    const undoneOwned = undoneSymbols.find((s) => s !== null && s.reference.kind === 0 && s.parent !== undefined);
+    await d.call('getTypeOfSymbol', { ...undoneBase, symbol: undoneOwned.reference });
+    await d.call('getParentOfSymbol', { symbol: undoneOwned.reference });
+    await d.call('release', { snapshot: base.snapshot });
+    await d.call('getParentOfSymbol', { symbol: reference });
+    await d.call('getMembersOfSymbol', { symbol: reference });
+    await d.call('releaseSourceFile', { lease });
+    await d.call('releaseSourceFile', { lease });
+    await d.call('releaseSourceFile', {});
+    await d.call('getParentOfSymbol', { symbol: reference });
+  } finally {
+    await d.close();
+  }
   report(d);
 });
 
@@ -150,9 +209,9 @@ test('tsc-ts --api reports global diagnostics like tsc --api', { skip, timeout: 
   const d = new Differential([realTsc], tscTs, dir, env);
   try {
     await d.call('initialize');
-    const update = await d.call('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+    const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
     const base = { snapshot: update.snapshot, project: update.projects[0].id };
-    await d.call('getSemanticDiagnostics', { ...base, file: join(dir, 'a.ts') });
+    await d.call('getSemanticDiagnostics', { ...base, files: [join(dir, 'a.ts')] });
     await d.call('getGlobalDiagnostics', base);
   } finally {
     await d.close();
@@ -171,18 +230,22 @@ test('tsc-ts --api tracks projects and open files like tsc --api', { skip, timeo
   const d = new Differential([realTsc], tscTs, dir, env);
   try {
     await d.call('initialize');
-    const first = await d.call('updateSnapshot', { openProjects: [join(dir, 'b/tsconfig.json'), 'a/tsconfig.json'] });
+    const first = await d.snapshot({ openProjects: [join(dir, 'b/tsconfig.json'), 'a/tsconfig.json'] });
     await d.call('getDefaultProjectForFile', { snapshot: first.snapshot, file: join(dir, 'b/x.ts') });
     await d.call('getDefaultProjectForFile', { snapshot: first.snapshot, file: join(dir, 'loose/y.ts') });
-    await d.call('updateSnapshot', { closeProjects: ['a/tsconfig.json'] });
-    await d.call('updateSnapshot', { openFiles: [join(dir, 'a/src/main.ts')] });
-    await d.call('updateSnapshot', { openFiles: [{ uri: `file://${join(dir, 'b/x.ts')}` }] });
-    const loose = await d.call('updateSnapshot', { openFiles: [join(dir, 'loose/y.ts')] });
+    await d.snapshot({ closeProjects: ['a/tsconfig.json'] });
+    await d.snapshot({ openFiles: [join(dir, 'a/src/main.ts')] });
+    await d.snapshot({ openFiles: [{ uri: `file://${join(dir, 'b/x.ts')}` }] });
+    const loose = await d.snapshot({ openFiles: [join(dir, 'loose/y.ts')] });
     await d.call('getSourceFileNames', { snapshot: loose.snapshot, project: '/dev/null/inferred' });
     writeFileSync(join(dir, 'b/x.ts'), 'export const x: number = 2;\n');
-    await d.call('updateSnapshot', { fileChanges: { changed: [join(dir, 'b/x.ts')] } });
-    await d.call('updateSnapshot', { fileChanges: { invalidateAll: true } });
-    await d.call('updateSnapshot', { closeFiles: [join(dir, 'loose/y.ts'), join(dir, 'a/src/main.ts')] });
+    // Without ensurePrograms, the changed project is dirty and keeps its program until a later update.
+    const dirty = await d.snapshot({ fileNotifications: { changed: [join(dir, 'b/x.ts')] } }, { ensure: false });
+    await d.call('getSemanticDiagnostics', { snapshot: dirty.snapshot, project: join(dir, 'b/tsconfig.json') });
+    await d.snapshot({}, { ensure: false });
+    await d.snapshot({ ensurePrograms: [join(dir, 'b/tsconfig.json')] }, { ensure: false });
+    await d.snapshot({ fileNotifications: { invalidateAll: true } });
+    await d.snapshot({ closeFiles: [join(dir, 'loose/y.ts'), join(dir, 'a/src/main.ts')] });
   } finally {
     await d.close();
   }
@@ -217,14 +280,14 @@ test(
     try {
       await d.call('initialize');
       const config = join(dir, 'tsconfig.json');
-      let update = await d.call('updateSnapshot', { openProjects: [config] });
+      let update = await d.snapshot({ openProjects: [config] });
       const project = update.projects[0].id;
       const query = async (snapshot) => {
         const base = { snapshot, project };
         await d.call('getSourceFileNames', base);
         for (const name of ['a.ts', 'b.ts', 'c.ts']) {
-          await d.call('getSyntacticDiagnostics', { ...base, file: join(dir, name) });
-          await d.call('getSemanticDiagnostics', { ...base, file: join(dir, name) });
+          await d.call('getSyntacticDiagnostics', { ...base, files: [join(dir, name)] });
+          await d.call('getSemanticDiagnostics', { ...base, files: [join(dir, name)] });
         }
       };
       // a.ts changes without a report; b.ts is reported.
@@ -233,32 +296,32 @@ test(
         join(dir, 'b.ts'),
         "import { a } from './a.js';\nimport { p } from 'pkg';\nexport const b = a + p + 1;\n",
       );
-      update = await d.call('updateSnapshot', { fileChanges: { changed: [join(dir, 'b.ts')] } });
+      update = await d.snapshot({ fileNotifications: { changed: [join(dir, 'b.ts')] } });
       await query(update.snapshot);
-      update = await d.call('updateSnapshot', { fileChanges: { changed: [join(dir, 'a.ts')] } });
+      update = await d.snapshot({ fileNotifications: { changed: [join(dir, 'a.ts')] } });
       await query(update.snapshot);
       // The package.json read through node_modules/pkg changes, reported by its real path.
       writeFileSync(join(dir, 'packages/pkg/package.json'), '{"name":"pkg","types":"other.d.ts"}');
-      update = await d.call('updateSnapshot', { fileChanges: { changed: [join(dir, 'packages/pkg/package.json')] } });
+      update = await d.snapshot({ fileNotifications: { changed: [join(dir, 'packages/pkg/package.json')] } });
       await query(update.snapshot);
       // The extended config changes.
       writeFileSync(join(dir, 'base.json'), '{"compilerOptions":{"strict":false}}');
-      update = await d.call('updateSnapshot', { fileChanges: { changed: [join(dir, 'base.json')] } });
+      update = await d.snapshot({ fileNotifications: { changed: [join(dir, 'base.json')] } });
       await query(update.snapshot);
       // c.ts is deleted; then a.ts changes without a report, and invalidateAll rereads it.
       rmSync(join(dir, 'c.ts'));
-      update = await d.call('updateSnapshot', { fileChanges: { deleted: [join(dir, 'c.ts')] } });
+      update = await d.snapshot({ fileNotifications: { deleted: [join(dir, 'c.ts')] } });
       await d.call('getProgramDiagnostics', { snapshot: update.snapshot, project });
       writeFileSync(join(dir, 'c.ts'), 'export function c(x: number) { return x; }\n');
       writeFileSync(join(dir, 'a.ts'), 'export const a = 2;\n');
-      update = await d.call('updateSnapshot', { fileChanges: { invalidateAll: true } });
+      update = await d.snapshot({ fileNotifications: { invalidateAll: true } });
       await query(update.snapshot);
       // c.ts is reported deleted while it is still there, which leaves it out of the program, then changed
       // and reported created: the update reads its new contents.
-      update = await d.call('updateSnapshot', { fileChanges: { deleted: [join(dir, 'c.ts')] } });
+      update = await d.snapshot({ fileNotifications: { deleted: [join(dir, 'c.ts')] } });
       await d.call('getSourceFileNames', { snapshot: update.snapshot, project });
       writeFileSync(join(dir, 'c.ts'), 'export function c(x: string): number { return x; }\n');
-      update = await d.call('updateSnapshot', { fileChanges: { created: [join(dir, 'c.ts')] } });
+      update = await d.snapshot({ fileNotifications: { created: [join(dir, 'c.ts')] } });
       await query(update.snapshot);
     } finally {
       await d.close();
@@ -305,7 +368,7 @@ test('tsc-ts --api updates a program for a changed file like tsc --api', { skip,
   const d = new Differential([realTsc], tscTs, dir, env);
   try {
     await d.call('initialize');
-    let update = await d.call('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+    let update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
     const project = update.projects[0].id;
     const query = async (snapshot) => {
       const base = { snapshot, project };
@@ -313,12 +376,12 @@ test('tsc-ts --api updates a program for a changed file like tsc --api', { skip,
       await d.call('getProgramDiagnostics', base);
       await d.call('getGlobalDiagnostics', base);
       for (const name of ['a.ts', 'b.ts', 'c.tsx', 'd.js', 'e.ts', 'g.ts', 'h.d.ts']) {
-        await d.call('getSyntacticDiagnostics', { ...base, file: join(dir, name) });
-        await d.call('getSemanticDiagnostics', { ...base, file: join(dir, name) });
+        await d.call('getSyntacticDiagnostics', { ...base, files: [join(dir, name)] });
+        await d.call('getSemanticDiagnostics', { ...base, files: [join(dir, name)] });
       }
     };
     const change = async (...names) => {
-      update = await d.call('updateSnapshot', { fileChanges: { changed: names.map((name) => join(dir, name)) } });
+      update = await d.snapshot({ fileNotifications: { changed: names.map((name) => join(dir, name)) } });
       await query(update.snapshot);
     };
     await query(update.snapshot);
@@ -417,8 +480,8 @@ test('tsc-ts --api updates a program for a changed file like a new program', { s
     };
     for (const name of names) {
       result[name] = [
-        await client.json('getSyntacticDiagnostics', { ...base, file: join(dir, name) }),
-        await client.json('getSemanticDiagnostics', { ...base, file: join(dir, name) }),
+        await client.json('getSyntacticDiagnostics', { ...base, files: [join(dir, name)] }),
+        await client.json('getSemanticDiagnostics', { ...base, files: [join(dir, name)] }),
       ];
     }
     return result;
@@ -427,7 +490,7 @@ test('tsc-ts --api updates a program for a changed file like a new program', { s
     const client = new Client(tscTs, dir, env);
     try {
       await client.json('initialize');
-      const { snapshot } = await client.json('updateSnapshot', { openProjects: [config] });
+      const { snapshot } = await client.snapshot({ openProjects: [config] });
       return await diagnostics(client, snapshot);
     } finally {
       await client.close();
@@ -436,7 +499,7 @@ test('tsc-ts --api updates a program for a changed file like a new program', { s
   const updated = new Client(tscTs, dir, env);
   try {
     await updated.json('initialize');
-    let { snapshot } = await updated.json('updateSnapshot', { openProjects: [config] });
+    let { snapshot } = await updated.snapshot({ openProjects: [config] });
     assert.deepEqual(await diagnostics(updated, snapshot), await loaded());
     const codes = (result, name) => result[name][1].map((d) => d.code);
     // Each edit: the file, its new text, and a code the new program reports for it or, as `[file, code]`, for
@@ -456,7 +519,7 @@ test('tsc-ts --api updates a program for a changed file like a new program', { s
       ['r.js', 'var sharedJs = 1;\n', ['s.ts', 2322]],
     ]) {
       write(name, text);
-      ({ snapshot } = await updated.json('updateSnapshot', { fileChanges: { changed: [join(dir, name)] } }));
+      ({ snapshot } = await updated.snapshot({ fileNotifications: { changed: [join(dir, name)] } }));
       const expected = await loaded();
       const [file, expectedCode] = Array.isArray(code) ? code : [name, code];
       if (expectedCode !== undefined)
@@ -516,12 +579,12 @@ test(
     const d = new Differential([realTsc], tscTs, dir, env);
     try {
       await d.call('initialize');
-      const update = await d.call('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+      const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
       const base = { snapshot: update.snapshot, project: update.projects[0].id };
       await d.call('getSourceFile', { ...base, file });
-      await d.call('getSyntacticDiagnostics', { ...base, file });
-      await d.call('getSemanticDiagnostics', { ...base, file });
-      const suggestions = await d.call('getSuggestionDiagnostics', { ...base, file });
+      await d.call('getSyntacticDiagnostics', { ...base, files: [file] });
+      await d.call('getSemanticDiagnostics', { ...base, files: [file] });
+      const suggestions = await d.call('getSuggestionDiagnostics', { ...base, files: [file] });
       // The reference reports the deprecated calls, so the comparison is not vacuous.
       assert.ok(
         suggestions.some((s) => s.reportsDeprecated),
@@ -530,12 +593,12 @@ test(
       const positions = Array.from({ length: source.length }, (_, i) => i);
       const symbols = new Map();
       for (const symbol of (await d.call('getSymbolsAtPositions', { ...base, file, positions })) ?? [])
-        if (symbol !== null) symbols.set(symbol.id, symbol);
+        if (symbol !== null) symbols.set(symbolKey(symbol.reference), symbol);
       let deprecatedTags = 0;
       for (const symbol of symbols.values()) {
-        const tags = await d.call('getJsDocTags', { ...base, symbol: symbol.id });
+        const tags = await d.call('getJsDocTags', { ...base, symbol: symbol.reference });
         if (tags?.some((t) => t.name === 'deprecated')) deprecatedTags++;
-        await d.call('getDocumentationComment', { ...base, symbol: symbol.id });
+        await d.call('getDocumentationComment', { ...base, symbol: symbol.reference });
       }
       assert.ok(deprecatedTags > 0, 'expected tsc to report the @deprecated tag of legacy');
     } finally {
@@ -571,23 +634,23 @@ test('tsc-ts --api reuses written type nodes like tsc --api', { skip, timeout: 3
   const d = new Differential([realTsc], tscTs, dir, env);
   try {
     await d.call('initialize');
-    const update = await d.call('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+    const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
     const base = { snapshot: update.snapshot, project: update.projects[0].id };
     const positions = Array.from({ length: source.length }, (_, i) => i);
     const symbols = new Map();
     for (const symbol of (await d.call('getSymbolsAtPositions', { ...base, file, positions })) ?? [])
-      if (symbol !== null && symbol.valueDeclaration !== undefined) symbols.set(symbol.id, symbol);
+      if (symbol !== null && symbol.valueDeclaration !== undefined) symbols.set(symbolKey(symbol.reference), symbol);
     assert.ok(symbols.size >= 11, `found ${symbols.size} declared symbols`);
     for (const symbol of symbols.values()) {
       const location = symbol.valueDeclaration;
-      const type = await d.call('getTypeOfSymbol', { ...base, symbol: symbol.id });
+      const type = await d.call('getTypeOfSymbol', { ...base, symbol: symbol.reference });
       if (type !== undefined && type !== null) {
         await d.call('typeToString', { ...base, type: type.id, location });
         await d.call('typeToTypeNode', { ...base, type: type.id, location });
       }
       const signature = await d.call('getSignatureFromDeclaration', { ...base, location });
       if (signature !== undefined && signature !== null) {
-        await d.call('signatureToSignatureDeclaration', { ...base, signature: signature.id, kind: 185, location });
+        await d.call('signatureToSignatureDeclaration', { ...base, signature: signature.id, kind: 186, location });
       }
     }
   } finally {
@@ -600,33 +663,447 @@ test('tsc-ts --api reuses written type nodes like tsc --api', { skip, timeout: 3
 // where a trigger character was just typed.
 async function compareCompletions(d, base, file) {
   const text = readFileSync(file, 'utf8');
+  const call = (params) => d.call('getCompletionsAtPosition', { ...base, file, ...params });
   for (let position = 0; position <= text.length; position++) {
-    await d.call('getCompletionsAtPosition', { ...base, file, position });
+    await call({ position });
     const before = text[position - 1];
     if (before !== undefined && '.\'"`<#@/ *'.includes(before)) {
-      await d.call('getCompletionsAtPosition', { ...base, file, position, includeSymbol: true });
-      await d.call('getCompletionsAtPosition', { ...base, file, position, triggerCharacter: before });
+      await call({ position, includeSymbol: true });
+      await call({ position, triggerCharacter: before });
     }
   }
 }
 
+// tsc keeps the module specifiers of auto-imports by the file an export is found in, so for a file with a relative
+// module augmentation, which exports from the augmented module, the specifiers of the file's own exports depend on the
+// order tsc visits them. The completions comparison moves the project fixture's augmentation to a file of its own.
+function moveAugmentation(dir) {
+  const main = join(dir, 'src/main.ts');
+  const text = readFileSync(main, 'utf8');
+  const augmentation = /declare module '\.\/shapes\.ts' \{\n(?: .*\n)*\}\n/.exec(text)?.[0];
+  assert.ok(augmentation !== undefined, 'the fixture has a module augmentation');
+  writeFileSync(main, text.replace(augmentation, ''));
+  writeFileSync(join(dir, 'src/augment.ts'), 'export {};\n' + augmentation);
+}
+
+// The packages fixture's linked packages: a workspace package of the project, and a package outside it.
+function linkPackages(dir) {
+  symlinkSync(join(dir, 'packages/workspace-lib'), join(dir, 'node_modules/workspace-lib'));
+  const external = tempDir('tsc-ts-api-linked-');
+  writeFileSync(join(external, 'package.json'), '{"name":"linked-lib","version":"1.0.0","types":"index.d.ts"}');
+  writeFileSync(
+    join(external, 'index.d.ts'),
+    'export declare const linkedValue: number;\nexport declare const linkedOther: number;\n',
+  );
+  symlinkSync(external, join(dir, 'node_modules/linked-lib'));
+}
+
 test('tsc-ts --api completes like tsc --api', { skip, timeout: 600_000 }, async () => {
-  for (const fixture of ['completions', 'services', 'project']) {
+  for (const fixture of ['completions', 'services', 'project', 'auto-imports', 'auto-import-packages']) {
     const dir = tempDir('tsc-ts-api-');
     cpSync(resolve('tests/fixtures', fixture), dir, { recursive: true });
+    if (fixture === 'project') moveAugmentation(dir);
+    if (fixture === 'auto-import-packages') linkPackages(dir);
     const d = new Differential([realTsc], tscTs, dir, env);
     try {
       await d.call('initialize');
-      const update = await d.call('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+      const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
       const base = { snapshot: update.snapshot, project: update.projects[0].id };
       for (const file of await d.call('getSourceFileNames', base))
-        if (file.startsWith(dir)) await compareCompletions(d, base, file);
+        if (file.startsWith(dir) && !file.includes('/node_modules/')) await compareCompletions(d, base, file);
       await d.call('getCompletionsAtPosition', { ...base, file: join(dir, 'missing.ts'), position: 0 });
     } finally {
       await d.close();
     }
     console.log(`compared ${d.count} completions in ${fixture}`);
     report(d);
+  }
+});
+
+// An opening tag's completions offer the JSX.IntrinsicElements names that are tag names: JSX identifiers, with
+// dashes, and namespaced names. A declaration key that holds attribute text is not offered, since the completion
+// would insert that text into the tag. For tag names, the list is the one tsc answers.
+test('tsc-ts --api offers only tag names in opening-tag completions', { skip, timeout: 300_000 }, async () => {
+  const dir = tempDir('tsc-ts-api-');
+  writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { jsx: 'preserve', strict: true } }));
+  const tags = ['div', 'my-element', 'svg:rect', 'x_1'];
+  const injected = ['div onClick={() => fetch("/x")}', 'img src=x', 'a b', 'svg:rect:x', '"quoted"', '>', 'x.y', ''];
+  const declare = (names) =>
+    `declare namespace JSX {\n  interface IntrinsicElements {\n${names
+      .map((name) => `    ${JSON.stringify(name)}: {};\n`)
+      .join('')}  }\n  interface Element {}\n}\nconst a = <;\n`;
+  const file = join(dir, 'tags.tsx');
+  writeFileSync(file, declare(tags));
+  const d = new Differential([realTsc], tscTs, dir, env);
+  try {
+    await d.call('initialize');
+    const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id };
+    const position = readFileSync(file, 'utf8').indexOf('<;') + 1;
+    const names = (await d.call('getCompletionsAtPosition', { ...base, file, position })).entries.map((e) => e.name);
+    for (const tag of tags) assert.ok(names.includes(tag), tag);
+  } finally {
+    await d.close();
+  }
+  report(d);
+
+  writeFileSync(file, declare([...tags, ...injected]));
+  const client = new Client(tscTs, dir, env);
+  try {
+    await client.json('initialize');
+    const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id };
+    const position = readFileSync(file, 'utf8').indexOf('<;') + 1;
+    const { entries } = await client.json('getCompletionsAtPosition', { ...base, file, position });
+    const names = entries.map((e) => e.name);
+    for (const tag of tags) assert.ok(names.includes(tag), tag);
+    for (const name of injected) assert.ok(!names.includes(name), JSON.stringify(name));
+    for (const e of entries) assert.ok(!/[\s={}"<>]/.test(e.insertText ?? e.name), JSON.stringify(e));
+  } finally {
+    await client.close();
+  }
+});
+
+// Completions insert no text a declaration or a package writes as statements: an exhaustive switch over an enum
+// that is exported only under a string alias offers no case snippet, element-access completions quote a property
+// name that starts with a digit but is not a number, string-literal completions escape a property name for the
+// literal's quote, and an exports pattern that leaves its package offers nothing.
+test('tsc-ts --api completions insert no statements from declaration names', { skip, timeout: 300_000 }, async () => {
+  const root = tempDir('tsc-ts-api-');
+  const dir = join(root, 'app');
+  mkdirSync(join(dir, 'node_modules/evil'), { recursive: true });
+  mkdirSync(join(root, 'outside'), { recursive: true });
+  writeFileSync(join(root, 'outside/secret.d.ts'), 'export {};\n');
+  writeFileSync(
+    join(dir, 'node_modules/evil/package.json'),
+    JSON.stringify({ name: 'evil', exports: { './*': './../../../outside/*.js' } }),
+  );
+  writeFileSync(join(dir, 'package.json'), '{"dependencies":{"evil":"1.0.0"}}');
+  writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'nodenext', strict: true } }));
+  writeFileSync(
+    join(dir, 'a.ts'),
+    'enum E { A = "a", B = "b" }\nexport { E as "x; f(); y" };\nexport declare function getE(): E;\n',
+  );
+  const text = [
+    'import { getE } from "./a.js";',
+    'import type {} from "evil/";',
+    'switch (getE()) {',
+    '  ',
+    '}',
+    'declare const o: { "0]; f(); o[": 1; "a\\"]; f(); o[\\"": 2; 1: 3; ok: 4 };',
+    'o.',
+    'const k = o[""];',
+    '',
+  ].join('\n');
+  const file = join(dir, 'b.ts');
+  writeFileSync(file, text);
+  const client = new Client(tscTs, dir, env);
+  try {
+    await client.json('initialize');
+    const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id, file };
+    const entriesAt = async (position) =>
+      (await client.json('getCompletionsAtPosition', { ...base, position }))?.entries ?? [];
+    const switchEntries = await entriesAt(text.indexOf('switch (getE()) {\n  ') + 20);
+    assert.ok(switchEntries.length > 0);
+    assert.deepEqual(
+      switchEntries.filter((e) => (e.insertText ?? e.name).includes('f()')),
+      [],
+    );
+    const dot = new Map((await entriesAt(text.indexOf('o.\n') + 2)).map((e) => [e.name, e.insertText]));
+    assert.equal(dot.get('0]; f(); o['), '["0]; f(); o["]');
+    assert.equal(dot.get('1'), '[1]');
+    assert.equal(dot.get('ok'), undefined);
+    const names = (await entriesAt(text.indexOf('o[""]') + 3)).map((e) => e.name);
+    assert.ok(names.includes('a\\"]; f(); o[\\"'), JSON.stringify(names));
+    assert.ok(!names.includes('a"]; f(); o["'), JSON.stringify(names));
+    assert.ok(names.includes('ok'));
+    const specifiers = (await entriesAt(text.indexOf('"evil/"') + 6)).map((e) => e.name);
+    assert.ok(!specifiers.includes('secret'), JSON.stringify(specifiers));
+  } finally {
+    await client.close();
+  }
+});
+
+// tsc prepares auto-imports for a completion request in a snapshot of its own, which takes the next snapshot ID; a
+// request with symbols, or one whose list needs no auto-imports, takes none.
+test(
+  'tsc-ts --api numbers snapshots after completions with auto-imports like tsc --api',
+  { skip, timeout: 300_000 },
+  async () => {
+    const dir = tempDir('tsc-ts-api-');
+    const config = join(dir, 'tsconfig.json');
+    writeFileSync(config, JSON.stringify({ compilerOptions: { module: 'esnext', moduleResolution: 'bundler' } }));
+    writeFileSync(join(dir, 'a.ts'), 'export const value = 1;\n');
+    const use = join(dir, 'use.ts');
+    const text = 'val\nconst o = { a: 1 };\no.\n';
+    writeFileSync(use, text);
+    const d = new Differential([realTsc], tscTs, dir, env);
+    try {
+      await d.call('initialize');
+      let update = await d.snapshot({ openProjects: [config] });
+      const project = update.projects[0].id;
+      const requests = [
+        { position: 3 },
+        { position: 3 },
+        { position: text.indexOf('o.') + 2 },
+        { position: 3, includeSymbol: true },
+      ];
+      for (const request of requests) {
+        await d.call('getCompletionsAtPosition', { snapshot: update.snapshot, project, file: use, ...request });
+        update = await d.snapshot({});
+      }
+    } finally {
+      await d.close();
+    }
+    report(d);
+  },
+);
+
+test('tsc-ts --api offers changed packages in auto-imports like tsc --api', { skip, timeout: 300_000 }, async () => {
+  const dir = tempDir('tsc-ts-api-');
+  const config = join(dir, 'tsconfig.json');
+  writeFileSync(config, JSON.stringify({ compilerOptions: { module: 'esnext', moduleResolution: 'bundler' } }));
+  const packageJson = join(dir, 'package.json');
+  writeFileSync(packageJson, '{"dependencies":{"pkg":"1.0.0"}}');
+  const use = join(dir, 'use.ts');
+  writeFileSync(use, 'val\n');
+  const addPackage = (name, text) => {
+    mkdirSync(join(dir, 'node_modules', name), { recursive: true });
+    writeFileSync(join(dir, 'node_modules', name, 'package.json'), `{"name":"${name}","types":"index.d.ts"}`);
+    writeFileSync(join(dir, 'node_modules', name, 'index.d.ts'), text);
+    return [join(dir, 'node_modules', name, 'package.json'), join(dir, 'node_modules', name, 'index.d.ts')];
+  };
+  const [, index] = addPackage('pkg', 'export declare const value: number;\n');
+  const d = new Differential([realTsc], tscTs, dir, env);
+  try {
+    await d.call('initialize');
+    let update = await d.snapshot({ openProjects: [config] });
+    const project = update.projects[0].id;
+    const names = async () => {
+      const list = await d.call('getCompletionsAtPosition', {
+        snapshot: update.snapshot,
+        project,
+        file: use,
+        position: 3,
+      });
+      return list.entries.map((e) => e.name);
+    };
+    assert.ok((await names()).includes('value'));
+    // A package file outside the program changes.
+    writeFileSync(index, 'export declare const value: number;\nexport declare const valuable: number;\n');
+    update = await d.snapshot({ fileNotifications: { changed: [index] } });
+    assert.ok((await names()).includes('valuable'));
+    // A dependency is added.
+    const created = addPackage('other', 'export declare const validated: number;\n');
+    writeFileSync(packageJson, '{"dependencies":{"pkg":"1.0.0","other":"1.0.0"}}');
+    update = await d.snapshot({ fileNotifications: { changed: [packageJson], created } });
+    assert.ok((await names()).includes('validated'));
+  } finally {
+    await d.close();
+  }
+  report(d);
+});
+
+// A wildcard exports target that leaves its package offers nothing, as in tsc, and auto-imports do not search the
+// directories outside the package for it.
+test(
+  'tsc-ts --api keeps auto-import searches inside a package with an escaping exports pattern',
+  { skip, timeout: 300_000 },
+  async () => {
+    const dir = tempDir('tsc-ts-api-');
+    const app = join(dir, 'app');
+    const outside = join(dir, 'outside');
+    mkdirSync(join(outside, 'deep'), { recursive: true });
+    writeFileSync(join(outside, 'deep/escaped.d.ts'), 'export declare const escapedValue: number;\n');
+    const pkg = join(app, 'node_modules/evil');
+    mkdirSync(join(pkg, 'lib'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'package.json'),
+      JSON.stringify({
+        name: 'evil',
+        version: '1.0.0',
+        exports: { './*': './../../../outside/*.js', './ok/*': './lib/*.js' },
+      }),
+    );
+    writeFileSync(join(pkg, 'lib/inside.d.ts'), 'export declare const escapedInside: number;\n');
+    writeFileSync(join(app, 'package.json'), '{"dependencies":{"evil":"1.0.0"}}');
+    const config = join(app, 'tsconfig.json');
+    writeFileSync(config, JSON.stringify({ compilerOptions: { module: 'esnext', moduleResolution: 'bundler' } }));
+    const use = join(app, 'use.ts');
+    writeFileSync(use, 'escaped\n');
+    const d = new Differential([realTsc], tscTs, app, env);
+    try {
+      await d.call('initialize');
+      const update = await d.snapshot({ openProjects: [config] });
+      const params = { snapshot: update.snapshot, project: update.projects[0].id, file: use, position: 7 };
+      const names = (await d.call('getCompletionsAtPosition', params)).entries.map((e) => e.name);
+      assert.ok(names.includes('escapedInside'));
+      assert.ok(!names.includes('escapedValue'));
+      const listed = d.actual.calls.filter(
+        ([method, path]) => method === 'getAccessibleEntries' && path.startsWith(outside),
+      );
+      assert.deepEqual(listed, []);
+    } finally {
+      await d.close();
+    }
+    report(d);
+  },
+);
+
+// Import adder actions in the import-adder fixture's projects: the file to add imports to, then the symbols to
+// import, each named by the first occurrence of its text in a file, and whether its use site may be type-only.
+const importAdderCases = {
+  esm: [
+    ['src/empty.ts', ['src/a.ts', 'foo']],
+    ['src/empty.ts', ['src/a.ts', 'foo'], ['src/a.ts', 'bar'], ['src/z.ts', 'zed']],
+    ['src/empty.ts', ['src/a.ts', 'Shape', true], ['src/a.ts', 'Kind', true]],
+    ['src/empty.ts', ['src/single.ts', 'single']],
+    ['src/existing.ts', ['src/a.ts', 'foo']],
+    ['src/existing.ts', ['src/a.ts', 'Def']],
+    ['src/existing.ts', ['src/a.ts', 'Shape', true]],
+    ['src/existing.ts', ['src/a.ts', 'Def'], ['src/a.ts', 'foo'], ['src/z.ts', 'zed'], ['src/c.ts', 'c = 1']],
+    ['src/nosemi.ts', ['src/a.ts', 'foo']],
+    ['src/nosemi.ts', ['src/z.ts', 'zed']],
+    ['src/nosemi2.ts', ['src/a.ts', 'foo']],
+    ['src/nosemi3.ts', ['src/a.ts', 'foo']],
+    ['src/aliased.ts', ['src/a.ts', 'Shape', true]],
+    ['src/aliased.ts', ['src/a.ts', 'bar', false]],
+    ['src/multi.ts', ['src/a.ts', 'Def'], ['src/z.ts', 'zed']],
+    ['src/multi.ts', ['src/a.ts', 'Kind', true]],
+    ['src/comment.ts', ['src/a.ts', 'Shape', true], ['src/a.ts', 'Kind', true]],
+    ['src/req.js', ['src/a.ts', 'foo']],
+    ['src/req.js', ['src/a.ts', 'Def']],
+    ['src/plain.js', ['src/a.ts', 'foo'], ['src/a.ts', 'Def']],
+    ['src/plain.js', ['src/a.ts', 'Shape', true]],
+    ['src/prologue.ts', ['src/a.ts', 'foo']],
+    ['src/shebang.ts', ['src/a.ts', 'foo']],
+    ['src/triple.ts', ['src/a.ts', 'foo']],
+    ['src/unsorted.ts', ['src/a.ts', 'foo'], ['src/c.ts', 'c = 1']],
+    ['src/cased.ts', ['src/a.ts', 'foo']],
+    ['src/defonly.ts', ['src/a.ts', 'foo']],
+    ['src/ns.ts', ['src/a.ts', 'bar']],
+    ['src/typeonly.ts', ['src/a.ts', 'foo', false]],
+    ['src/typeonly.ts', ['src/a.ts', 'Shape', true]],
+    ['src/typeonly.ts', ['src/a.ts', 'Def', false]],
+  ],
+  commonjs: [
+    ['src/crlf.ts', ['src/uses.ts', 'pkgVal']],
+    ['src/crlf.ts', ['src/a.ts', 'foo'], ['src/a.ts', 'Def']],
+    ['src/crlfempty.ts', ['src/a.ts', 'foo'], ['src/uses.ts', 'pkgVal']],
+    ['src/crlfmulti.ts', ['src/a.ts', 'Def'], ['src/a.ts', 'Shape', true]],
+    ['src/eq.ts', ['src/a.ts', 'foo']],
+    ['src/plain.ts', ['src/single.ts', 'single']],
+    ['src/plain.ts', ['src/single.ts', 'single'], ['src/a.ts', 'Kind', true], ['src/a.ts', 'Def']],
+    ['src/plain.ts', ['src/uses.ts', 'pkgVal'], ['src/z.ts', 'zed']],
+  ],
+  verbatim: [
+    ['src/v.ts', ['src/a.ts', 'Shape', true]],
+    ['src/v.ts', ['src/a.ts', 'Shape', false]],
+    ['src/plain.ts', ['src/a.ts', 'Shape', true], ['src/a.ts', 'Kind', true], ['src/a.ts', 'bar']],
+    ['src/plain.ts', ['src/a.ts', 'Def', true]],
+    ['src/plain.ts', ['src/typedef.ts', 'TypeDef', true], ['src/typedef.ts', 'value', true]],
+    ['src/plain.ts', ['src/typedef.ts', 'TypeDef', true], ['src/typedef.ts', 'value', false]],
+    ['src/plain.ts', ['src/typedef.ts', 'local']],
+    ['src/plain.ts', ['src/uses.ts', 'renamed']],
+    ['src/plain.ts', ['src/uses.ts', 'inner']],
+  ],
+};
+
+// The packages of the import-adder fixture's projects. The verbatim project's package re-exports from a module its
+// exports do not name.
+const importAdderPackages = {
+  commonjs: {
+    pkg: {
+      'package.json': '{"name":"pkg","version":"1.0.0","types":"index.d.ts"}',
+      'index.d.ts': 'export declare function pkgFn(): void;\nexport declare const pkgVal: number;\n',
+    },
+  },
+  verbatim: {
+    pkg2: {
+      'package.json': '{"name":"pkg2","version":"1.0.0","exports":{".":{"types":"./index.d.ts"}}}',
+      'index.d.ts': 'export { inner } from "./inner";\n',
+      'inner.d.ts': 'export declare const inner: number;\n',
+    },
+  },
+};
+
+test('tsc-ts --api adds imports like tsc --api', { skip, timeout: 300_000 }, async () => {
+  for (const [fixture, cases] of Object.entries(importAdderCases)) {
+    const dir = tempDir('tsc-ts-api-');
+    cpSync(resolve('tests/fixtures/import-adder', fixture), dir, { recursive: true });
+    for (const [name, files] of Object.entries(importAdderPackages[fixture] ?? {})) {
+      mkdirSync(join(dir, 'node_modules', name), { recursive: true });
+      for (const [file, text] of Object.entries(files)) writeFileSync(join(dir, 'node_modules', name, file), text);
+    }
+    const d = new Differential([realTsc], tscTs, dir, env);
+    try {
+      await d.call('initialize');
+      let update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+      const project = update.projects[0].id;
+      let edits = 0;
+      for (const [file, ...symbols] of cases) {
+        const base = { snapshot: update.snapshot, project };
+        const actions = [];
+        for (const [from, text, isValidTypeOnlyUseSite] of symbols) {
+          const position = readFileSync(join(dir, from), 'utf8').indexOf(text);
+          const symbol = await d.call('getSymbolAtPosition', { ...base, file: join(dir, from), position });
+          assert.ok(symbol, `a symbol at ${text} in ${from}`);
+          actions.push({ kind: 'importSymbol', symbol: symbol.reference, isValidTypeOnlyUseSite });
+        }
+        edits += (await d.call('getImportAdderEdits', { ...base, file: join(dir, file), actions }))?.length ?? 0;
+        // tsc makes a snapshot for the edits, which the next snapshot's id follows.
+        update = await d.snapshot({});
+      }
+      assert.ok(edits > 0, `${edits} edits in ${fixture}`);
+      const base = { snapshot: update.snapshot, project };
+      const symbol = await d.call('getSymbolAtPosition', { ...base, file: join(dir, 'src/a.ts'), position: 13 });
+      const file = join(dir, cases[0][0]);
+      await d.call('getImportAdderEdits', { ...base, file, actions: [] });
+      await d.call('getImportAdderEdits', { ...base, file: join(dir, 'src/missing.ts'), actions: [] });
+      await d.call('getImportAdderEdits', { ...base, file, actions: [{ kind: 'importSymbol' }] });
+      await d.call('getImportAdderEdits', { ...base, file, actions: [{ kind: 'other', symbol: symbol.reference }] });
+      await d.call('getImportAdderEdits', { ...base, file, actions: [{ kind: 'importSymbol', symbol: { id: 1e6 } }] });
+      await d.snapshot({});
+    } finally {
+      await d.close();
+    }
+    report(d);
+  }
+});
+
+// The import adder writes no import of an export whose name is not an identifier: a CommonJS export named with
+// statement text would otherwise become an import specifier with that text. An export with an identifier name is
+// still imported.
+test('tsc-ts --api adds no import of an export with a non-identifier name', { skip, timeout: 300_000 }, async () => {
+  const dir = tempDir('tsc-ts-api-');
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { module: 'nodenext', allowJs: true, checkJs: true }, include: ['src'] }),
+  );
+  writeFileSync(join(dir, 'package.json'), '{"type":"module"}');
+  const name = "x } from 'y'; f(); import { z";
+  writeFileSync(join(dir, 'src/c.cjs'), `exports[${JSON.stringify(name)}] = 1;\nexports.okc = 2;\n`);
+  writeFileSync(join(dir, 'src/b.ts'), 'export {};\n');
+  const client = new Client(tscTs, dir, env);
+  try {
+    await client.json('initialize');
+    const update = await client.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id };
+    const text = readFileSync(join(dir, 'src/c.cjs'), 'utf8');
+    const editsFor = async (position) => {
+      const symbol = await client.json('getSymbolAtPosition', { ...base, file: join(dir, 'src/c.cjs'), position });
+      assert.ok(symbol);
+      const actions = [{ kind: 'importSymbol', symbol: symbol.reference, isValidTypeOnlyUseSite: false }];
+      return client.json('getImportAdderEdits', { ...base, file: join(dir, 'src/b.ts'), actions });
+    };
+    assert.deepEqual(await editsFor(text.indexOf(JSON.stringify(name)) + 1), []);
+    const ok = await editsFor(text.indexOf('okc'));
+    assert.equal(ok.length, 1);
+    assert.match(ok[0].newText, /^import \{ okc \} from "\.\/c\.cjs";/);
+  } finally {
+    await client.close();
   }
 });
 
@@ -640,7 +1117,7 @@ for (const fixture of ['services', 'project']) {
       const d = new Differential([realTsc], tscTs, dir, env);
       try {
         await d.call('initialize');
-        const update = await d.call('updateSnapshot', { openProjects: [join(dir, 'tsconfig.json')] });
+        const update = await d.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
         const base = { snapshot: update.snapshot, project: update.projects[0].id };
         const files = [];
         for (const file of await d.call('getSourceFileNames', base)) {

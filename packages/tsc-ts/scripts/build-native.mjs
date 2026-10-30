@@ -2,7 +2,8 @@
 // first compiles native/pipe-win32.c, the named pipe server of `tsc-ts --api --pipe`, with zig (the linker scriptc
 // uses there) and links it through native/pipe-win32.ffi.json. On Linux and macOS it first compiles
 // native/listen-posix.c, the Unix socket server of `tsc-ts --api --listen`, with clang, or with zig for the
-// SCRIPTC_TARGET that scriptc links for, and links it through native/listen-posix.ffi.json.
+// SCRIPTC_TARGET that scriptc links for, and links it through native/listen-posix.ffi.json. Then it checks that the
+// number fields of Node, Type and Symbol are 32-bit integers in the build (scripts/check-int32-fields.mjs).
 //
 // Optimized builds use a committed profile (profile-phases.mjs): profiles/tsc-ts.cs.profdata, collected in two phases,
 // when the scriptc accepts a second profile phase, and profiles/tsc-ts.profdata, collected in one phase, otherwise.
@@ -103,6 +104,10 @@ else {
   if (values['record-profile']) recordProfile(report);
   else checkProfile(report);
 }
+// The checker's hot classes keep 32-bit number fields (scripts/check-int32-fields.mjs), in the IR scriptc keeps
+// beside the executable.
+if (!passed.includes('--no-keep-llvm'))
+  run(process.execPath, ['scripts/check-int32-fields.mjs', join(dirname(values.output), 'main.ll')]);
 
 // The committed profile for this scriptc: the two-phase one when scriptc accepts a second profile phase.
 function committedProfile() {

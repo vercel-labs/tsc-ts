@@ -8,20 +8,18 @@ import {
   buildOption,
   buildOptionsByName,
   compilerOptionsByName,
-  watchOptionsByName,
   type OptionDeclaration,
   type OptionNameMap,
 } from './option-declarations.js';
 import {
   setBuildOption,
   setCompilerOption,
-  setWatchOption,
   type BuildOptions,
   type CompilerOptions,
   type OptionValue,
-  type WatchOptions,
 } from './options.js';
-import { getNormalizedAbsolutePath } from './path.js';
+import { getNormalizedAbsolutePath, isNetworkPathValue } from './path.js';
+import { getSpellingSuggestion } from './spelling.js';
 
 /** Reads response files. */
 export abstract class CommandLineHost {
@@ -33,7 +31,6 @@ export abstract class CommandLineHost {
 
 export interface ParsedCommandLine {
   readonly options: CompilerOptions;
-  readonly watchOptions: WatchOptions;
   readonly fileNames: readonly string[];
   readonly errors: readonly Diagnostic[];
   /** Options as written, keyed by declaration name in first-seen order. Paths are not made absolute. */
@@ -44,7 +41,6 @@ export interface ParsedBuildCommandLine {
   readonly buildOptions: BuildOptions;
   /** Only options shared with `tsc`, and `build`. */
   readonly compilerOptions: CompilerOptions;
-  readonly watchOptions: WatchOptions;
   /** Project paths as given; `["."]` if none. */
   readonly projects: readonly string[];
   readonly errors: readonly Diagnostic[];
@@ -55,6 +51,8 @@ export interface ParsedBuildCommandLine {
 interface ParserMode {
   readonly options: OptionNameMap;
   readonly unknownOption: DiagnosticMessage;
+  /** An unknown option with a spelling suggestion among `options`. */
+  readonly unknownOptionDidYouMean: DiagnosticMessage;
   readonly missingArgument: DiagnosticMessage;
   /** Options of the other mode, reported with `wrongMode` instead of as unknown. */
   readonly otherModeOptions?: OptionNameMap;
@@ -64,6 +62,7 @@ interface ParserMode {
 const compilerMode: ParserMode = {
   options: compilerOptionsByName,
   unknownOption: Diagnostics.Unknown_compiler_option_0,
+  unknownOptionDidYouMean: Diagnostics.Unknown_compiler_option_0_Did_you_mean_1,
   missingArgument: Diagnostics.Compiler_option_0_expects_an_argument,
   otherModeOptions: buildOptionsByName,
   wrongMode: Diagnostics.Compiler_option_0_may_only_be_used_with_build,
@@ -72,15 +71,10 @@ const compilerMode: ParserMode = {
 const buildMode: ParserMode = {
   options: buildOptionsByName,
   unknownOption: Diagnostics.Unknown_build_option_0,
+  unknownOptionDidYouMean: Diagnostics.Unknown_build_option_0_Did_you_mean_1,
   missingArgument: Diagnostics.Build_option_0_requires_a_value_of_type_1,
   otherModeOptions: compilerOptionsByName,
   wrongMode: Diagnostics.Compiler_option_0_may_not_be_used_with_build,
-};
-
-const watchMode: ParserMode = {
-  options: watchOptionsByName,
-  unknownOption: Diagnostics.Unknown_watch_option_0,
-  missingArgument: Diagnostics.Watch_option_0_requires_a_value_of_type_1,
 };
 
 export function parseCommandLine(args: readonly string[], host: CommandLineHost): ParsedCommandLine {
@@ -88,13 +82,11 @@ export function parseCommandLine(args: readonly string[], host: CommandLineHost)
   parser.parseArguments(args);
   const cwd = host.currentDirectory;
   const options: CompilerOptions = {};
-  const watchOptions: WatchOptions = {};
   for (const [name, value] of parser.raw) {
     if (parser.droppedLists.has(name)) continue;
     setCompilerOption(options, name, toAbsolutePaths(name, value, cwd));
-    setWatchOption(watchOptions, name, value);
   }
-  return { options, watchOptions, fileNames: parser.fileNames, errors: parser.errors, raw: parser.raw };
+  return { options, fileNames: parser.fileNames, errors: parser.errors, raw: parser.raw };
 }
 
 export function parseBuildCommandLine(args: readonly string[], host: CommandLineHost): ParsedBuildCommandLine {
@@ -102,7 +94,6 @@ export function parseBuildCommandLine(args: readonly string[], host: CommandLine
   parser.parseArguments(args);
   const buildOptions: BuildOptions = {};
   const compilerOptions: CompilerOptions = {};
-  const watchOptions: WatchOptions = {};
   for (const [name, value] of parser.raw) {
     if (parser.droppedLists.has(name)) continue;
     const declaration = buildOptionsByName.get(name);
@@ -110,7 +101,6 @@ export function parseBuildCommandLine(args: readonly string[], host: CommandLine
       setCompilerOption(compilerOptions, name, value);
     }
     setBuildOption(buildOptions, name, value);
-    setWatchOption(watchOptions, name, value);
   }
   const errors = parser.errors;
   const { clean, force, verbose, dry } = buildOptions;
@@ -126,7 +116,6 @@ export function parseBuildCommandLine(args: readonly string[], host: CommandLine
   return {
     buildOptions,
     compilerOptions,
-    watchOptions,
     projects: parser.fileNames.length > 0 ? parser.fileNames : ['.'],
     errors,
     raw: parser.raw,
@@ -156,6 +145,8 @@ class CommandLineParser {
    * though `raw` (and so `--init`) has `[]`.
    */
   readonly droppedLists = new Set<string>();
+  /** Response files being read, so one that includes itself is skipped. */
+  private readonly responseFiles = new Set<string>();
 
   constructor(
     private readonly mode: ParserMode,
@@ -173,13 +164,8 @@ class CommandLineParser {
       } else if (arg.startsWith('-')) {
         const name = arg.startsWith('--') ? arg.slice(2) : arg.slice(1);
         const option = this.mode.options.find(name, true);
-        if (option !== undefined) {
-          i = this.parseOptionValue(args, i, option, this.mode);
-        } else {
-          const watchOption = watchOptionsByName.find(name, true);
-          if (watchOption !== undefined) i = this.parseOptionValue(args, i, watchOption, watchMode);
-          else this.errors.push(this.unknownOptionError(name, arg));
-        }
+        if (option !== undefined) i = this.parseOptionValue(args, i, option, this.mode);
+        else this.errors.push(this.unknownOptionError(name, arg));
       } else {
         this.fileNames.push(arg);
       }
@@ -193,12 +179,21 @@ class CommandLineParser {
         other.name === 'build' ? Diagnostics.Option_build_must_be_the_first_command_line_argument : this.mode.wrongMode;
       return createCompilerDiagnostic(message, name);
     }
+    const suggestion = getSpellingSuggestion(name, this.mode.options.names());
+    if (suggestion !== '') return createCompilerDiagnostic(this.mode.unknownOptionDidYouMean, arg, suggestion);
     return createCompilerDiagnostic(this.mode.unknownOption, arg);
   }
 
   /** Splits a response file into arguments at whitespace; `"` quotes an argument. */
   private parseResponseFile(fileName: string): void {
     const path = getNormalizedAbsolutePath(fileName, this.host.currentDirectory);
+    if (this.responseFiles.has(path)) return;
+    this.responseFiles.add(path);
+    this.readResponseFile(fileName, path);
+    this.responseFiles.delete(path);
+  }
+
+  private readResponseFile(fileName: string, path: string): void {
     const text = this.host.readFile(path);
     if (text === undefined) {
       this.errors.push(createCompilerDiagnostic(Diagnostics.Cannot_read_file_0, path));
@@ -217,10 +212,12 @@ class CommandLineParser {
           args.push(text.slice(start + 1, pos));
           pos++;
         } else {
-          this.errors.push(createCompilerDiagnostic(Diagnostics.Unterminated_quoted_string_in_response_file_0, path));
+          // The file name as written.
+          this.errors.push(
+            createCompilerDiagnostic(Diagnostics.Unterminated_quoted_string_in_response_file_0, fileName),
+          );
         }
       } else {
-        // tsgo panics when the file ends in an argument; tsc accepts it.
         while (pos < text.length && text.charCodeAt(pos) > 32) pos++;
         args.push(text.slice(start, pos));
       }
@@ -300,7 +297,10 @@ class CommandLineParser {
         this.raw.set(name, next !== 'false');
         return next === 'true' || next === 'false' ? i + 1 : i;
       case 'string':
-        if (this.validateString(option, next)) this.raw.set(name, next);
+        if (!this.validateString(option, next)) return i + 1;
+        if (option.isFilePath === true && isNetworkPathValue(next!, this.host.currentDirectory))
+          this.errors.push(createCompilerDiagnostic(Diagnostics.Network_path_0_is_not_supported, next!));
+        else this.raw.set(name, next);
         return i + 1;
       case 'list': {
         const errorCount = this.errors.length;

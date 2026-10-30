@@ -19,10 +19,11 @@ export enum ScriptTarget {
   ES2023 = 10,
   ES2024 = 11,
   ES2025 = 12,
+  ES2026 = 13,
   ESNext = 99,
   JSON = 100,
   Latest = ESNext,
-  LatestStandard = ES2025,
+  LatestStandard = ES2026,
 }
 
 export enum ModuleKind {
@@ -48,6 +49,16 @@ export enum ModuleKind {
   Preserve = 200,
 }
 
+/** Whether `import defer` and `import.defer()` are allowed under a module kind. */
+export function supportsDeferredImports(moduleKind: ModuleKind): boolean {
+  return moduleKind === ModuleKind.ESNext || moduleKind === ModuleKind.Preserve;
+}
+
+/** Whether `import source` and `import.source()` are allowed under a module kind. */
+export function supportsSourcePhaseImports(moduleKind: ModuleKind): boolean {
+  return moduleKind === ModuleKind.ESNext || moduleKind === ModuleKind.NodeNext || moduleKind === ModuleKind.Preserve;
+}
+
 export enum ModuleResolutionKind {
   /** @deprecated Accepted for parsing and validation only. */
   Classic = 1,
@@ -66,8 +77,8 @@ export enum ModuleDetectionKind {
 
 export enum JsxEmit {
   Preserve = 1,
-  ReactNative = 2,
-  React = 3,
+  React = 2,
+  ReactNative = 3,
   ReactJSX = 4,
   ReactJSXDev = 5,
 }
@@ -75,29 +86,6 @@ export enum JsxEmit {
 export enum NewLineKind {
   CRLF = 1,
   LF = 2,
-}
-
-export enum WatchFileKind {
-  FixedPollingInterval = 1,
-  PriorityPollingInterval = 2,
-  DynamicPriorityPolling = 3,
-  FixedChunkSizePolling = 4,
-  UseFsEvents = 5,
-  UseFsEventsOnParentDirectory = 6,
-}
-
-export enum WatchDirectoryKind {
-  UseFsEvents = 1,
-  FixedPollingInterval = 2,
-  DynamicPriorityPolling = 3,
-  FixedChunkSizePolling = 4,
-}
-
-export enum PollingKind {
-  FixedInterval = 1,
-  PriorityInterval = 2,
-  DynamicPriority = 3,
-  FixedChunkSize = 4,
 }
 
 /**
@@ -174,6 +162,8 @@ export interface CompilerOptions {
   outDir?: string;
   /** Substitutions are `undefined` where the config gave a non-array. */
   paths?: Map<string, string[] | undefined>;
+  /** Read only for `--showConfig`; plugins are not loaded. */
+  plugins?: PluginImport[];
   preserveConstEnums?: boolean;
   preserveSymlinks?: boolean;
   project?: string;
@@ -239,16 +229,6 @@ export interface CompilerOptions {
   checkers?: number;
 }
 
-export interface WatchOptions {
-  watchInterval?: number;
-  watchFile?: WatchFileKind;
-  watchDirectory?: WatchDirectoryKind;
-  fallbackPolling?: PollingKind;
-  synchronousWatchDirectory?: boolean;
-  excludeDirectories?: string[];
-  excludeFiles?: string[];
-}
-
 export interface BuildOptions {
   dry?: boolean;
   force?: boolean;
@@ -274,6 +254,11 @@ export type OptionValue = boolean | number | string | string[] | null;
 
 /** A compiler option value as stored in `CompilerOptions`, except `paths`. */
 export type CompilerOptionValue = boolean | number | string | string[];
+
+/** An entry of `plugins`: its `name`, or `''` when it has no string name. */
+export class PluginImport {
+  constructor(readonly name: string) {}
+}
 
 /** Compiler option names in field order. */
 export const compilerOptionNames: readonly string[] = [
@@ -344,6 +329,7 @@ export const compilerOptionNames: readonly string[] = [
   'noUncheckedSideEffectImports',
   'outDir',
   'paths',
+  'plugins',
   'preserveConstEnums',
   'preserveSymlinks',
   'project',
@@ -991,6 +977,7 @@ export function mergeCompilerOptions(
   );
   target.outDir = merged(source.outDir, target.outDir, nulls, 'outDir');
   target.paths = merged(source.paths, target.paths, nulls, 'paths');
+  target.plugins = merged(source.plugins, target.plugins, nulls, 'plugins');
   target.preserveConstEnums = merged(source.preserveConstEnums, target.preserveConstEnums, nulls, 'preserveConstEnums');
   target.preserveSymlinks = merged(source.preserveSymlinks, target.preserveSymlinks, nulls, 'preserveSymlinks');
   target.project = merged(source.project, target.project, nulls, 'project');
@@ -1409,32 +1396,6 @@ export function getCompilerOption(options: CompilerOptions, name: string): Compi
       return options.checkers;
   }
   return undefined;
-}
-
-export function setWatchOption(options: WatchOptions, name: string, value: OptionValue): void {
-  switch (name) {
-    case 'watchInterval':
-      options.watchInterval = numberValue(value);
-      break;
-    case 'watchFile':
-      if (value !== null) options.watchFile = numberValue(value);
-      break;
-    case 'watchDirectory':
-      if (value !== null) options.watchDirectory = numberValue(value);
-      break;
-    case 'fallbackPolling':
-      if (value !== null) options.fallbackPolling = numberValue(value);
-      break;
-    case 'synchronousWatchDirectory':
-      options.synchronousWatchDirectory = value === null ? undefined : value === true;
-      break;
-    case 'excludeDirectories':
-      options.excludeDirectories = stringList(value);
-      break;
-    case 'excludeFiles':
-      options.excludeFiles = stringList(value);
-      break;
-  }
 }
 
 export function setBuildOption(options: BuildOptions, name: string, value: OptionValue): void {

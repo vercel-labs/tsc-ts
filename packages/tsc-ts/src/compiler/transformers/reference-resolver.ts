@@ -527,26 +527,45 @@ export class ReferenceResolver {
     const moduleDeclaration = moduleDeclarationOfSpecifier(declaration);
     if (imported === undefined || moduleDeclaration === undefined) return false;
     const moduleSymbol = this.resolveModuleSpecifier(declaration, getModuleSpecifierOf(moduleDeclaration));
-    return moduleSymbol !== undefined && this.isExportedThroughTypeOnlyStar(moduleSymbol, imported, new Set<Symbol>());
+    return moduleSymbol !== undefined && this.isExportedThroughTypeOnlyStar(moduleSymbol, imported);
   }
 
-  /** Whether a module's export `name` comes from another module through an `export type *` on the way. */
-  private isExportedThroughTypeOnlyStar(moduleSymbol: Symbol, name: string, visited: Set<Symbol>): boolean {
-    if (visited.has(moduleSymbol)) return false;
-    visited.add(moduleSymbol);
-    const exports = moduleSymbol.exports;
-    if (exports === undefined || exports.has(name) || name === InternalSymbolName.Default) return false;
+  /**
+   * Whether a module's export `name` comes from another module through an `export type *`, as tsgo's
+   * getExportsOfModuleWorker decides: a module reached through a type-only `export *` has its exports marked, and a
+   * module reached without one, even if already visited, clears the mark of its own exports.
+   */
+  private isExportedThroughTypeOnlyStar(moduleSymbol: Symbol, name: string): boolean {
+    if (name === InternalSymbolName.Default) return false;
+    const walk = new TypeOnlyStarWalk(name);
+    this.visitExportStars(walk, moduleSymbol, false, false);
+    return walk.typeOnly && !walk.nonTypeOnly;
+  }
+
+  /** Visits a module of an `export *` walk; returns whether it exports the walk's name. */
+  private visitExportStars(
+    walk: TypeOnlyStarWalk,
+    symbol: Symbol | undefined,
+    starIsTypeOnly: boolean,
+    isTypeOnly: boolean,
+  ): boolean {
+    const exports = symbol === undefined ? undefined : symbol.exports;
+    if (!isTypeOnly && exports !== undefined && exports.has(walk.name)) walk.nonTypeOnly = true;
+    if (symbol === undefined || exports === undefined || walk.visited.has(symbol)) return false;
+    walk.visited.add(symbol);
+    let found = exports.has(walk.name);
     const star = exports.get(InternalSymbolName.ExportStar);
-    if (star === undefined) return false;
-    for (const declaration of getDeclarations(star)) {
-      if (!(declaration instanceof ExportDeclaration)) continue;
-      const target = this.resolveExternalModuleSymbol(
-        this.resolveModuleSpecifier(declaration, declaration.moduleSpecifier),
-      );
-      if (target === undefined || this.getExportFromTable(target, name, new Set<Symbol>()) === undefined) continue;
-      return declaration.isTypeOnly || this.isExportedThroughTypeOnlyStar(target, name, visited);
-    }
-    return false;
+    if (star !== undefined)
+      for (const declaration of getDeclarations(star)) {
+        if (!(declaration instanceof ExportDeclaration)) continue;
+        const target = this.resolveExternalModuleSymbol(
+          this.resolveModuleSpecifier(declaration, declaration.moduleSpecifier),
+        );
+        if (this.visitExportStars(walk, target, declaration.isTypeOnly, isTypeOnly || declaration.isTypeOnly))
+          found = true;
+      }
+    if (starIsTypeOnly && found) walk.typeOnly = true;
+    return found;
   }
 
   /** Whether a symbol is declared in the global scope. */
@@ -803,6 +822,34 @@ export class ReferenceResolver {
 
   // Constant values
 
+  /**
+   * The symbol an entity name expression such as `E.A` refers to as an expression: tsgo takes the symbol its checker
+   * resolves the expression to, where each name on the left is a value, so a local `let E` hides a const enum `E`.
+   */
+  private resolveValueEntityName(name: Node): Symbol | undefined {
+    let symbol: Symbol | undefined;
+    if (name instanceof Identifier) {
+      const resolved = this.resolveName(name, name.text, SymbolFlags.Value | SymbolFlags.Alias);
+      symbol = resolved === undefined ? undefined : this.getMergedSymbol(resolved);
+    } else if (name instanceof PropertyAccessExpression) {
+      const left = this.resolveValueEntityName(name.expression);
+      const right = name.name;
+      if (left === undefined || !(right instanceof Identifier)) return undefined;
+      let member = left.exports === undefined ? undefined : left.exports.get(right.text);
+      // A namespace merged with an alias also has the members of what the alias names, as its type does.
+      if (member === undefined && (left.flags & SymbolFlags.Alias) !== 0) {
+        const target = this.resolveAlias(left);
+        const targetExports = target === undefined ? undefined : target.exports;
+        if (targetExports !== undefined) member = targetExports.get(right.text);
+      }
+      if (member === undefined || (member.flags & (SymbolFlags.Value | SymbolFlags.Alias)) === 0) return undefined;
+      symbol = this.getMergedSymbol(member);
+    } else return undefined;
+    if (symbol === undefined || (symbol.flags & SymbolFlags.Alias) === 0) return symbol;
+    const target = this.resolveAlias(symbol);
+    return target === undefined ? undefined : this.getMergedSymbol(target);
+  }
+
   /** The value of an enum member, computing the values of its whole declaration. */
   getEnumMemberValue(member: Node): Evaluation {
     const declaration = member.parent;
@@ -816,11 +863,11 @@ export class ReferenceResolver {
     if (node instanceof EnumMember) return this.getEnumMemberValue(node);
     let symbol: Symbol | undefined;
     if (node instanceof PropertyAccessExpression) {
-      if (isEntityNameExpressionNode(node)) symbol = this.resolveEntityName(node, SymbolFlags.Value, false);
+      if (isEntityNameExpressionNode(node)) symbol = this.resolveValueEntityName(node);
     } else if (node instanceof ElementAccessExpression) {
       const argument = stringLiteralText(node.argumentExpression);
       if (isEntityNameExpressionNode(node.expression) && argument !== undefined) {
-        const root = this.resolveEntityName(node.expression, SymbolFlags.Value, false);
+        const root = this.resolveValueEntityName(node.expression);
         const exports = root === undefined ? undefined : root.exports;
         const member = exports === undefined ? undefined : exports.get(argument);
         if (member !== undefined) symbol = this.getMergedSymbol(member);
@@ -1129,6 +1176,23 @@ export function getDeclarationOfAliasSymbol(symbol: Symbol): Node | undefined {
     if (isAliasSymbolDeclaration(declaration)) return declaration;
   }
   return undefined;
+}
+
+/** The state of `isExportedThroughTypeOnlyStar`'s walk over the `export *` declarations of modules for one name. */
+class TypeOnlyStarWalk {
+  readonly name: string;
+  readonly visited: Set<Symbol>;
+  /** Whether a module reached through a type-only `export *` exports the name. */
+  typeOnly: boolean;
+  /** Whether a module reached without one exports the name itself. */
+  nonTypeOnly: boolean;
+
+  constructor(name: string) {
+    this.name = name;
+    this.visited = new Set<Symbol>();
+    this.typeOnly = false;
+    this.nonTypeOnly = false;
+  }
 }
 
 function isTypeOnlyAlias(symbol: Symbol): boolean {

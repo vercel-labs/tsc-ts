@@ -12,7 +12,7 @@ import { tscTs, tscTsMissing } from './toolchain.mjs';
 
 const root = resolve(import.meta.dirname, '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 const skip = (!existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo') || tscTsMissing;
 
 /**

@@ -14,7 +14,7 @@ import { tscTs, tscTsMissing } from './toolchain.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 const skip = (!existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo') || tscTsMissing;
 
 const base = { target: 'ES2022', strict: true, noEmit: true, types: [] };
@@ -116,7 +116,7 @@ const projects = [
     {
       'a.ts':
         'declare const d: any;\nexport class C {\n  m(@d((t: number) => 0) p: number) {}\n  @d((u: number) => 0) n() {}\n}\n',
-      'b.ts': 'return [1].map((role: number) => 1);\n',
+      'b.ts': 'return [1].map((role: number) => 1);\nclass K {\n  static {\n    return (k: number) => 0;\n  }\n}\n',
       'tsconfig.json': JSON.stringify({
         compilerOptions: { ...base, noUnusedLocals: true, noUnusedParameters: true },
         files: ['a.ts', 'b.ts'],

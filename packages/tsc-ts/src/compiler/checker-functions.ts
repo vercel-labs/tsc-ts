@@ -54,6 +54,7 @@ import {
   reportErrorsFromWidening,
   reportImplicitAny,
   WideningKind,
+  getWidenedTypeForVariableLikeDeclaration,
 } from './checker-symbol-types.js';
 import { getMergedSymbol, getSymbolOfDeclaration } from './checker-symbols.js';
 import {
@@ -105,7 +106,12 @@ import {
   getInferenceContext,
   instantiateContextualType,
 } from './checker-contextual.js';
-import { checkJSDocFullSignature, checkUnmatchedJSDocParameters, getFullSignatureTypeNode } from './checker-jsdoc.js';
+import {
+  checkJSDocFullSignature,
+  checkJSDocFullSignatureType,
+  checkUnmatchedJSDocParameters,
+  getFullSignatureTypeNode,
+} from './checker-jsdoc.js';
 import { getEffectiveCheckNode, isFunctionLike, nodeIsMissing } from './ast-utilities.js';
 import {
   getFlowTypeOfReferenceAt,
@@ -144,6 +150,7 @@ import {
 
 export function checkFunctionExpressionOrObjectLiteralMethod(c: Checker, node: Node, checkMode: CheckMode): Type {
   checkNodeDeferred(c, node);
+  checkJSDocFullSignatureType(c, node);
   if (node.kind === SyntaxKind.FunctionExpression) checkCollisionsForDeclarationName(c, node, getName(node));
   if (node.kind === SyntaxKind.GetAccessor || node.kind === SyntaxKind.SetAccessor) return c.anyType;
   if ((checkMode & CheckMode.SkipContextSensitive) !== 0 && isContextSensitive(c, node)) {
@@ -238,7 +245,8 @@ function contextuallyCheckFunctionExpressionOrObjectLiteralMethod(c: Checker, no
     getType(node) === undefined &&
     resolvedReturnTypeOf(c, signature) === undefined
   ) {
-    const returnType = getReturnTypeFromBodyEx(c, node, checkMode);
+    // The resolved return type is cached, so it is computed without SkipContextSensitive to keep anyFunctionType out of it.
+    const returnType = getReturnTypeFromBodyEx(c, node, checkMode & ~CheckMode.SkipContextSensitive);
     if (resolvedReturnTypeOf(c, signature) === undefined) signatureSideOf(c, signature).resolvedReturnType = returnType;
   }
   checkFunctionLikeSignature(c, node);
@@ -328,7 +336,12 @@ function assignParameterSymbolType(c: Checker, parameter: Symbol, contextualType
   if (c.symbolTypes.get(id) !== undefined) return;
   const declaration = parameter.valueDeclaration;
   if (contextualType === undefined) {
-    c.symbolTypes.set(id, getTypeOfSymbol(c, parameter));
+    c.symbolTypes.set(
+      id,
+      declaration !== undefined
+        ? getWidenedTypeForVariableLikeDeclaration(c, declaration, true)
+        : getTypeOfSymbol(c, parameter),
+    );
     return;
   }
   c.symbolTypes.set(
@@ -574,6 +587,9 @@ export function checkAwaitExpression(c: Checker, node: Node): Type {
 export function checkYieldExpression(c: Checker, node: Node): Type {
   checkGrammarYieldOfExpression(c, node);
   const yieldExpr = node as YieldExpression;
+  // The operand is checked also outside a generator.
+  const operand = yieldExpr.expression;
+  const yieldExpressionType = operand !== undefined ? checkExpression(c, operand) : c.undefinedWideningType;
   const func = getContainingFunctionLike(node);
   if (func === undefined) return c.anyType;
   const functionFlags = getFunctionFlags(func);
@@ -593,8 +609,6 @@ export function checkYieldExpression(c: Checker, node: Node): Type {
     returnType !== undefined ? getIterationTypesOfGeneratorFunctionReturnType(c, returnType, isAsync) : undefined;
   const signatureYieldType = iterationTypes?.yieldType ?? c.anyType;
   const signatureNextType = iterationTypes?.nextType ?? c.anyType;
-  const operand = yieldExpr.expression;
-  const yieldExpressionType = operand !== undefined ? checkExpression(c, operand) : c.undefinedWideningType;
   const yieldedType = getYieldedTypeOfYieldExpression(c, yieldExpr, yieldExpressionType, signatureNextType, isAsync);
   if (returnType !== undefined && yieldedType !== undefined)
     checkTypeAssignableToAndOptionallyElaborate(c, yieldedType, signatureYieldType, operand ?? node, operand);
@@ -1266,7 +1280,8 @@ function assignParameterType(c: Checker, declaration: Node): void {
   if (symbol === undefined) return;
   const id = getSymbolId(symbol);
   if (c.symbolTypes.get(id) !== undefined) return;
-  const t = getTypeOfSymbol(c, symbol);
+  // Without a context, the parameter's own type, reporting its implicit any errors.
+  const t = getWidenedTypeForVariableLikeDeclaration(c, declaration, true);
   c.symbolTypes.set(
     id,
     addOptionality(c, t, false, getInitializer(declaration) === undefined && isOptionalDeclaration(declaration)),

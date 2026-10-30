@@ -8,8 +8,8 @@ import { compileSources, tempDir } from './temp.mjs';
 export const root = resolve(import.meta.dirname, '..');
 export const repo = resolve(root, '../..');
 export const oracle = resolve(repo, 'packages/tsgo/dist/encode-oracle');
-export const cases = resolve(repo, 'upstream/TypeScript/tests/cases');
-export const libs = resolve(repo, 'upstream/typescript-go/internal/bundled/libs');
+export const cases = resolve(repo, 'upstream/TypeScript/tsc/testdata/tests/cases');
+export const libs = resolve(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
 
 const parsable = /\.(?:[cm]?[jt]sx?|json)$/;
 

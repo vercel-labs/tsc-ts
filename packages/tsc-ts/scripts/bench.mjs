@@ -16,8 +16,8 @@ const runs = Number(option('--runs', '5'));
 const jsonFile = option('--json', undefined);
 
 const repo = resolve('../..');
-const libs = join(repo, 'upstream/typescript-go/internal/bundled/libs');
-const cases = join(repo, 'upstream/TypeScript/tests/cases');
+const libs = join(repo, 'upstream/TypeScript/tsc/internal/bundled/libs');
+const cases = join(repo, 'upstream/TypeScript/tsc/testdata/tests/cases');
 const scriptc = process.env.SCRIPTC ?? join(repo, 'node_modules/.bin/scriptc');
 const scanOracle = join(repo, 'packages/tsgo/dist/scan-oracle');
 const tsgo = join(repo, 'packages/tsgo/dist/tsgo');

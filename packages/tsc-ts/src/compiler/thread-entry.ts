@@ -56,6 +56,8 @@ export interface CheckerThreadData {
   readonly emitKinds: number[] | undefined;
   readonly checking: boolean;
   readonly units: number[];
+  /** See `CheckedProgram.globalsInFileDiagnostics`. */
+  readonly globalsInFileDiagnostics: boolean;
   /** The main thread's report format (`formattedReports`), which the thread formats its diagnostics in. */
   readonly reportFormat: DiagnosticFormatOptions | undefined;
 }
@@ -103,6 +105,7 @@ export function startThreads(spawn: ThreadSpawn, drivers: ThreadDrivers, args: r
     emitKinds,
     checking,
     units,
+    globalsInFileDiagnostics,
   ) =>
     spawn({
       kind: 'check',
@@ -118,6 +121,7 @@ export function startThreads(spawn: ThreadSpawn, drivers: ThreadDrivers, args: r
       emitKinds,
       checking,
       units,
+      globalsInFileDiagnostics,
       reportFormat: formattedReports.format,
     });
   if (sharesPublishedGraphs) {
@@ -203,11 +207,16 @@ function runCheckerThread(job: CheckerThreadData, drivers: ThreadDrivers): void 
     mark('program received');
   } else program = drivers.programOfCommandLine(job.args);
   // Without a program this thread checks nothing; the main thread checks the files it would have.
+  let checked: CheckedProgram | undefined = undefined;
+  if (program !== undefined) {
+    checked = new CheckedProgram(program);
+    checked.globalsInFileDiagnostics = job.globalsInFileDiagnostics;
+  }
   const result =
-    program === undefined
+    checked === undefined
       ? new CheckerResult(job.index, [], [], [], [], 0, [])
       : checkFromQueue(
-          new CheckedProgram(program),
+          checked,
           job.index,
           new Int32Array(job.counter),
           job.order,

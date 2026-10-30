@@ -689,9 +689,6 @@ export function findModuleReferences(
         if (getSourceFileFromReference(program, referencingFile, ref.fileName) === (searchSourceFile as SourceFile))
           refs.push({ kind: ModuleReferenceKind.Reference, literal: undefined, referencingFile });
     }
-    // tsc resolves the specifiers with another checker of its pool, whose merged symbols
-    // (of modules with augmentations) differ from the searched one.
-    if ((searchModuleSymbol.flags & SymbolFlags.Transient) !== 0) continue;
     forEachImport(program, referencingFile, (importDeclaration, moduleSpecifier) => {
       if (getSymbolAtLocation(c, moduleSpecifier) !== searchModuleSymbol) return;
       if (importDeclaration.pos < 0)

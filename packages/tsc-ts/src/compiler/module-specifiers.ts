@@ -154,6 +154,21 @@ class ResolvedPreferences {
 
 //// Entry points
 
+/** Where a module specifier came from: an existing import (None), `node_modules`, `paths`, a redirect, a relative path, or an ambient module. */
+export const enum ModuleSpecifierResultKind {
+  None,
+  NodeModules,
+  Paths,
+  Redirect,
+  Relative,
+  Ambient,
+}
+
+export interface ModuleSpecifiersResult {
+  readonly specifiers: string[];
+  readonly kind: ModuleSpecifierResultKind;
+}
+
 /**
  * Specifiers `importingFile` can import `moduleFileName` with, best first, as tsgo's
  * `GetModuleSpecifiersForFileWithInfo`. `overrideImportMode` is `None` for the file's own mode.
@@ -167,6 +182,27 @@ export function getModuleSpecifiersForFile(
   overrideImportMode: ModuleKind,
   forAutoImports: boolean,
 ): string[] {
+  return getModuleSpecifiersForFileWithInfo(
+    importingFile,
+    moduleFileName,
+    options,
+    host,
+    preferences,
+    overrideImportMode,
+    forAutoImports,
+  ).specifiers;
+}
+
+/** The specifiers `getModuleSpecifiersForFile` gives, and where they came from. */
+export function getModuleSpecifiersForFileWithInfo(
+  importingFile: SourceFile,
+  moduleFileName: string,
+  options: CompilerOptions,
+  host: ModuleSpecifierHost,
+  preferences: ModuleSpecifierPreferences,
+  overrideImportMode: ModuleKind,
+  forAutoImports: boolean,
+): ModuleSpecifiersResult {
   const modulePaths = getAllModulePaths(
     new ImporterInfo(host.getSourceOfProjectReferenceIfOutputIncluded(importingFile), host.useCaseSensitiveFileNames()),
     moduleFileName,
@@ -319,7 +355,7 @@ function computeModuleSpecifiers(
   userPreferences: ModuleSpecifierPreferences,
   overrideImportMode: ModuleKind,
   forAutoImport: boolean,
-): string[] {
+): ModuleSpecifiersResult {
   const info = new ImporterInfo(importingFile.fileName, host.useCaseSensitiveFileNames());
   const preferences = resolvePreferences(userPreferences, host, options, importingFile, '');
   const cwd = host.getCurrentDirectory();
@@ -347,7 +383,7 @@ function computeModuleSpecifiers(
     const existingMode = host.getModeForUsageLocation(importingFile, existingImport);
     // An import resolved in another mode may not resolve the same way.
     if (existingMode !== targetMode && existingMode !== ModuleKind.None && targetMode !== ModuleKind.None) continue;
-    return [text];
+    return { specifiers: [text], kind: ModuleSpecifierResultKind.None };
   }
 
   let importedFileIsInNodeModules = false;
@@ -375,7 +411,8 @@ function computeModuleSpecifiers(
     if (specifier !== '') {
       nodeModulesSpecifiers.push(specifier);
       // A specifier for a redirect is a bare package name; nothing beats it.
-      if (modulePath.isRedirect) return nodeModulesSpecifiers;
+      if (modulePath.isRedirect)
+        return { specifiers: nodeModulesSpecifiers, kind: ModuleSpecifierResultKind.NodeModules };
     }
     const local = getLocalModuleSpecifier(
       modulePath.fileName,
@@ -401,10 +438,12 @@ function computeModuleSpecifiers(
       relativeSpecifiers.push(local);
     }
   }
-  if (pathsSpecifiers.length > 0) return pathsSpecifiers;
-  if (redirectPathsSpecifiers.length > 0) return redirectPathsSpecifiers;
-  if (nodeModulesSpecifiers.length > 0) return nodeModulesSpecifiers;
-  return relativeSpecifiers;
+  if (pathsSpecifiers.length > 0) return { specifiers: pathsSpecifiers, kind: ModuleSpecifierResultKind.Paths };
+  if (redirectPathsSpecifiers.length > 0)
+    return { specifiers: redirectPathsSpecifiers, kind: ModuleSpecifierResultKind.Redirect };
+  if (nodeModulesSpecifiers.length > 0)
+    return { specifiers: nodeModulesSpecifiers, kind: ModuleSpecifierResultKind.NodeModules };
+  return { specifiers: relativeSpecifiers, kind: ModuleSpecifierResultKind.Relative };
 }
 
 /** A specifier through `paths`, `package.json` `imports`, `rootDirs` or a relative path. */
@@ -678,9 +717,19 @@ function tryGetModuleNameAsNodeModule(
 ): string {
   const parts = getNodeModulePathParts(modulePath.fileName);
   if (parts === undefined) return '';
+  // Only a `node_modules` in the importing file's directory or above can be used, and not the global typings
+  // cache. This is checked before `exports`, which can give a bare specifier directly.
+  const caseSensitive = host.useCaseSensitiveFileNames();
+  const globalTypingsCacheLocation = host.getGlobalTypingsCacheLocation();
+  const pathToTopLevelNodeModules = modulePath.fileName.slice(0, parts.topLevelNodeModulesIndex);
+  if (
+    !hasPrefix(info.sourceDirectory, pathToTopLevelNodeModules, caseSensitive) ||
+    (globalTypingsCacheLocation !== '' &&
+      hasPrefix(globalTypingsCacheLocation, pathToTopLevelNodeModules, caseSensitive))
+  )
+    return '';
   const preferences = resolvePreferences(userPreferences, host, options, importingFile, '');
   const allowedEndings = preferences.allowedEndings(ModuleKind.None);
-  const caseSensitive = host.useCaseSensitiveFileNames();
   let moduleSpecifier = modulePath.fileName;
   let isPackageRootPath = false;
   if (!packageNameOnly) {
@@ -706,16 +755,6 @@ function tryGetModuleNameAsNodeModule(
   }
   if (modulePath.isRedirect && !isPackageRootPath) return '';
 
-  // Only a `node_modules` in the importing file's directory or above can be used, and not the
-  // global typings cache.
-  const globalTypingsCacheLocation = host.getGlobalTypingsCacheLocation();
-  const pathToTopLevelNodeModules = moduleSpecifier.slice(0, parts.topLevelNodeModulesIndex);
-  if (
-    !hasPrefix(info.sourceDirectory, pathToTopLevelNodeModules, caseSensitive) ||
-    (globalTypingsCacheLocation !== '' &&
-      hasPrefix(globalTypingsCacheLocation, pathToTopLevelNodeModules, caseSensitive))
-  )
-    return '';
   // A package found in `@types` is imported by its own name.
   return getPackageNameFromTypesPackageName(moduleSpecifier.slice(parts.topLevelPackageNameIndex + 1));
 }
@@ -1285,7 +1324,8 @@ export function getAllowedEndingsInPreferredOrder(
   syntaxImpliedNodeFormat: ModuleKind,
 ): ModuleSpecifierEnding[] {
   let preferred = getPreferredEnding(preferences, host, options, importingFile, oldImportSpecifier, ModuleKind.None);
-  if (host.getDefaultResolutionModeForFile(importingFile) !== syntaxImpliedNodeFormat)
+  const resolutionMode = host.getDefaultResolutionModeForFile(importingFile);
+  if (resolutionMode !== syntaxImpliedNodeFormat)
     preferred = getPreferredEnding(
       preferences,
       host,
@@ -1295,7 +1335,9 @@ export function getAllowedEndingsInPreferredOrder(
       syntaxImpliedNodeFormat,
     );
   const allowTs = shouldAllowImportingTsExtension(options, importingFile.fileName);
-  if (syntaxImpliedNodeFormat === ModuleKind.ESNext && isNodeNext(options))
+  // Without a mode implied by the syntax, the file's default resolution mode applies.
+  const effectiveSyntaxMode = syntaxImpliedNodeFormat !== ModuleKind.None ? syntaxImpliedNodeFormat : resolutionMode;
+  if (effectiveSyntaxMode === ModuleKind.ESNext && isNodeNext(options))
     return allowTs
       ? [ModuleSpecifierEnding.TsExtension, ModuleSpecifierEnding.JsExtension]
       : [ModuleSpecifierEnding.JsExtension];

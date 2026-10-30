@@ -77,6 +77,7 @@ import {
 import { addIntraExpressionInferenceSite } from './checker-inference.js';
 import { isEmptyObjectType } from './checker-type-factory.js';
 import { getTypeOfExpandoObjectLiteral, isJSObjectLiteral } from './checker-javascript.js';
+import { checkNodeDeferred } from './checker-source-file.js';
 import {
   CheckFlags,
   copyDeclarations,
@@ -153,6 +154,8 @@ class ObjectLiteralBuilder {
 export function checkObjectLiteral(c: Checker, node: Node, checkMode: CheckMode): Type {
   const expandoType = getTypeOfExpandoObjectLiteral(c, node);
   if (expandoType !== undefined) return expandoType;
+  // Deprecated properties of the contextual type are reported once the file is checked.
+  checkNodeDeferred(c, node);
   const inDestructuringPattern = isAssignmentTarget(node);
   checkGrammarObjectLiteralOfExpression(c, node as ObjectLiteralExpression, inDestructuringPattern);
   const allProperties = c.strictNullChecks ? new Map<string, Symbol>() : undefined;

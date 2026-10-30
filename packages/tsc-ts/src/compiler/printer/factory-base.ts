@@ -1831,10 +1831,17 @@ export abstract class NodeFactoryBase {
     modifiers: ModifierList | undefined,
     keyword: SyntaxKind,
     name: ModuleName,
+    attributes: TypeLiteralNode | undefined,
     body: ModuleBody | undefined,
   ): ModuleDeclaration {
-    if (modifiers !== node.modifiers || keyword !== node.keyword || name !== node.name || body !== node.body) {
-      const updated = new ModuleDeclaration(modifiers, keyword, name, body);
+    if (
+      modifiers !== node.modifiers ||
+      keyword !== node.keyword ||
+      name !== node.name ||
+      attributes !== node.attributes ||
+      body !== node.body
+    ) {
+      const updated = new ModuleDeclaration(modifiers, keyword, name, attributes, body);
       this.finishUpdate(updated, node);
       return updated;
     }
@@ -2121,7 +2128,7 @@ export abstract class NodeFactoryBase {
     return node;
   }
 
-  updateQualifiedName(node: QualifiedName, left: EntityName, right: Identifier): QualifiedName {
+  updateQualifiedName(node: QualifiedName, left: EntityName, right: MemberName): QualifiedName {
     if (left !== node.left || right !== node.right) {
       const updated = new QualifiedName(left, right);
       this.finishUpdate(updated, node);

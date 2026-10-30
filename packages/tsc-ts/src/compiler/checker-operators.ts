@@ -260,10 +260,11 @@ export function errorAndMaybeSuggestAwait(
   message: DiagnosticMessage,
   args: string[],
 ): Diagnostic {
-  const diagnostic = createDiagnosticForNode(location, message, args);
+  // The related information goes on the reported diagnostic after it is added, as tsgo attaches it,
+  // so a later equal report compares unequal to it and is kept.
+  const diagnostic = c.error(location, message, ...args);
   if (maybeMissingAwait)
     diagnostic.addRelatedInfo(createDiagnosticForNode(location, Diagnostics.Did_you_forget_to_use_await, []));
-  c.addDiagnostic(diagnostic);
   return diagnostic;
 }
 
@@ -1145,9 +1146,15 @@ function getSyntacticNullishnessSemantics(c: Checker, nodeIn: Node): PredicateSe
         // The right operand decides.
         case SyntaxKind.CommaToken:
         case SyntaxKind.EqualsToken:
-        case SyntaxKind.QuestionQuestionToken:
-        case SyntaxKind.QuestionQuestionEqualsToken:
           return getSyntacticNullishnessSemantics(c, binary.right);
+        // The left operand when it isn't nullish, otherwise the right operand.
+        case SyntaxKind.QuestionQuestionToken:
+        case SyntaxKind.QuestionQuestionEqualsToken: {
+          const left = getSyntacticNullishnessSemantics(c, binary.left);
+          let result = left & PredicateSemantics.Never;
+          if ((left & PredicateSemantics.Always) !== 0) result |= getSyntacticNullishnessSemantics(c, binary.right);
+          return result;
+        }
       }
       return PredicateSemantics.Never;
     }

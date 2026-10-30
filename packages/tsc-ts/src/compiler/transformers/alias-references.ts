@@ -5,6 +5,7 @@
 // namespace, enum or module counts as a use.
 import {
   BinaryExpression,
+  ComputedPropertyName,
   ConditionalTypeNode,
   ExportAssignment,
   ExportDeclaration,
@@ -32,13 +33,16 @@ import {
   UnionTypeNode,
   getDotDotDotToken,
   getExpression,
+  getHeritageClauses,
   getInitializer,
+  getName,
   getParameters,
   getTagName,
   getType,
   getTypeArguments,
 } from '../ast.js';
 import { canHaveDecorators, isImportCall } from '../ast-utilities.js';
+import { isAssignmentTarget, isClassLike } from '../binder-utilities.js';
 import {
   type CompilerOptions,
   JsxEmit,
@@ -52,6 +56,7 @@ import {
   getFirstConstructorWithBody,
   getRestParameterElementType,
   getSetAccessorValueParameter,
+  isAccessor,
   nodeCanBeDecorated,
 } from './decorator-utilities.js';
 import { hasDecorators, hasSyntacticModifier } from './utilities.js';
@@ -105,10 +110,16 @@ export class AliasReferences extends NodeVisitor {
       node.kind !== SyntaxKind.PropertyDeclaration
     )
       return false;
+    // tsgo doesn't answer semantic questions inside a `with` statement.
+    if ((node.flags & NodeFlags.InWithStatement) !== 0) return false;
     if (node instanceof Identifier) {
       const parent = node.parent;
       if (
         parent === undefined ||
+        isUnresolvedIdentifier(node as Identifier, this.options.experimentalDecorators === true)
+      )
+        return false;
+      if (
         !(
           isExpressionNode(node) ||
           parent instanceof ShorthandPropertyAssignment ||
@@ -120,7 +131,6 @@ export class AliasReferences extends NodeVisitor {
       // Only the left of a property access or qualified name; the right is a property lookup.
       if (parent instanceof PropertyAccessExpression && parent.expression !== node) return false;
       if (parent instanceof QualifiedName && parent.left !== node) return false;
-      if (isInsideMetaProperty(node)) return false;
       return this.markIdentifier(node as Identifier);
     }
     if (node.kind === SyntaxKind.PropertyAccessExpression || node.kind === SyntaxKind.QualifiedName) {
@@ -129,7 +139,9 @@ export class AliasReferences extends NodeVisitor {
         top !== undefined && isPropertyAccessOrQualifiedName(top);
         top = top.parent
       )
-        if (isPartOfTypeNode(top)) return false;
+        // Names in an import type's qualifier, `ns.y` in `typeof import("./b").ns.y`, are exports of the
+        // imported module, not references to this file's imports.
+        if (isPartOfTypeNode(top) || isImportTypeQualifierPart(top)) return false;
       return this.markProperty(node);
     }
     if (node instanceof ExportAssignment) {
@@ -411,6 +423,17 @@ export class AliasReferences extends NodeVisitor {
   }
 }
 
+/** Whether `node` is the qualifier of an import type, or a part of one. */
+function isImportTypeQualifierPart(node: Node): boolean {
+  let current = node;
+  let parent = current.parent;
+  while (parent !== undefined && parent.kind === SyntaxKind.QualifiedName) {
+    current = parent;
+    parent = parent.parent;
+  }
+  return parent instanceof ImportTypeNode && parent.qualifier === current;
+}
+
 function isPropertyAccessOrQualifiedName(node: Node): boolean {
   return node.kind === SyntaxKind.PropertyAccessExpression || node.kind === SyntaxKind.QualifiedName;
 }
@@ -446,9 +469,101 @@ function shouldMarkIdentifier(node: Identifier): boolean {
   return !(exportDeclaration instanceof ExportDeclaration && exportDeclaration.isTypeOnly);
 }
 
-function isInsideMetaProperty(node: Node): boolean {
-  for (let current: Node | undefined = node; current !== undefined; current = current.parent)
+/**
+ * Whether checking never resolves identifier `node`, so tsgo doesn't mark it: in a meta property, the name of a
+ * shorthand property with an initializer outside a destructuring assignment, in a decorator of a node that can't be
+ * decorated, in the expression of `for (var of x)`, in an invalid computed property name, in an interface's heritage
+ * clause, or in a class's `extends` types after the first.
+ */
+function isUnresolvedIdentifier(node: Identifier, legacyDecorators: boolean): boolean {
+  const parent = node.parent!;
+  if (
+    parent instanceof ShorthandPropertyAssignment &&
+    parent.name === node &&
+    parent.objectAssignmentInitializer !== undefined &&
+    !isAssignmentTarget(parent.parent!)
+  )
+    return true;
+  let decorator: Node | undefined = undefined;
+  let forNode: Node | undefined = undefined;
+  let computedName: Node | undefined = undefined;
+  let heritageClause: Node | undefined = undefined;
+  for (let current: Node | undefined = node; current !== undefined; current = current.parent) {
     if (current instanceof MetaProperty) return true;
+    if (current.kind === SyntaxKind.Decorator) {
+      if (decorator === undefined) decorator = current;
+    } else if (current instanceof ForInOrOfStatement) {
+      if (forNode === undefined) forNode = current;
+    } else if (current instanceof ComputedPropertyName) {
+      if (computedName === undefined) computedName = current;
+    } else if (current instanceof HeritageClause) {
+      if (heritageClause === undefined) heritageClause = current;
+    }
+  }
+  if (decorator !== undefined) {
+    const decorated = decorator.parent;
+    if (
+      decorated !== undefined &&
+      !nodeCanBeDecorated(
+        legacyDecorators,
+        decorated,
+        decorated.parent,
+        decorated.parent === undefined ? undefined : decorated.parent.parent,
+      )
+    )
+      return true;
+  }
+  if (forNode !== undefined) {
+    const statement = forNode as ForInOrOfStatement;
+    if (
+      statement.initializer instanceof VariableDeclarationList &&
+      statement.initializer.declarations.nodes.length === 0 &&
+      (node === statement.expression || isNodeDescendantOf(node, statement.expression))
+    )
+      return true;
+  }
+  if (computedName !== undefined) {
+    const grandparent = computedName.parent!.parent!;
+    if (
+      (grandparent.kind === SyntaxKind.TypeLiteral ||
+        isClassLike(grandparent) ||
+        grandparent.kind === SyntaxKind.InterfaceDeclaration) &&
+      (computedName as ComputedPropertyName).expression instanceof BinaryExpression &&
+      ((computedName as ComputedPropertyName).expression as BinaryExpression).operatorToken.kind ===
+        SyntaxKind.InKeyword &&
+      !isAccessor(computedName.parent!)
+    )
+      return true;
+  }
+  if (heritageClause !== undefined) {
+    const declaration = heritageClause.parent!;
+    // An interface's heritage clauses are types.
+    if (declaration.kind === SyntaxKind.InterfaceDeclaration) return true;
+    // Only a class's first `extends` type is its base class; checking never resolves the others.
+    if (isClassLike(declaration) && (heritageClause as HeritageClause).token === SyntaxKind.ExtendsKeyword) {
+      const first = getClassExtendsHeritageElement(declaration);
+      if (first !== undefined && node !== first && !isNodeDescendantOf(node, first)) return true;
+    }
+  }
+  return false;
+}
+
+/** The first type of a class's first `extends` clause. */
+function getClassExtendsHeritageElement(node: Node): Node | undefined {
+  const clauses = getHeritageClauses(node);
+  if (clauses === undefined) return undefined;
+  for (const clause of clauses.nodes)
+    if ((clause as HeritageClause).token === SyntaxKind.ExtendsKeyword) {
+      const types = (clause as HeritageClause).types.nodes;
+      return types.length > 0 ? types[0] : undefined;
+    }
+  return undefined;
+}
+
+/** Whether `node` is inside `ancestor`. */
+function isNodeDescendantOf(node: Node, ancestor: Node): boolean {
+  for (let current = node.parent; current !== undefined; current = current.parent)
+    if (current === ancestor) return true;
   return false;
 }
 
@@ -631,6 +746,10 @@ function isInExpressionContext(node: Node): boolean {
       return getExpression(parent) === node && !isPartOfTypeNode(parent);
     case SyntaxKind.ShorthandPropertyAssignment:
       return parent instanceof ShorthandPropertyAssignment && parent.objectAssignmentInitializer === node;
+    case SyntaxKind.FunctionExpression:
+    case SyntaxKind.ClassExpression:
+      // The name of a function or class expression is a declaration name, not an expression.
+      return getName(parent) !== node;
   }
   return isExpressionNode(parent);
 }

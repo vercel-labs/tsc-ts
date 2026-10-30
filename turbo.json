@@ -6,7 +6,7 @@
       "outputs": []
     },
     "build:oracle": {
-      "outputs": ["dist/*-oracle", "dist/tsgo", "dist/oracle-build.json"],
+      "outputs": ["dist/*-oracle", "dist/tsgo", "dist/typescript/**", "dist/oracle-build.json"],
       "inputs": ["oracles/**", "checkhost/**", "scripts/build-oracle.mjs", "$TURBO_ROOT$/upstream.json"]
     },
     "test": {

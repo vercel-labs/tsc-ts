@@ -16,8 +16,6 @@ import {
   FileReference,
   FunctionTypeNode,
   Identifier,
-  ImportAttribute,
-  ImportAttributes,
   type ImportDeclaration,
   ImportEqualsDeclaration,
   KeywordTypeNode,
@@ -59,7 +57,6 @@ import {
   getInitializer,
   getMembers,
   getName,
-  getText,
   getParameters,
   getSymbol,
   getType,
@@ -83,8 +80,7 @@ import {
   skipParentheses,
 } from '../binder-utilities.js';
 import { NameResolver } from '../name-resolver.js';
-import type { CompilerOptions, ModuleKind } from '../options.js';
-import { ModuleKind as ModuleKinds } from '../options.js';
+import type { CompilerOptions } from '../options.js';
 import { combinePaths, getDirectoryPath, getNormalizedAbsolutePath, normalizePath } from '../path.js';
 import type { EmitContext } from '../printer/emit-context.js';
 import { EmitFlags } from '../printer/emit-flags.js';
@@ -735,22 +731,6 @@ export class SyntacticDeclarationEmitResolver extends DeclarationEmitResolver {
 
   getTypeReferenceSerializationKind(typeName: Node, location: Node | undefined): TypeReferenceSerializationKind {
     return this.emitResolver.getTypeReferenceSerializationKind(typeName, location);
-  }
-
-  getResolutionModeOverride(node: Node): ModuleKind | undefined {
-    if (!(node instanceof ImportAttributes)) return undefined;
-    for (const element of node.attributes.nodes) {
-      if (!(element instanceof ImportAttribute)) continue;
-      const name = element.name;
-      if (name === undefined || (name.kind !== SyntaxKind.StringLiteral && name.kind !== SyntaxKind.Identifier))
-        continue;
-      if (getText(name) !== 'resolution-mode') continue;
-      const value = element.value;
-      if (!(value instanceof StringLiteral)) return undefined;
-      if (value.text === 'import') return ModuleKinds.ESNext;
-      if (value.text === 'require') return ModuleKinds.CommonJS;
-    }
-    return undefined;
   }
 
   getSourceFileFromReference(file: SourceFile, reference: FileReference): SourceFile | undefined {

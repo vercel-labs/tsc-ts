@@ -13,7 +13,7 @@ import {
   type Node,
   type SourceFile,
 } from './ast.js';
-import { Diagnostics, type DiagnosticMessage, type MessageWithArgs } from './diagnostics.js';
+import { Diagnostics, type DiagnosticMessage, type MessageWithArgs, messageWithArgs } from './diagnostics.js';
 import { FileIncludeKind, FileIncludeReason, IncludeProcessor, ProcessingDiagnostic } from './file-include.js';
 import type { FileSystem } from './file-system.js';
 import { ModuleResolutionHost, Resolver, getAutomaticTypeDirectiveNames } from './module-resolution.js';
@@ -42,7 +42,7 @@ import {
   takePreparedFile,
 } from './parallel-parse.js';
 import type { PackageJsonLookup } from './package-json.js';
-import { parseSourceFile } from './parser.js';
+import { parseSourceFile, getScriptKindFromFileName } from './parser.js';
 import { mark } from './timeline.js';
 import {
   combinePaths,
@@ -59,6 +59,7 @@ import {
   supportedTSExtensionsWithJsonFlat,
   toFileNameLowerCase,
   toPath,
+  isNetworkPath,
 } from './path.js';
 import {
   getDefaultLibFileName,
@@ -76,6 +77,7 @@ import {
   SourceFileMetadata,
 } from './program-utilities.js';
 import { SyntaxKind } from './syntax-kind.js';
+import { isSourcePhaseImport } from './ast-utilities.js';
 import { hasExtension } from './vfs-match.js';
 import { TokenFlags } from './types.js';
 import {
@@ -140,7 +142,10 @@ export class CompilerHost extends ModuleResolutionHost {
     if (prepared !== undefined) return prepared;
     const text = this.fs.readFile(fileName);
     if (text === undefined) return undefined;
-    return parseSourceFile(fileName, text, new ParseOptions(path, ScriptKind.Unknown, externalModuleIndicatorOptions));
+    // A file without a known extension (with allowNonTsExtensions) parses as TypeScript.
+    const kind = getScriptKindFromFileName(fileName);
+    const scriptKind = kind === ScriptKind.Unknown ? ScriptKind.TS : kind;
+    return parseSourceFile(fileName, text, new ParseOptions(path, scriptKind, externalModuleIndicatorOptions));
   }
 
   /** The config of a referenced project, or `undefined` if it can't be read. */
@@ -246,6 +251,8 @@ class ParseTask {
   subTasks: ParseTask[] | undefined = undefined;
   loaded = false;
   startedSubTasks = false;
+  /** A root file name that resolved to no supported file: the task only carries its processing diagnostic. */
+  failedLookup = false;
   metadata: SourceFileMetadata = libFileMetadata;
   resolutionsInFile: ModeAwareCache<ResolvedModule> | undefined = undefined;
   resolutionsTrace: MessageWithArgs[] | undefined = undefined;
@@ -304,6 +311,18 @@ class ParseTask {
 }
 
 const noData: readonly ParseTaskData[] = [];
+
+/** The resolution of a module the importing file declares itself: none. */
+const locallyDeclaredModule: ResolvedModule = {
+  resolvedFileName: '',
+  originalPath: '',
+  extension: '',
+  resolvedUsingTsExtension: false,
+  packageId: undefined,
+  isExternalLibraryImport: false,
+  alternateResult: '',
+  resolutionDiagnostics: [],
+};
 
 /** The tasks of one path, by file name casing. */
 class ParseTaskData {
@@ -488,7 +507,7 @@ export function needsImportHelpersImportSpecifier(file: SourceFile, options: Com
 
 /** The module `file` imports the JSX runtime from under `options`, or '' if it imports none. */
 export function jsxRuntimeImportOf(file: SourceFile, options: CompilerOptions): string {
-  if (file.scriptKind !== ScriptKind.JSX && file.scriptKind !== ScriptKind.TSX) return '';
+  if (!isSourceFileJS(file) && file.scriptKind !== ScriptKind.TSX) return '';
   return getJSXRuntimeImport(getJSXImplicitImportBase(options, file), options);
 }
 
@@ -919,6 +938,7 @@ export class FileLoader {
       return;
     }
     const task = new ParseTask(absolute, undefined, reason, false, false, false, undefined);
+    task.failedLookup = true;
     task.addProcessingDiagnostic(
       ProcessingDiagnostic.explainingFileInclude('', reason, resolved.message, resolved.args),
     );
@@ -945,6 +965,8 @@ export class FileLoader {
   ): string | ReferenceDiagnostic {
     const allowNonTsExtensions = this.options.allowNonTsExtensions === true;
     const diagnosticFileName = normalizeSlashes(referenceText);
+    if (isNetworkPath(fileName))
+      return new ReferenceDiagnostic(Diagnostics.Network_path_0_is_not_supported, [diagnosticFileName]);
     const fs = this.host.fs;
     if (hasExtension(fileName)) {
       const canonicalFileName = getCanonicalFileName(fileName, fs.useCaseSensitiveFileNames);
@@ -1096,7 +1118,8 @@ export class FileLoader {
     }
     if (data.packageId === undefined && task.packageId !== undefined) data.packageId = task.packageId;
     const depth = task.increaseDepth ? work.depth + 1 : work.depth;
-    if (depth < data.lowestDepth) {
+    const lowered = depth < data.lowestDepth;
+    if (lowered) {
       // Reached at a lower depth than before: load references again.
       data.lowestDepth = depth;
       startSubTasks = true;
@@ -1114,7 +1137,9 @@ export class FileLoader {
           data.startedSubTasks = true;
         }
       }
-      if (!taskByFileName.startedSubTasks && loadSubTasks) {
+      // A lower depth restarts references already started, which may now be loaded past `maxNodeModuleJsDepth`.
+      // Every file reached from them is at least as deep, so a depth past it changes nothing they load.
+      if (loadSubTasks && ((lowered && depth <= this.maxNodeModuleJsDepth) || !taskByFileName.startedSubTasks)) {
         taskByFileName.startedSubTasks = true;
         if (taskByFileName.subTasks !== undefined) this.start(taskByFileName.subTasks, data.lowestDepth);
       }
@@ -1148,6 +1173,7 @@ export class FileLoader {
       this.loadAutomaticTypeDirectives(task);
       return;
     }
+    if (task.failedLookup) return;
     const redirect = this.mapper.getParseFileRedirect(task.path);
     if (redirect !== '') {
       const redirected = new ParseTask(
@@ -1396,8 +1422,24 @@ export class FileLoader {
     for (let index = 0; index < moduleNames.length; index++) {
       const entry = moduleNames[index];
       const moduleName = getText(entry);
-      if (moduleName === '') continue;
+      // A source phase import loads no module declarations.
+      if (moduleName === '' || isSourcePhaseImport(entry.parent!)) continue;
       const mode = getModeForUsageLocation(file.fileName, task.metadata, entry, options);
+      // A module the file declares itself (`declare module "m"`) isn't resolved.
+      if (file.ambientModuleNames.includes(moduleName)) {
+        if (options.traceResolution === true)
+          task
+            .moduleTraces(true)!
+            .push(
+              messageWithArgs(
+                Diagnostics.Module_0_was_resolved_as_locally_declared_ambient_module_in_file_1,
+                moduleName,
+                file.fileName,
+              ),
+            );
+        resolutions.set(modeAwareKey(moduleName, mode), locallyDeclaredModule);
+        continue;
+      }
       const resolved = this.resolver.resolveModuleName(
         moduleName,
         containingFile,

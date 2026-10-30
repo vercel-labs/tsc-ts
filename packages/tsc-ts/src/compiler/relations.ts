@@ -50,6 +50,9 @@ import {
   newTypeMapper,
   SimpleTypeMapper,
   type TypeMapper,
+  isDistributedTypeParameter,
+  type TypeParameter,
+  type SymbolLinks,
 } from './checker-types.js';
 import { InferenceFlags, InferencePriority, createInferenceContext, inferTypes } from './checker-inference.js';
 import {
@@ -94,6 +97,7 @@ import {
   createNormalizedTypeReference,
   typeListKey,
   getRegularTypeOfLiteralType,
+  compareSymbols,
 } from './checker-type-factory.js';
 import {
   findApplicableIndexInfo,
@@ -236,9 +240,8 @@ export const enum RelationComparisonResult {
   ReportsUnmeasurable = 1 << 3,
   ReportsUnreliable = 1 << 4,
   ComplexityOverflow = 1 << 5,
-  StackDepthOverflow = 1 << 6,
   ReportsMask = ReportsUnmeasurable | ReportsUnreliable,
-  Overflow = ComplexityOverflow | StackDepthOverflow,
+  Overflow = ComplexityOverflow,
 }
 
 /**
@@ -1061,20 +1064,13 @@ export function checkTypeRelatedTo(
   if (r.overflow) {
     // Remember the overflow so it isn't attempted again.
     const key = getRelationKey(c, source, target, IntersectionState.None, relation === c.identityRelation, false).key;
-    relation.set(
-      key,
-      RelationComparisonResult.Failed |
-        (r.relationCount <= 0
-          ? RelationComparisonResult.ComplexityOverflow
-          : RelationComparisonResult.StackDepthOverflow),
-    );
-    const message =
-      r.relationCount <= 0
-        ? Diagnostics.Excessive_complexity_comparing_types_0_and_1
-        : Diagnostics.Excessive_stack_depth_comparing_types_0_and_1;
+    relation.set(key, RelationComparisonResult.Failed | RelationComparisonResult.ComplexityOverflow);
     reportDiagnostic(
       c,
-      createDiagnosticForNode(errorNode ?? c.currentNode, message, [typeToString(c, source), typeToString(c, target)]),
+      createDiagnosticForNode(errorNode ?? c.currentNode, Diagnostics.Excessive_complexity_comparing_types_0_and_1, [
+        typeToString(c, source),
+        typeToString(c, target),
+      ]),
       diagnosticOutput,
     );
   } else if (r.errorChain !== undefined) {
@@ -1721,13 +1717,11 @@ export class Relater extends TypeComparer {
       } else {
         c.reliabilityFlags |=
           entry & (RelationComparisonResult.ReportsUnmeasurable | RelationComparisonResult.ReportsUnreliable);
-        if (reportErrors && (entry & RelationComparisonResult.Overflow) !== 0) {
-          const message =
-            (entry & RelationComparisonResult.ComplexityOverflow) !== 0
-              ? Diagnostics.Excessive_complexity_comparing_types_0_and_1
-              : Diagnostics.Excessive_stack_depth_comparing_types_0_and_1;
-          this.reportError(message, [typeToString(c, source), typeToString(c, target)]);
-        }
+        if (reportErrors && (entry & RelationComparisonResult.Overflow) !== 0)
+          this.reportError(Diagnostics.Excessive_complexity_comparing_types_0_and_1, [
+            typeToString(c, source),
+            typeToString(c, target),
+          ]);
         return (entry & RelationComparisonResult.Succeeded) !== 0 ? Ternary.True : Ternary.False;
       }
     }
@@ -1750,10 +1744,9 @@ export class Relater extends TypeComparer {
     }
     const sourceDepth = this.sourceDepth;
     const targetDepth = this.targetDepth;
-    if (sourceDepth === 100 || targetDepth === 100) {
-      this.overflow = true;
-      return Ternary.False;
-    }
+    // A backstop for infinite recursion that isDeeplyNestedType misses, which also stops relating the exceedingly
+    // rare types that are truly more than 100 levels deep.
+    if (sourceDepth === 100 || targetDepth === 100) return Ternary.Maybe;
     const maybeStart = this.maybeKeys.length;
     this.maybeKeys.push(id);
     this.maybeKeysSet.add(id);
@@ -2668,7 +2661,7 @@ export class Relater extends TypeComparer {
             ? this.isRelatedTo(s, t, RecursionFlags.Both, false)
             : compareTypesIdentical(c, s, t);
       else {
-        if (c.inVarianceComputation && (varianceFlags & VarianceFlags.Unreliable) !== 0)
+        if (c.varianceStack.length !== 0 && (varianceFlags & VarianceFlags.Unreliable) !== 0)
           instantiateType(c, s, c.reportUnreliableMapper);
         if (variance === VarianceFlags.Covariant)
           related = this.isRelatedToEx(s, t, RecursionFlags.Both, reportErrors, undefined, intersectionState);
@@ -2752,7 +2745,8 @@ export class Relater extends TypeComparer {
         const sourceArity = getTypeReferenceArity(source);
         const targetArity = getTypeReferenceArity(target);
         const sourceRest = isTupleType(source) ? (tupleTargetOf(source).combinedFlags & ElementFlags.Rest) !== 0 : true;
-        const targetHasRestElement = (targetTuple.combinedFlags & ElementFlags.Variable) !== 0;
+        const targetHasRestElement = (targetTuple.combinedFlags & ElementFlags.Rest) !== 0;
+        const targetHasVariableElement = (targetTuple.combinedFlags & ElementFlags.Variable) !== 0;
         const sourceMinLength = isTupleType(source) ? tupleTargetOf(source).minLength : 0;
         const targetMinLength = targetTuple.minLength;
         if (!sourceRest && sourceArity < targetMinLength) {
@@ -2763,7 +2757,7 @@ export class Relater extends TypeComparer {
             ]);
           return Ternary.False;
         }
-        if (!targetHasRestElement && targetArity < sourceMinLength) {
+        if (!targetHasVariableElement && targetArity < sourceMinLength) {
           if (reportErrors)
             this.reportError(Diagnostics.Source_has_0_element_s_but_target_allows_only_1, [
               String(sourceMinLength),
@@ -2771,7 +2765,7 @@ export class Relater extends TypeComparer {
             ]);
           return Ternary.False;
         }
-        if (!targetHasRestElement && (sourceRest || targetArity < sourceArity)) {
+        if (!targetHasVariableElement && (sourceRest || targetArity < sourceArity)) {
           if (reportErrors) {
             if (sourceMinLength < targetMinLength)
               this.reportError(Diagnostics.Target_requires_0_element_s_but_source_may_have_fewer, [
@@ -2794,10 +2788,18 @@ export class Relater extends TypeComparer {
             ? tupleTargetOf(source).elementInfos[sourcePosition]!.flags
             : ElementFlags.Rest;
           const sourcePositionFromEnd = sourceArity - 1 - sourcePosition;
-          const targetPosition =
-            targetHasRestElement && sourcePosition >= targetStartCount
-              ? targetArity - 1 - Math.min(sourcePositionFromEnd, targetEndCount)
-              : sourcePosition;
+          const restMapped = targetHasRestElement && sourcePosition >= targetStartCount;
+          // A source element past the target's last element (a target with variadic but no rest elements).
+          if (!restMapped && sourcePosition >= targetArity) {
+            if (reportErrors)
+              this.reportError(Diagnostics.Target_allows_only_0_element_s_but_source_may_have_more, [
+                String(targetArity),
+              ]);
+            return Ternary.False;
+          }
+          const targetPosition = restMapped
+            ? targetArity - 1 - Math.min(sourcePositionFromEnd, targetEndCount)
+            : sourcePosition;
           const targetFlags = targetPosition >= 0 ? targetTuple.elementInfos[targetPosition]!.flags : ElementFlags.None;
           if ((targetFlags & ElementFlags.Variadic) !== 0 && (sourceFlags & ElementFlags.Variadic) === 0) {
             if (reportErrors)
@@ -3601,7 +3603,15 @@ export class Relater extends TypeComparer {
       target !== c.markerSubTypeForCheck
     ) {
       const constraint = getBaseConstraintOfType(c, target);
-      if (constraint !== undefined && isTypeAssignableTo(c, generalizedSource, constraint))
+      if (
+        isDistributedTypeParameter(target) &&
+        isTypeAssignableTo(c, generalizedSource, (target as TypeParameter).constraint!)
+      )
+        this.reportError(Diagnostics.X_0_is_only_assignable_to_the_non_distributed_1_but_1_has_been_distributed_here, [
+          generalizedSourceType,
+          targetType,
+        ]);
+      else if (constraint !== undefined && isTypeAssignableTo(c, generalizedSource, constraint))
         this.reportError(
           Diagnostics.X_0_is_assignable_to_the_constraint_of_type_1_but_1_could_be_instantiated_with_a_different_subtype_of_constraint_2,
           [generalizedSourceType, targetType, typeToString(c, constraint)],
@@ -3655,7 +3665,6 @@ export class Relater extends TypeComparer {
       case Diagnostics.Object_literal_may_only_specify_known_properties_but_0_does_not_exist_in_type_1_Did_you_mean_to_write_2:
         return;
       case Diagnostics.Excessive_complexity_comparing_types_0_and_1:
-      case Diagnostics.Excessive_stack_depth_comparing_types_0_and_1:
       case Diagnostics.The_type_0_is_readonly_and_cannot_be_assigned_to_the_mutable_type_1:
         if (this.chainArgsMatch(generalizedSourceType, targetType, undefined)) return;
         break;
@@ -4379,14 +4388,12 @@ export function isDeeplyNestedType(
   maxDepth: number,
 ): boolean {
   if (depth < maxDepth) return false;
-  if (
-    (t.objectFlags & ObjectFlags.InstantiatedMapped) === ObjectFlags.InstantiatedMapped &&
-    (t.flags & TypeFlags.Object) !== 0
-  )
-    t = getMappedTargetWithSymbol(c, t);
-  if ((t.flags & TypeFlags.Intersection) !== 0)
-    for (const u of typesOf(t)) if (isDeeplyNestedType(c, u, stack, depth, maxDepth)) return true;
-  const identity = getRecursionIdentity(t);
+  const target = getRecursionIdentityTarget(c, t);
+  if ((target.flags & TypeFlags.Intersection) !== 0) {
+    for (const u of typesOf(target)) if (isDeeplyNestedType(c, u, stack, depth, maxDepth)) return true;
+    return false;
+  }
+  const identity = getRecursionIdentityFromTarget(target);
   let count = 0;
   let lastTypeId = 0;
   for (let i = 0; i < depth; i++) {
@@ -4402,8 +4409,77 @@ export function isDeeplyNestedType(
   return false;
 }
 
-function getMappedTargetWithSymbol(c: Checker, t: Type): Type {
+/**
+ * isDeeplyNestedType for the newest entry of `stack[start..end)`, counting only the entries in that range.
+ * `identities` holds the recursion identity of each entry of the range once a check has computed it: 0 before
+ * that, and -1 for an entry whose recursion identity target is an intersection, which is matched by its
+ * constituents each time. Later checks compare the kept identities. The identities are computed when and in the
+ * order isDeeplyNestedType computes them, so the types and symbol ids they create come in the same order.
+ */
+export function isDeeplyNestedStackEntry(
+  c: Checker,
+  stack: readonly Type[],
+  identities: RecursionId[],
+  start: number,
+  end: number,
+  maxDepth: number,
+): boolean {
+  if (end - start < maxDepth) return false;
+  return isDeeplyNestedInRange(c, stack[end - 1]!, true, stack, identities, start, end, maxDepth);
+}
+
+function isDeeplyNestedInRange(
+  c: Checker,
+  t: Type,
+  isEntry: boolean,
+  stack: readonly Type[],
+  identities: RecursionId[],
+  start: number,
+  end: number,
+  maxDepth: number,
+): boolean {
+  const target = getRecursionIdentityTarget(c, t);
+  if ((target.flags & TypeFlags.Intersection) !== 0) {
+    if (isEntry) identities[end - 1] = -1;
+    for (const u of typesOf(target))
+      if (isDeeplyNestedInRange(c, u, false, stack, identities, start, end, maxDepth)) return true;
+    return false;
+  }
+  const identity = getRecursionIdentityFromTarget(target);
+  if (isEntry) identities[end - 1] = identity;
+  let count = 0;
+  let lastTypeId = 0;
+  for (let i = start; i < end; i++) {
+    const s = stack[i]!;
+    let known = identities[i]!;
+    if (known === 0) {
+      const sourceTarget = getRecursionIdentityTarget(c, s);
+      known = (sourceTarget.flags & TypeFlags.Intersection) !== 0 ? -1 : getRecursionIdentityFromTarget(sourceTarget);
+      identities[i] = known;
+    }
+    if (known >= 0 ? known === identity : hasMatchingRecursionIdentity(c, s, identity)) {
+      if (s.id >= lastTypeId) {
+        count++;
+        if (count >= maxDepth) return true;
+      }
+      lastTypeId = s.id;
+    }
+  }
+  return false;
+}
+
+/**
+ * The type whose recursion identity `t` has: the object type of an indexed access (T in T[K]), and for a
+ * homomorphic mapped type the deepest target type that has a symbol. Unwrapping mapped types keeps the identities of
+ * mapped types applied to written object literals unique: in `Mapped<{ x: Mapped<{ x: Mapped<{ x: string }>}>}>`,
+ * each application has the identity of its object literal and does not appear deeply nested.
+ */
+function getRecursionIdentityTarget(c: Checker, t: Type): Type {
   for (;;) {
+    if ((t.flags & TypeFlags.IndexedAccess) !== 0) {
+      t = (t as IndexedAccessType).objectType;
+      continue;
+    }
     if (
       (t.objectFlags & ObjectFlags.InstantiatedMapped) === ObjectFlags.InstantiatedMapped &&
       (t.flags & TypeFlags.Object) !== 0
@@ -4422,20 +4498,20 @@ function getMappedTargetWithSymbol(c: Checker, t: Type): Type {
 }
 
 function hasMatchingRecursionIdentity(c: Checker, t: Type, identity: RecursionId): boolean {
-  if (
-    (t.objectFlags & ObjectFlags.InstantiatedMapped) === ObjectFlags.InstantiatedMapped &&
-    (t.flags & TypeFlags.Object) !== 0
-  )
-    t = getMappedTargetWithSymbol(c, t);
-  if ((t.flags & TypeFlags.Intersection) !== 0) {
-    for (const u of typesOf(t)) if (hasMatchingRecursionIdentity(c, u, identity)) return true;
+  const target = getRecursionIdentityTarget(c, t);
+  if ((target.flags & TypeFlags.Intersection) !== 0) {
+    for (const u of typesOf(target)) if (hasMatchingRecursionIdentity(c, u, identity)) return true;
     return false;
   }
-  return getRecursionIdentity(t) === identity;
+  return getRecursionIdentityFromTarget(target) === identity;
 }
 
 /** An identity shared by instantiations of a type, so infinitely expanding instantiations can be detected. */
-export function getRecursionIdentity(t: Type): RecursionId {
+export function getRecursionIdentity(c: Checker, t: Type): RecursionId {
+  return getRecursionIdentityFromTarget(getRecursionIdentityTarget(c, t));
+}
+
+function getRecursionIdentityFromTarget(t: Type): RecursionId {
   if (
     (t.flags & TypeFlags.Object) !== 0 &&
     (t.objectFlags & (ObjectFlags.ObjectLiteral | ObjectFlags.ArrayLiteral)) === 0
@@ -4452,12 +4528,6 @@ export function getRecursionIdentity(t: Type): RecursionId {
       return typeRecursionId((t as TypeReference).target!);
   }
   if ((t.flags & TypeFlags.TypeParameter) !== 0 && t.symbol !== undefined) return symbolRecursionId(t.symbol);
-  if ((t.flags & TypeFlags.IndexedAccess) !== 0) {
-    let objectType = (t as IndexedAccessType).objectType;
-    while ((objectType.flags & TypeFlags.IndexedAccess) !== 0)
-      objectType = (objectType as IndexedAccessType).objectType;
-    return typeRecursionId(objectType);
-  }
   if ((t.flags & TypeFlags.Conditional) !== 0) return nodeRecursionId((t as ConditionalType).root.node);
   return typeRecursionId(t);
 }
@@ -4495,16 +4565,45 @@ export function getAliasVariances(c: Checker, symbol: Symbol): VarianceFlags[] {
  * The measured variance of each type parameter, from relating marker instantiations; empty when
  * requested recursively.
  */
+/** A generic type whose variances are being computed. */
+export class VarianceStackEntry {
+  constructor(
+    readonly symbol: Symbol,
+    readonly typeParameters: readonly Type[],
+  ) {}
+}
+
 function getVariancesWorker(c: Checker, symbol: Symbol, typeParameters: readonly Type[]): VarianceFlags[] {
   const links = c.symbolLinks(symbol);
   if (links.variances !== undefined) return links.variances;
-  const oldVarianceComputation = c.inVarianceComputation;
-  const saveResolutionStart = c.resolutionStart;
-  if (!c.inVarianceComputation) {
-    c.inVarianceComputation = true;
-    c.resolutionStart = c.resolutionDepth;
+  let stackIndex = -1;
+  for (let i = 0; i < c.varianceStack.length; i++)
+    if (c.varianceStack[i]!.symbol === symbol) {
+      stackIndex = i;
+      break;
+    }
+  if (stackIndex >= 0) {
+    // A circularity. The variances computed can depend on where the circular region is entered, so the
+    // computation restarts from the generic type with the smallest symbol in the region if that is not this one,
+    // which keeps the results of circular generic types stable.
+    let minIndex = stackIndex;
+    for (let i = stackIndex + 1; i < c.varianceStack.length; i++)
+      if (compareSymbols(c, c.varianceStack[i]!.symbol, c.varianceStack[minIndex]!.symbol) < 0) minIndex = i;
+    if (minIndex > stackIndex) {
+      const saveVarianceStack = c.varianceStack;
+      c.varianceStack = [];
+      getVariancesWorker(c, saveVarianceStack[minIndex]!.symbol, saveVarianceStack[minIndex]!.typeParameters);
+      c.varianceStack = saveVarianceStack;
+    }
+    // Variances that cannot be computed: the type parameters are treated as covariant. The computation in
+    // progress stores its results over this.
+    const stored = storedVariances(links);
+    if (stored === undefined || stored.length === 0) links.variances = [];
+    return links.variances!;
   }
-  links.variances = [];
+  const saveResolutionStart = c.resolutionStart;
+  if (c.varianceStack.length === 0) c.resolutionStart = c.resolutionDepth;
+  c.varianceStack.push(new VarianceStackEntry(symbol, typeParameters));
   const variances: VarianceFlags[] = [];
   for (const tp of typeParameters) {
     const modifiers = getTypeParameterModifiers(tp);
@@ -4531,14 +4630,22 @@ function getVariancesWorker(c: Checker, symbol: Symbol, typeParameters: readonly
       if ((c.reliabilityFlags & RelationComparisonResult.ReportsUnreliable) !== 0) variance |= VarianceFlags.Unreliable;
       c.reliabilityFlags = saveReliabilityFlags;
     }
+    // A computation restarted because of a circularity may have stored the variances already.
+    const restarted = storedVariances(links);
+    if (restarted !== undefined && restarted.length !== 0) break;
     variances.push(variance);
   }
-  if (!oldVarianceComputation) {
-    c.inVarianceComputation = false;
-    c.resolutionStart = saveResolutionStart;
-  }
-  links.variances = variances;
-  return variances;
+  // Unless a restarted computation stored them.
+  const stored = storedVariances(links);
+  if (stored === undefined || stored.length === 0) links.variances = variances;
+  c.varianceStack.pop();
+  if (c.varianceStack.length === 0) c.resolutionStart = saveResolutionStart;
+  return links.variances!;
+}
+
+/** The variances stored in `links`, read again after computations that may have stored them. */
+function storedVariances(links: SymbolLinks): VarianceFlags[] | undefined {
+  return links.variances;
 }
 
 export function createMarkerType(c: Checker, symbol: Symbol, source: Type, target: Type): Type {
@@ -5182,6 +5289,8 @@ export function isExactOptionalPropertyMismatch(
 }
 
 /** The string literal member of `target` closest to the string literal `source`. */
+const maxStringLiteralSuggestionCandidates = 1000;
+
 function getSuggestedTypeForNonexistentStringLiteralType(c: Checker, source: Type, target: Type): Type | undefined {
   const value = (source as LiteralType).stringValue;
   const valueCodePoints = new CodePoints();
@@ -5190,8 +5299,11 @@ function getSuggestedTypeForNonexistentStringLiteralType(c: Checker, source: Typ
   let bestDistance = Math.floor(valueCodePoints.length * 0.4) + 0.9;
   let best: Type | undefined = undefined;
   const lowerValue = value.toLowerCase();
+  // A target with more string literal candidates than this gets no suggestion.
+  let candidates = 0;
   for (const t of typesOf(target)) {
     if ((t.flags & TypeFlags.StringLiteral) === 0) continue;
+    if (++candidates > maxStringLiteralSuggestionCandidates) return undefined;
     const name = (t as LiteralType).stringValue;
     const nameLength = utf8Length(name);
     if (name === '' || Math.abs(nameLength - valueCodePoints.length) > maximumLengthDifference || name === value)

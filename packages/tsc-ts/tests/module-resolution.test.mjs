@@ -134,13 +134,13 @@ test('path utilities', { skip }, () => {
 });
 
 test('TypeScript test cases', { skip }, () => {
-  const cases = extractedCases(join(root, 'upstream/TypeScript/tests/cases'), path, types);
+  const cases = extractedCases(join(root, 'upstream/TypeScript/tsc/testdata/tests/cases'), path, types);
   const counts = check(cases, 'extracted');
   assert.ok(counts.requests > 1000);
 });
 
 test('TypeScript test cases without tracing (cached lookups)', { skip }, () => {
-  const cases = extractedCases(join(root, 'upstream/TypeScript/tests/cases'), path, types).map((c) => ({
+  const cases = extractedCases(join(root, 'upstream/TypeScript/tsc/testdata/tests/cases'), path, types).map((c) => ({
     ...c,
     options: { ...c.options, traceResolution: false },
   }));
@@ -148,7 +148,7 @@ test('TypeScript test cases without tracing (cached lookups)', { skip }, () => {
 });
 
 test('TypeScript test cases on a case-insensitive file system', { skip }, () => {
-  const cases = extractedCases(join(root, 'upstream/TypeScript/tests/cases'), path, types)
+  const cases = extractedCases(join(root, 'upstream/TypeScript/tsc/testdata/tests/cases'), path, types)
     .filter((c) => c.useCaseSensitiveFileNames)
     .map((c) => ({ ...c, useCaseSensitiveFileNames: false }));
   check(cases, 'extracted-insensitive');

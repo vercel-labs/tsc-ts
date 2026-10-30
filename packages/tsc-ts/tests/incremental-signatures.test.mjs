@@ -10,7 +10,7 @@ import { compileSources, tempDir } from './temp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 
 const out = compileSources('tsc-ts-incremental-signatures-', ['main.ts']);
 const load = (path) => import(pathToFileURL(join(out, path)).href);
@@ -54,7 +54,7 @@ function build(dir, snapshot, last, edited = []) {
     .filter((name) => !name.startsWith('..'))
     .sort();
   program.getSemanticDiagnostics();
-  return { snapshot: program.snapshot, checked, last: checkedProgram };
+  return { snapshot: program.snapshot, checked, last: checkedProgram, program };
 }
 
 for (const options of [{ noEmit: true }, { outDir: 'out' }]) {
@@ -131,3 +131,34 @@ for (const options of [{ noEmit: true }, { outDir: 'out' }, { outDir: 'out', dec
     assert.deepEqual(state.checked, ['src/lib.ts']);
   });
 }
+
+// Declaration emit that computes signatures while checking is timed apart from checking, and reported as emit time
+// (TypeScript 7.1); a nested emit adds its time once, when the outermost one ends.
+test('declaration emit for signatures while checking counts as emit time', () => {
+  const dir = tempDir('tsc-ts-incremental-signatures-project-');
+  const lib = (type) => `export function value(): ${type} {\n  return 1;\n}\n`;
+  writeFiles(dir, {
+    'tsconfig.json': JSON.stringify({ compilerOptions: { strict: true, types: [], noEmit: true }, include: ['src'] }),
+    'src/lib.ts': lib('number'),
+    'src/main.ts': "import { value } from './lib';\nexport const v = value();\n",
+  });
+  let state = build(dir, undefined);
+  state.program.takeNestedEmitTime();
+  writeFiles(dir, { 'src/lib.ts': lib('1') });
+  state = build(dir, state.snapshot);
+  assert.ok(state.program.takeNestedEmitTime() > 0);
+  assert.equal(state.program.takeNestedEmitTime(), 0);
+
+  const spin = (ms) => {
+    const end = performance.now() + ms;
+    while (performance.now() < end);
+  };
+  const outer = state.program.beginNestedEmit();
+  const inner = state.program.beginNestedEmit();
+  spin(2);
+  inner();
+  assert.equal(state.program.takeNestedEmitTime(), 0);
+  spin(2);
+  outer();
+  assert.ok(state.program.takeNestedEmitTime() >= 4);
+});

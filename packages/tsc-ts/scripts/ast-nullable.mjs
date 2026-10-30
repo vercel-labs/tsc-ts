@@ -1,4 +1,4 @@
-// Members of _scripts/ast.json that the schema marks required but tsc-ts's parser can leave unset, as
+// Members of tools/scripts/tsc/ast.json that the schema marks required but tsc-ts's parser can leave unset, as
 // `<node>.<member>`. The node classes (scripts/generate-ast.mjs) and the API's node interfaces
 // (scripts/generate-api.mjs) declare them optional.
 export const nullable = new Set([

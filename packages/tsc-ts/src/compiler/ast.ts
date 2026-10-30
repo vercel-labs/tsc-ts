@@ -527,11 +527,11 @@ export class PrivateIdentifier extends Node {
 
 export class QualifiedName extends Node {
   left: EntityName;
-  right: Identifier;
+  right: MemberName;
   // Set by the binder.
   flowNode: FlowNode | undefined;
 
-  constructor(left: EntityName, right: Identifier) {
+  constructor(left: EntityName, right: MemberName) {
     super(SyntaxKind.QualifiedName);
     this.left = left;
     this.right = right;
@@ -553,7 +553,7 @@ export class QualifiedName extends Node {
   }
 
   copy(): QualifiedName {
-    const node = new QualifiedName(this.left.deepClone(), this.right.copy());
+    const node = new QualifiedName(this.left.deepClone(), this.right.deepClone());
     node.flags = this.flags;
     node.pos = this.pos;
     node.end = this.end;
@@ -1696,8 +1696,8 @@ export class FunctionDeclaration extends Node {
   fullSignature: TypeNode | undefined;
   body: FunctionBody | undefined;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
   localSymbol: Symbol | undefined;
   locals: SymbolTable | undefined;
   nextContainer: Node | undefined;
@@ -1723,8 +1723,8 @@ export class FunctionDeclaration extends Node {
     this.type = type;
     this.fullSignature = fullSignature;
     this.body = body;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
     this.localSymbol = undefined;
     this.locals = undefined;
     this.nextContainer = undefined;
@@ -1783,8 +1783,8 @@ export class ClassDeclaration extends Node {
   heritageClauses: NodeList | undefined;
   members: NodeList;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
   localSymbol: Symbol | undefined;
   locals: SymbolTable | undefined;
   nextContainer: Node | undefined;
@@ -1802,8 +1802,8 @@ export class ClassDeclaration extends Node {
     this.typeParameters = typeParameters;
     this.heritageClauses = heritageClauses;
     this.members = members;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
     this.localSymbol = undefined;
     this.locals = undefined;
     this.nextContainer = undefined;
@@ -1948,8 +1948,8 @@ export class InterfaceDeclaration extends Node {
   heritageClauses: NodeList | undefined;
   members: NodeList;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
   localSymbol: Symbol | undefined;
 
   constructor(
@@ -1965,8 +1965,8 @@ export class InterfaceDeclaration extends Node {
     this.typeParameters = typeParameters;
     this.heritageClauses = heritageClauses;
     this.members = members;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
     this.localSymbol = undefined;
   }
 
@@ -2011,8 +2011,8 @@ export class TypeAliasDeclaration extends Node {
   typeParameters: NodeList | undefined;
   type: TypeNode;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
   localSymbol: Symbol | undefined;
   locals: SymbolTable | undefined;
   nextContainer: Node | undefined;
@@ -2029,8 +2029,8 @@ export class TypeAliasDeclaration extends Node {
     this.name = name;
     this.typeParameters = typeParameters;
     this.type = type;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
     this.localSymbol = undefined;
     this.locals = undefined;
     this.nextContainer = undefined;
@@ -2113,8 +2113,8 @@ export class EnumDeclaration extends Node {
   name: Identifier;
   members: NodeList;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
   localSymbol: Symbol | undefined;
 
   constructor(modifiers: ModifierList | undefined, name: Identifier, members: NodeList) {
@@ -2122,8 +2122,8 @@ export class EnumDeclaration extends Node {
     this.modifiers = modifiers;
     this.name = name;
     this.members = members;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
     this.localSymbol = undefined;
   }
 
@@ -2217,8 +2217,12 @@ export class NotEmittedStatement extends Node {
 }
 
 export class NotEmittedTypeElement extends Node {
+  // Set by the binder.
+  symbol: Symbol | undefined;
+
   constructor() {
     super(SyntaxKind.NotEmittedTypeElement);
+    this.symbol = undefined;
   }
 
   forEachChild(_v: NodeVisitor): boolean {
@@ -2396,8 +2400,8 @@ export class ExportAssignment extends Node {
   type: TypeNode | undefined;
   expression: Expression;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
 
   constructor(
     modifiers: ModifierList | undefined,
@@ -2410,8 +2414,8 @@ export class ExportAssignment extends Node {
     this.isExportEquals = isExportEquals;
     this.type = type;
     this.expression = expression;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
   }
 
   forEachChild(v: NodeVisitor): boolean {
@@ -2448,15 +2452,15 @@ export class NamespaceExportDeclaration extends Node {
   modifiers: ModifierList | undefined;
   name: Identifier;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
 
   constructor(modifiers: ModifierList | undefined, name: Identifier) {
     super(SyntaxKind.NamespaceExportDeclaration);
     this.modifiers = modifiers;
     this.name = name;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
   }
 
   forEachChild(v: NodeVisitor): boolean {
@@ -6305,10 +6309,13 @@ export class JsxAttribute extends Node {
 
 export class JsxSpreadAttribute extends Node {
   expression: Expression;
+  // Set by the binder.
+  symbol: Symbol | undefined;
 
   constructor(expression: Expression) {
     super(SyntaxKind.JsxSpreadAttribute);
     this.expression = expression;
+    this.symbol = undefined;
   }
 
   forEachChild(v: NodeVisitor): boolean {
@@ -7574,10 +7581,11 @@ export class ModuleDeclaration extends Node {
   modifiers: ModifierList | undefined;
   keyword: SyntaxKind;
   name: ModuleName;
+  attributes: TypeLiteralNode | undefined;
   body: ModuleBody | undefined;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
   localSymbol: Symbol | undefined;
   locals: SymbolTable | undefined;
   nextContainer: Node | undefined;
@@ -7587,15 +7595,17 @@ export class ModuleDeclaration extends Node {
     modifiers: ModifierList | undefined,
     keyword: SyntaxKind,
     name: ModuleName,
+    attributes: TypeLiteralNode | undefined,
     body: ModuleBody | undefined,
   ) {
     super(SyntaxKind.ModuleDeclaration);
     this.modifiers = modifiers;
     this.keyword = keyword;
     this.name = name;
+    this.attributes = attributes;
     this.body = body;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
     this.localSymbol = undefined;
     this.locals = undefined;
     this.nextContainer = undefined;
@@ -7605,12 +7615,14 @@ export class ModuleDeclaration extends Node {
   forEachChild(v: NodeVisitor): boolean {
     if (this.modifiers !== undefined && v.visitModifiers(this.modifiers)) return true;
     if (v.visitNode(this.name)) return true;
+    if (this.attributes !== undefined && v.visitNode(this.attributes)) return true;
     return this.body !== undefined && v.visitNode(this.body);
   }
 
   setParentOfChildren(): void {
     if (this.modifiers !== undefined) setParents(this.modifiers.nodes, this);
     this.name.parent = this;
+    if (this.attributes !== undefined) this.attributes.parent = this;
     if (this.body !== undefined) this.body.parent = this;
   }
 
@@ -7623,6 +7635,7 @@ export class ModuleDeclaration extends Node {
       this.modifiers === undefined ? undefined : cloneModifiers(this.modifiers),
       this.keyword,
       this.name.deepClone(),
+      this.attributes === undefined ? undefined : this.attributes.copy(),
       this.body === undefined ? undefined : this.body.deepClone(),
     );
     node.flags = this.flags;
@@ -7638,8 +7651,8 @@ export class ImportEqualsDeclaration extends Node {
   name: Identifier;
   moduleReference: ModuleReference;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
   localSymbol: Symbol | undefined;
 
   constructor(
@@ -7653,8 +7666,8 @@ export class ImportEqualsDeclaration extends Node {
     this.isTypeOnly = isTypeOnly;
     this.name = name;
     this.moduleReference = moduleReference;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
     this.localSymbol = undefined;
   }
 
@@ -7695,8 +7708,8 @@ export class ExportDeclaration extends Node {
   moduleSpecifier: Expression | undefined;
   attributes: ImportAttributes | undefined;
   // Set by the binder.
-  symbol: Symbol | undefined;
   flowNode: FlowNode | undefined;
+  symbol: Symbol | undefined;
 
   constructor(
     modifiers: ModifierList | undefined,
@@ -7711,8 +7724,8 @@ export class ExportDeclaration extends Node {
     this.exportClause = exportClause;
     this.moduleSpecifier = moduleSpecifier;
     this.attributes = attributes;
-    this.symbol = undefined;
     this.flowNode = undefined;
+    this.symbol = undefined;
   }
 
   forEachChild(v: NodeVisitor): boolean {
@@ -8260,6 +8273,10 @@ export class SourceFile extends Node {
   textCount: number;
   /** The API's binary encoding of this file, when an API server keeps it (`keptEncodingOf`). */
   apiEncoding: Uint8Array | undefined;
+  /** The symbols the file owns, by id, as API file symbol references resolve them; made on first use. */
+  apiSymbolIndex: Map<number, Symbol> | undefined;
+  /** The xxh3-128 hash of the text in API source file descriptors, as hexadecimal digits; `''` until first use. */
+  apiContentHash: string;
   /** Module specifiers of imports, exports, `require` calls and `import()` types, in source order. */
   imports: Node[];
   /** Names of `declare module "x"` augmentations and `declare global` blocks in modules. */
@@ -8292,8 +8309,6 @@ export class SourceFile extends Node {
   nextContainer: Node | undefined;
   isBound: boolean;
   bindDiagnostics: readonly Diagnostic[];
-  /** The flow at the end of the file. */
-  endFlowNode: FlowNode | undefined;
   symbolCount: number;
   /** Ambient modules with a `*` in their name, like `declare module "*.css"`. */
   patternAmbientModules: readonly PatternAmbientModule[];
@@ -8328,6 +8343,8 @@ export class SourceFile extends Node {
     this.nodeCount = 0;
     this.textCount = 0;
     this.apiEncoding = undefined;
+    this.apiSymbolIndex = undefined;
+    this.apiContentHash = '';
     this.imports = [];
     this.moduleAugmentations = emptyNodes;
     this.ambientModuleNames = emptyStrings;
@@ -8348,7 +8365,6 @@ export class SourceFile extends Node {
     this.nextContainer = undefined;
     this.isBound = false;
     this.bindDiagnostics = emptyDiagnostics;
-    this.endFlowNode = undefined;
     this.symbolCount = 0;
     this.patternAmbientModules = emptyPatternAmbientModules;
     this.globalExports = undefined;
@@ -10714,6 +10730,7 @@ export function isDeclarationNode(node: Node): boolean {
     case SyntaxKind.ConstructorType:
     case SyntaxKind.JsxAttributes:
     case SyntaxKind.JsxAttribute:
+    case SyntaxKind.JsxSpreadAttribute:
     case SyntaxKind.JSDocSignature:
     case SyntaxKind.SourceFile:
     case SyntaxKind.ModuleDeclaration:
@@ -11035,6 +11052,12 @@ export function getSymbol(node: Node): Symbol | undefined {
     case SyntaxKind.JsxAttribute:
       if (node instanceof JsxAttribute) {
         const holder: JsxAttribute = node;
+        return holder.symbol;
+      }
+      break;
+    case SyntaxKind.JsxSpreadAttribute:
+      if (node instanceof JsxSpreadAttribute) {
+        const holder: JsxSpreadAttribute = node;
         return holder.symbol;
       }
       break;
@@ -11367,6 +11390,12 @@ export function setSymbol(node: Node, value: Symbol | undefined): void {
     case SyntaxKind.JsxAttribute:
       if (node instanceof JsxAttribute) {
         const target: JsxAttribute = node;
+        target.symbol = value;
+      }
+      break;
+    case SyntaxKind.JsxSpreadAttribute:
+      if (node instanceof JsxSpreadAttribute) {
+        const target: JsxSpreadAttribute = node;
         target.symbol = value;
       }
       break;

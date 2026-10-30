@@ -4,7 +4,6 @@ import {
   BinaryExpression,
   BindingElement,
   BindingPattern,
-  CallExpression,
   CatchClause,
   ForInOrOfStatement,
   FunctionDeclaration,
@@ -29,6 +28,7 @@ import {
 import { ClusteredIntLinkTable } from '../link-tables.js';
 import { isTypeNodeKind } from '../printer/utilities.js';
 import { SyntaxKind } from '../syntax-kind.js';
+import { isImportCall } from '../ast-utilities.js';
 import { TokenFlags } from '../types.js';
 import { getElementsOfBindingOrAssignmentPattern, getTargetOfBindingOrAssignmentElement } from './destructuring.js';
 
@@ -267,12 +267,7 @@ export class SyntaxFacts extends NodeVisitor {
             : SubtreeFacts.None)
         );
       case SyntaxKind.CallExpression:
-        return (
-          this.children(node) |
-          (node instanceof CallExpression && node.expression.kind === SyntaxKind.ImportKeyword
-            ? SubtreeFacts.ContainsDynamicImport
-            : SubtreeFacts.None)
-        );
+        return this.children(node) | (isImportCall(node) ? SubtreeFacts.ContainsDynamicImport : SubtreeFacts.None);
       case SyntaxKind.MetaProperty:
         return node instanceof MetaProperty ? this.propagate(node.name) & ~SubtreeFacts.ContainsIdentifier : 0;
       case SyntaxKind.SpreadElement:

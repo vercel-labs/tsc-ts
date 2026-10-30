@@ -30,6 +30,7 @@ import {
   MetaProperty,
   ModifierFlags,
   ModuleDeclaration,
+  getNodeId,
   type Node,
   NonNullExpression,
   NodeFlags,
@@ -590,7 +591,16 @@ class Binder extends NodeVisitor {
     if (name !== undefined) {
       if (isAmbientModule(node)) {
         if (isGlobalScopeAugmentation(node)) return InternalSymbolName.Global;
-        return '"' + nodeText(name) + '"';
+        const moduleName = nodeText(name);
+        // A pattern module with import attributes has its own symbol, named after the attributes node's id: it merges
+        // only with pattern modules of the same pattern and identical attributes, which the checker decides. The id
+        // is written at a fixed width so that names sort in declaration order.
+        const attributes = (node as ModuleDeclaration).attributes;
+        if (attributes !== undefined && hasSingleStar(moduleName))
+          return (
+            internalSymbolNamePrefix + '"' + moduleName + '"pattern@' + String(getNodeId(attributes)).padStart(10, '0')
+          );
+        return '"' + moduleName + '"';
       }
       if (name.kind === SyntaxKind.PrivateIdentifier) {
         // Private names are only allowed in classes; elsewhere there is already a parse error.
@@ -1116,7 +1126,6 @@ class Binder extends NodeVisitor {
     if (this.seenThisKeyword) node.flags |= NodeFlags.ContainsThis;
     if (node.kind === SyntaxKind.SourceFile) {
       node.flags |= this.emitFlags;
-      (node as SourceFile).endFlowNode = this.currentFlow;
     }
     const returnTarget = this.currentReturnTarget;
     if (returnTarget !== undefined) {
@@ -1516,11 +1525,19 @@ class Binder extends NodeVisitor {
   }
 
   bindForStatement(node: ForStatement): void {
+    this.bindOptional(node.initializer);
+    if (this.currentFlow === this.unreachableFlow) {
+      // An initializer that ends the flow (a throwing IIFE) would leave the loop label only the
+      // incrementor's back edge: a cycle with no entry. Bind the rest as unreachable.
+      this.bindOptional(node.condition);
+      this.bind(node.statement);
+      this.bindOptional(node.incrementor);
+      return;
+    }
     const preLoopLabel = this.setContinueTarget(node, this.createLoopLabel());
     const preBodyLabel = this.createBranchLabel();
     const preIncrementorLabel = this.createBranchLabel();
     const postLoopLabel = this.createBranchLabel();
-    this.bindOptional(node.initializer);
     this.addAntecedent(preLoopLabel, this.currentFlow);
     this.currentFlow = preLoopLabel;
     this.bindCondition(node.condition, preBodyLabel, postLoopLabel);
@@ -1534,9 +1551,15 @@ class Binder extends NodeVisitor {
   }
 
   bindForInOrForOfStatement(node: ForInOrOfStatement): void {
+    this.bind(node.expression);
+    if (this.currentFlow === this.unreachableFlow) {
+      // As for a `for` initializer: an expression that ends the flow leaves the loop unreachable.
+      this.bind(node.initializer);
+      this.bind(node.statement);
+      return;
+    }
     const preLoopLabel = this.setContinueTarget(node, this.createLoopLabel());
     const postLoopLabel = this.createBranchLabel();
-    this.bind(node.expression);
     this.addAntecedent(preLoopLabel, this.currentFlow);
     this.currentFlow = preLoopLabel;
     if (node.kind === SyntaxKind.ForOfStatement) this.bindOptional(node.awaitModifier);
@@ -1979,6 +2002,12 @@ class Binder extends NodeVisitor {
           this.file.patternAmbientModules = appendToList(
             this.file.patternAmbientModules,
             new PatternAmbientModule(text, starIndex, symbol),
+          );
+        else if (node.attributes !== undefined)
+          this.errorOnNode(
+            name,
+            Diagnostics.An_ambient_module_declaration_with_import_attributes_must_use_a_pattern_name_with_an_Asterisk_character,
+            noArgs,
           );
       }
       return;
@@ -2710,4 +2739,10 @@ export function findUseStrictPrologue(file: SourceFile, statements: readonly Nod
     if (text === '"use strict"' || text === "'use strict'") return statement;
   }
   return undefined;
+}
+
+/** Whether a module name is a pattern with exactly one `*`. */
+function hasSingleStar(text: string): boolean {
+  const star = text.indexOf('*');
+  return star >= 0 && text.indexOf('*', star + 1) < 0;
 }

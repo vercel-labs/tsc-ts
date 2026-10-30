@@ -1,5 +1,8 @@
 // The disk, as tsc-ts's public API and `tsc-ts --api` read it where a host doesn't answer.
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { isNetworkPath } from '../compiler/path.js';
+
+// Network paths are never accessed (`isNetworkPath`).
 
 export interface DirectoryEntries {
   files: string[];
@@ -14,6 +17,7 @@ export interface FileStat {
 
 // Reads a text file, decoding UTF-16 byte order marks and dropping a UTF-8 one.
 export function diskReadFile(path: string): string | undefined {
+  if (isNetworkPath(path)) return undefined;
   let bytes: Uint8Array;
   try {
     bytes = readFileSync(path);
@@ -37,6 +41,7 @@ function utf16be(bytes: Uint8Array): string {
 }
 
 export function diskStat(path: string): FileStat | undefined {
+  if (isNetworkPath(path)) return undefined;
   try {
     const s = statSync(path);
     return { isDirectory: s.isDirectory(), size: s.size, mtimeMs: s.mtimeMs };
@@ -50,6 +55,7 @@ export function diskEntries(path: string): DirectoryEntries {
   const files: string[] = [];
   const directories: string[] = [];
   let names: string[];
+  if (isNetworkPath(path)) return { files, directories };
   try {
     names = readdirSync(path);
   } catch {
@@ -65,8 +71,11 @@ export function diskEntries(path: string): DirectoryEntries {
 }
 
 export function diskRealpath(path: string): string {
+  if (isNetworkPath(path)) return path;
   try {
-    return realpathSync(path);
+    // A local path may resolve to a network location (a mapped network drive): keep the original.
+    const real = realpathSync(path);
+    return isNetworkPath(real) ? path : real;
   } catch {
     return path;
   }

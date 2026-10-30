@@ -104,6 +104,7 @@ const enum Features {
   Node16Default = Imports | SelfName | Exports | ExportsPatternTrailers,
   NodeNextDefault = Imports | SelfName | Exports | ExportsPatternTrailers | ImportsPatternRoot,
   BundlerDefault = Imports | SelfName | Exports | ExportsPatternTrailers | ImportsPatternRoot,
+  All = Imports | SelfName | Exports | ExportsPatternTrailers | ImportsPatternRoot,
 }
 
 function extensionsToString(extensions: number): string {
@@ -526,6 +527,27 @@ export class Resolver {
     return state.getPackageScopeForPath(directory);
   }
 
+  /**
+   * The TypeScript or declaration file a package's directory loads (its `typings`, `types` or `main` field, or
+   * an index file), as tsgo finds a package's main entrypoint; `''` for none.
+   */
+  loadPackageMainEntrypoint(info: PackageJsonInfo): string {
+    const state = this.entrypointState(info.packageDirectory);
+    return state.loadPackageMainEntrypoint(info);
+  }
+
+  /** The TypeScript or declaration file an `exports` target path of a package loads; `''` for none. */
+  loadPackageExportTargetEntrypoint(packageDirectory: string, candidate: string, target: string): string {
+    return this.entrypointState(packageDirectory).loadPackageExportTargetEntrypoint(candidate, target);
+  }
+
+  private entrypointState(packageDirectory: string): ResolutionState {
+    const state = new ResolutionState(this, undefined, '', packageDirectory, false, ModuleKind.None, this.options);
+    state.extensions = Extensions.TypeScript | Extensions.Declaration;
+    state.features = Features.All;
+    return state;
+  }
+
   /** Resolves an `extends` specifier of a tsconfig file. */
   resolveConfig(moduleName: string, containingFile: string): ResolvedModule {
     const state = new ResolutionState(
@@ -717,8 +739,9 @@ class ResolutionState {
             this.trace(Diagnostics.Directory_0_does_not_exist_skipping_all_lookups_in_it, typeRoot);
           continue;
         }
-        if (fromConfig) {
-          // Configured type roots resolve as files or directories, like modules.
+        // Configured type roots resolve as files or directories, like modules; a name ending in a separator
+        // only as a directory.
+        if (fromConfig && !hasTrailingDirectorySeparator(candidate)) {
           const fromFile = this.loadModuleFromFile(Extensions.Declaration, candidate);
           if (fromFile !== undefined) {
             this.setPackageIdFromNodeModulesPath(fromFile);
@@ -757,12 +780,13 @@ class ResolutionState {
     }
   }
 
+  /** The type root's path for the name, resolved against the type root as tsgo does: `./css` in it is `css`. */
   private getCandidateFromTypeRoot(typeRoot: string): string {
     const name =
       typeRoot.endsWith('/node_modules/@types') || typeRoot.endsWith('/node_modules/@types/')
         ? this.mangleScopedPackageName(this.name)
         : this.name;
-    return combinePaths(typeRoot, name);
+    return normalizePath(combinePaths(typeRoot, name));
   }
 
   private mangleScopedPackageName(name: string): string {
@@ -783,10 +807,12 @@ class ResolutionState {
           this.trace(Diagnostics.Directory_0_does_not_exist_skipping_all_lookups_in_it, typeRoot);
         continue;
       }
-      const fromFile = this.loadModuleFromFile(Extensions.Declaration, candidate);
-      if (fromFile !== undefined) {
-        this.setPackageIdFromNodeModulesPath(fromFile);
-        return fromFile;
+      if (!hasTrailingDirectorySeparator(candidate)) {
+        const fromFile = this.loadModuleFromFile(Extensions.Declaration, candidate);
+        if (fromFile !== undefined) {
+          this.setPackageIdFromNodeModulesPath(fromFile);
+          return fromFile;
+        }
       }
       const fromDirectory = this.loadNodeModuleFromDirectory(Extensions.Declaration, candidate, true);
       if (fromDirectory !== undefined) return fromDirectory;
@@ -1825,6 +1851,14 @@ class ResolutionState {
     }
     if (this.traces !== undefined) this.trace(Diagnostics.File_0_does_not_exist, fileName);
     return false;
+  }
+
+  loadPackageMainEntrypoint(info: PackageJsonInfo): string {
+    return this.loadNodeModuleFromDirectoryWorker(this.extensions, info.packageDirectory, info)?.path ?? '';
+  }
+
+  loadPackageExportTargetEntrypoint(candidate: string, target: string): string {
+    return this.loadFileNameFromPackageJsonField(this.extensions, candidate, target)?.path ?? '';
   }
 
   private loadNodeModuleFromDirectory(

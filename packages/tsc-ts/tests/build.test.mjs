@@ -24,7 +24,7 @@ import { tscTs, tscTsMissing } from './toolchain.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
-const bundledLibs = join(root, 'upstream/typescript-go/internal/bundled/libs');
+const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 const skip = (!existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo') || tscTsMissing;
 
 /**
@@ -153,6 +153,87 @@ const scenarios = {
     steps: [
       { args: [] },
       { args: [], edit: { 'a.ts': 'import { make } from "dep";\nexport const x = make();\n// edit\n' } },
+    ],
+  },
+  // A JSON module's signature is its version, so fixing it rechecks its importers.
+  'JSON module errors cleared after fixing the JSON file': {
+    files: {
+      'tsconfig.json':
+        '{"compilerOptions":{"strict":true,"noEmit":true,"incremental":true,"resolveJsonModule":true,' +
+        '"esModuleInterop":true}}',
+      'data.json': '{ "title": "hello" }',
+      'check.ts':
+        'import type data from "./data.json";\n\ntype Shape = { title: string };\ntype Covers<T extends Shape> = T;\n\n' +
+        'export type Check = Covers<typeof data>;\n',
+    },
+    steps: [
+      { args: [] },
+      { args: [], edit: { 'data.json': '{}' } },
+      { args: [], edit: { 'data.json': '{ "title": "fixed" }' } },
+    ],
+  },
+  // Deleting a global declaration file with another file rechecks every file, also when the other file
+  // (exports.d.ts) comes first.
+  'mixed file deletion with add and change': {
+    files: {
+      'tsconfig.json': '{"compilerOptions":{"incremental":true,"noEmit":true,"types":[]}}',
+      'consumer.ts': 'declare const value: RemovedGlobal; value.property;',
+      'global.d.ts': 'interface RemovedGlobal { property: string; }',
+      'exports.d.ts': 'export interface ModuleOnly { property: string; }',
+      'changed.ts': 'export const changed = 1;',
+    },
+    steps: [
+      { args: [] },
+      {
+        args: [],
+        edit: {
+          'global.d.ts': null,
+          'exports.d.ts': null,
+          'changed.ts': 'export const changed = 2;',
+          'added.ts': 'export const added = 1;',
+        },
+      },
+      { args: [] },
+      { args: [], edit: { 'global.d.ts': 'interface RemovedGlobal { property: number; }' } },
+      { args: [], edit: { 'added.ts': null } },
+      { args: [] },
+    ],
+  },
+  // A global declaration file that becomes a module changes the global scope: its user, which does not
+  // import it, is checked again.
+  'global declaration file that becomes a module': {
+    files: {
+      'tsconfig.json': '{"compilerOptions":{"incremental":true,"noEmit":true,"types":[]}}',
+      'consumer.ts': 'declare const value: Shared; value.property;\n',
+      'global.d.ts': 'interface Shared { property: string; }\n',
+    },
+    steps: [
+      { args: [] },
+      { args: [], edit: { 'global.d.ts': 'export interface Shared { property: string; }\n' } },
+      { args: [] },
+      { args: [], edit: { 'global.d.ts': 'interface Shared { property: string; }\n' } },
+    ],
+  },
+  // Pending changes of deleted files leave the build info.
+  'unchecked deleted paths with no emit': {
+    files: {
+      'tsconfig.json':
+        '{"compilerOptions":{"incremental":true,"noCheck":true,"noEmit":true,"composite":true,"types":[]}}',
+      'stable.ts': 'export const stable = 1;',
+    },
+    steps: [
+      { args: [] },
+      { args: [], edit: { 'first.ts': 'export const first = 1;', 'second.ts': 'export const second = 1;' } },
+      { args: [], edit: { 'first.ts': null, 'second.ts': null } },
+      { args: [] },
+      {
+        args: [],
+        edit: {
+          'tsconfig.json':
+            '{"compilerOptions":{"incremental":true,"noCheck":false,"noEmit":false,"composite":true,"types":[]}}',
+        },
+      },
+      { args: [] },
     ],
   },
   'upstream errors, --stopBuildOnErrors, solutions and missing references': {
@@ -292,6 +373,20 @@ const scenarios = {
         },
       },
       { args: ['--checkers', '3', '--listEmittedFiles'] },
+    ],
+  },
+  // Missing global types that checking a file finds stay with the file, and a rebuild that doesn't check it
+  // again reports them from the build info. In native builds the first step checks on two checker threads.
+  'missing global types of an incremental program on checker threads': {
+    files: {
+      'tsconfig.json': '{"compilerOptions":{"incremental":true,"lib":["es5"],"target":"es2017","types":[]}}',
+      'generators.ts': 'export async function* values() { yield 1; }\nexport function* keys() { yield 1; }\n',
+      'other.ts': 'export const other = 1;\n',
+    },
+    steps: [
+      { args: ['--checkers', '2'] },
+      { args: ['--checkers', '2'], edit: { 'other.ts': 'export const other = 2;\n' } },
+      { args: ['--checkers', '2'] },
     ],
   },
   // In native builds the second step checks and emits the files the change affects on two checker threads.

@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "module": "nodenext", "strict": true, "noEmit": true, "allowJs": true, "checkJs": true },
+  "include": ["src"]
+}

@@ -53,7 +53,6 @@ import { SyntaxKind } from './syntax-kind.js';
 import { getMergedSymbol, getSymbolOfDeclaration } from './checker-symbols.js';
 import { getResolvedSymbol } from './checker-expressions.js';
 import { skipTrivia } from './scanner.js';
-import { getContainingFunctionOrClassStaticBlock } from './checker-grammar.js';
 import { nodeCanBeDecorated } from './checker-decorators.js';
 import { symbolToString } from './type-printer.js';
 import type { Type } from './checker-types.js';
@@ -248,20 +247,14 @@ class PotentiallyUnusedCollector extends NodeVisitor {
   }
 
   /**
-   * Whether the checker skips the children of `node`: a `return` outside a function body, or in a class
-   * static block, and a decorator of a declaration that can't be decorated, are reported as errors and
-   * not checked further.
+   * Whether the checker skips the children of `node`: a decorator of a declaration that can't be decorated
+   * is reported as an error and not checked further. (The expression of a `return` outside a function
+   * body, or in a class static block, is still checked.)
    */
   private isUnchecked(node: Node): boolean {
-    if (node.kind === SyntaxKind.ReturnStatement) {
-      const container = getContainingFunctionOrClassStaticBlock(node);
-      return container === undefined || container.kind === SyntaxKind.ClassStaticBlockDeclaration;
-    }
-    if (node.kind === SyntaxKind.Decorator) {
-      const declaration = node.parent!;
-      return !nodeCanBeDecorated(this.legacyDecorators, declaration, declaration.parent, declaration.parent?.parent);
-    }
-    return false;
+    if (node.kind !== SyntaxKind.Decorator) return false;
+    const declaration = node.parent!;
+    return !nodeCanBeDecorated(this.legacyDecorators, declaration, declaration.parent, declaration.parent?.parent);
   }
 }
 
@@ -273,7 +266,8 @@ function isPotentiallyUnusedContainer(node: Node): boolean {
     case SyntaxKind.CaseBlock:
     case SyntaxKind.ForStatement:
     case SyntaxKind.ForInStatement:
-    case SyntaxKind.ForOfStatement: {
+    case SyntaxKind.ForOfStatement:
+    case SyntaxKind.ClassStaticBlockDeclaration: {
       const locals = getLocals(node);
       return locals !== undefined && locals.size !== 0;
     }
@@ -319,6 +313,7 @@ function checkUnusedIdentifiersOfNode(c: Checker, node: Node): void {
     case SyntaxKind.ForStatement:
     case SyntaxKind.ForInStatement:
     case SyntaxKind.ForOfStatement:
+    case SyntaxKind.ClassStaticBlockDeclaration:
       checkUnusedLocalsAndParameters(c, node);
       return;
     case SyntaxKind.Constructor:

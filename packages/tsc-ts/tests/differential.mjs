@@ -1,7 +1,7 @@
 // Drives the reference `tsc --api` and `tsc-ts --api` with the same requests
 // and checks that their responses agree.
-import { Client } from './client.mjs';
-import { compareSourceFile, IdMap } from './compare.mjs';
+import { Client, snapshotRequest } from './client.mjs';
+import { compareSourceFile, IdMap, symbolKey } from './compare.mjs';
 
 export class Differential {
   constructor(expectedCommand, actualCommand, cwd, actualEnv) {
@@ -10,6 +10,8 @@ export class Differential {
     this.ids = new IdMap();
     this.count = 0;
     this.failures = [];
+    // The snapshot `snapshot` makes the next one from.
+    this.latestSnapshot = undefined;
     // Encoded source files by path, to name nodes.
     this.files = new Map();
   }
@@ -41,6 +43,12 @@ export class Differential {
       }
       const expected = JSON.parse(a.payload.toString());
       const actual = JSON.parse(b.payload.toString());
+      // After invalidateAll, tsc lists the files a config's patterns match in no fixed order.
+      if (params?.changes?.fileNotifications?.invalidateAll === true) {
+        for (const reply of [expected, actual]) {
+          for (const project of reply.projects ?? []) project.parsedCommandLine?.fileNames?.sort();
+        }
+      }
       if (returnsNodes(method)) {
         this.ids.compare(method, this.canonicalNodes(expected), this.canonicalNodes(actual));
       } else {
@@ -51,6 +59,13 @@ export class Differential {
       this.failures.push(`${where.slice(0, 300)}\n  ${e.message.slice(0, 1000)}`);
       return a.type === 'error' ? undefined : isBinary(method) ? a.payload : JSON.parse(a.payload.toString());
     }
+  }
+
+  // Makes a snapshot from the latest one with `changes` (see snapshotRequest) on both servers.
+  async snapshot(changes, options) {
+    const reply = await this.call(...snapshotRequest(this.latestSnapshot, changes, options));
+    if (reply !== undefined) this.latestSnapshot = reply.snapshot;
+    return reply;
   }
 
   async close() {
@@ -128,13 +143,14 @@ const TypeFlags = {
 };
 const ObjectFlags = { ClassOrInterface: 3, Reference: 4 };
 const SymbolFlags = { Alias: 2097152, Module: 1536 };
+// TypeScript 7.1's syntax kinds.
 const Kind = {
-  FirstTypeNode: 183,
-  LastTypeNode: 206,
-  CallExpression: 214,
-  NewExpression: 215,
-  TaggedTemplate: 216,
-  SourceFile: 307,
+  FirstTypeNode: 184,
+  LastTypeNode: 207,
+  CallExpression: 215,
+  NewExpression: 216,
+  TaggedTemplate: 217,
+  SourceFile: 308,
   NodeList: 0xffffffff,
 };
 
@@ -158,7 +174,8 @@ export async function explore(d, snapshot, project, files, limit) {
   const queue = [];
   const add = (kind, value) => {
     if (value === null || value === undefined) return;
-    const key = `${kind}:${typeof value === 'object' ? value.id : value}`;
+    const id = kind === 'symbol' ? symbolKey(value.reference) : typeof value === 'object' ? value.id : value;
+    const key = `${kind}:${id}`;
     if (seen.has(key) || seen.size >= limit) return;
     seen.add(key);
     queue.push([kind, value]);
@@ -181,13 +198,14 @@ export async function explore(d, snapshot, project, files, limit) {
     const [kind, value] = queue.shift();
     switch (kind) {
       case 'symbol': {
-        const symbol = value.id;
+        const symbol = value.reference;
         add('type', await d.call('getTypeOfSymbol', { ...base, symbol }));
         add('type', await d.call('getDeclaredTypeOfSymbol', { ...base, symbol }));
-        add('symbol', await d.call('getParentOfSymbol', { ...base, objectId: symbol }));
-        add('symbol', await d.call('getExportSymbolOfSymbol', { ...base, objectId: symbol }));
-        addAll('symbol', await d.call('getMembersOfSymbol', { ...base, objectId: symbol }));
-        addAll('symbol', await d.call('getExportsOfSymbol', { ...base, objectId: symbol }));
+        addAll('type', await d.call('getTypesOfSymbols', { ...base, symbols: [symbol] }));
+        add('symbol', await d.call('getParentOfSymbol', { symbol }));
+        add('symbol', await d.call('getExportSymbolOfSymbol', { symbol }));
+        addAll('symbol', await d.call('getMembersOfSymbol', { symbol }));
+        addAll('symbol', await d.call('getExportsOfSymbol', { symbol }));
         if (value.flags & SymbolFlags.Alias) {
           add('symbol', await d.call('getAliasedSymbol', { ...base, symbol }));
           add('symbol', await d.call('getImmediateAliasedSymbol', { ...base, symbol }));
@@ -233,12 +251,11 @@ export async function explore(d, snapshot, project, files, limit) {
           add('type', info.valueType);
         }
         await d.call('isArrayType', { ...base, type });
-        await d.call('isTupleType', { ...base, type });
         await d.call('isArrayLikeType', { ...base, type });
         await d.call('typeToString', { ...base, type });
         await d.call('typeToTypeNode', { ...base, type });
-        add('type', await d.call('getApparentType', { ...base, type }));
-        add('type', await d.call('getNonNullableType', { ...base, type }));
+        add('type', await d.call('getApparentType', { ...base, objectId: type }));
+        add('type', await d.call('getNonNullableType', { ...base, objectId: type }));
         add('type', await d.call('getWidenedType', { ...base, type }));
         add('type', await d.call('getBaseTypeOfLiteralType', { ...base, type }));
         add('type', await d.call('getBaseConstraintOfType', { ...base, type }));
@@ -281,13 +298,13 @@ export async function explore(d, snapshot, project, files, limit) {
           add('type', await d.call('getConstraintOfType', { ...base, objectId: type }));
         }
         if (flags & TypeFlags.TypeParameter) {
-          add('type', await d.call('getConstraintOfTypeParameter', { ...base, type }));
+          add('type', await d.call('getConstraintOfTypeParameter', { ...base, objectId: type }));
         }
         break;
       }
       case 'signature': {
         const signature = value.id;
-        add('type', await d.call('getReturnTypeOfSignature', { ...base, signature }));
+        add('type', await d.call('getReturnTypeOfSignature', { ...base, objectId: signature }));
         add('type', await d.call('getRestTypeOfSignature', { ...base, signature }));
         const predicate = await d.call('getTypePredicateOfSignature', { ...base, signature });
         add('type', predicate?.type);
@@ -315,13 +332,15 @@ export async function exploreServices(d, snapshot, project, files) {
   for (const { file, length } of files) {
     const positions = Array.from({ length }, (_, i) => i);
     for (const symbol of (await d.call('getSymbolsAtPositions', { ...base, file, positions })) ?? []) {
-      if (symbol !== null) symbols.set(symbol.id, symbol);
+      if (symbol !== null) symbols.set(symbolKey(symbol.reference), symbol);
     }
   }
   for (const symbol of symbols.values()) {
-    await d.call('getJsDocTags', { ...base, symbol: symbol.id });
-    await d.call('getDocumentationComment', { ...base, symbol: symbol.id });
-    for (const { file } of files) await d.call('getReferencesToSymbolInFile', { ...base, file, symbol: symbol.id });
+    await d.call('getJsDocTags', { ...base, symbol: symbol.reference });
+    await d.call('getDocumentationComment', { ...base, symbol: symbol.reference });
+    for (const { file } of files) {
+      await d.call('getReferencesToSymbolInFile', { ...base, file, symbol: symbol.reference });
+    }
     for (const signatureDecl of symbol.declarations ?? []) {
       await d.call('getSignatureUsages', { ...base, signatureDecl });
     }

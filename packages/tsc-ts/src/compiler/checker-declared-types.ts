@@ -19,7 +19,8 @@ import {
   MappedTypeNode,
   getHeritageClauses,
 } from './ast.js';
-import { getSourceFileOfNode, isEnumConst, isObjectLiteralMethod } from './binder-utilities.js';
+import { getSourceFileOfNode, hasDynamicName, isEnumConst, isObjectLiteralMethod } from './binder-utilities.js';
+import { getHeritageClauseElementName } from './ast-utilities.js';
 import { Diagnostics } from './diagnostics.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { type Checker, createDiagnosticForNode } from './checker.js';
@@ -56,6 +57,7 @@ import {
   typeListKey,
   typesOf,
   typeListHash,
+  compareTypes,
 } from './checker-type-factory.js';
 import {
   TypeSystemPropertyName,
@@ -157,9 +159,9 @@ function isThislessInterface(c: Checker, symbol: Symbol): boolean {
     if (declaration.kind !== SyntaxKind.InterfaceDeclaration) continue;
     if ((declaration.flags & NodeFlags.ContainsThis) !== 0) return false;
     for (const node of getExtendsHeritageClauseElements(declaration)) {
-      const expression = getExpression(node)!;
-      if (isEntityNameExpression(expression)) {
-        const baseSymbol = resolveEntityName(c, expression, SymbolFlags.Type, true, false, undefined);
+      const name = getHeritageClauseElementName(node);
+      if (name.kind === SyntaxKind.QualifiedName || isEntityNameExpression(name)) {
+        const baseSymbol = resolveEntityName(c, name, SymbolFlags.Type, true, false, undefined);
         if (
           baseSymbol === undefined ||
           (baseSymbol.flags & SymbolFlags.Interface) === 0 ||
@@ -302,6 +304,7 @@ export function getInferTypeParameters(c: Checker, node: Node): Type[] {
   if (locals !== undefined)
     for (const symbol of locals.values())
       if ((symbol.flags & SymbolFlags.TypeParameter) !== 0) result.push(getDeclaredTypeOfSymbol(c, symbol));
+  result.sort((t1, t2) => compareTypes(c, t1, t2));
   return result;
 }
 
@@ -377,7 +380,7 @@ export function getDeclaredTypeOfEnum(c: Checker, symbol: Symbol): Type {
   for (const declaration of getDeclarations(symbol)) {
     if (declaration.kind !== SyntaxKind.EnumDeclaration) continue;
     for (const member of (declaration as EnumDeclaration).members.nodes) {
-      if (!hasBindableName(member)) continue;
+      if (hasDynamicName(member)) continue;
       const memberSymbol = getSymbolOfDeclaration(c, member)!;
       computeEnumMemberValues(c, declaration);
       const memberLinks = c.nodeLinks(member);

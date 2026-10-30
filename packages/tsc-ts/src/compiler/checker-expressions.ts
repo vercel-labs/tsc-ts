@@ -61,7 +61,7 @@ import { skipTrivia } from './scanner.js';
 import { Diagnostic, Diagnostics } from './diagnostics.js';
 import { type Symbol, SymbolFlags } from './symbol.js';
 import { SyntaxKind } from './syntax-kind.js';
-import { type Checker } from './checker.js';
+import { type Checker, createDiagnosticForNode } from './checker.js';
 import {
   checkSuperExpression,
   checkThisBeforeSuper,
@@ -153,9 +153,6 @@ import {
   isGenericIndexType,
   isGenericMappedType,
   isGenericType,
-  getMappedTypeNameTypeKind,
-  MappedTypeNameTypeKind,
-  getIndexForMappedType,
   getIndexTypeEx,
   getMappedTypeModifiers,
   MappedTypeModifiers,
@@ -211,8 +208,10 @@ import {
   checkDeleteExpression,
   checkPostfixUnaryExpression,
   checkPrefixUnaryExpression,
+  grammarErrorOnNode,
   isTypeAssertion,
 } from './checker-operators.js';
+import { fileExtensionIsOneOf } from './path.js';
 import { checkJsx } from './checker-jsx.js';
 import { getRegularTypeOfObjectLiteral } from './checker-literals.js';
 import {
@@ -448,8 +447,10 @@ function getReturnTypeOfSingleNonGenericSignature(c: Checker, funcType: Type, ki
 }
 
 export function checkComputedPropertyName(c: Checker, node: Node): Type {
-  const nodeId = (node as ComputedPropertyName).expression.id;
+  const nodeId = node.id;
   if (c.resolvedTypes.get(nodeId) === undefined) {
+    // A reference to the name while its expression is checked sees a circular type.
+    c.resolvedTypes.set(nodeId, c.circularConstraintType);
     const expression = (node as ComputedPropertyName).expression;
     const container = node.parent!.parent!;
     // `[x in y]` in a type member is a mapped type written in the wrong place, reported by the parser.
@@ -970,8 +971,21 @@ export function checkThisExpression(c: Checker, node: Node): Type {
     const globalThisType = getTypeOfSymbol(c, c.globalThisSymbol);
     if (t === globalThisType && capturedByArrowFunction)
       c.error(node, Diagnostics.The_containing_arrow_function_captures_the_global_value_of_this);
-    else if (t === undefined)
-      c.error(node, Diagnostics.X_this_implicitly_has_type_any_because_it_does_not_have_a_type_annotation);
+    else if (t === undefined) {
+      // The related information goes on the reported diagnostic after it is added, as tsgo attaches it,
+      // so a later equal report compares unequal to it and is kept.
+      const diagnostic = c.error(
+        node,
+        Diagnostics.X_this_implicitly_has_type_any_because_it_does_not_have_a_type_annotation,
+      );
+      if (container.kind !== SyntaxKind.SourceFile) {
+        const outsideThis = tryGetThisTypeAt(c, container, getThisContainer(container, false, false));
+        if (outsideThis !== undefined && outsideThis !== globalThisType)
+          diagnostic.addRelatedInfo(
+            createDiagnosticForNode(container, Diagnostics.An_outer_value_of_this_is_shadowed_by_this_container, []),
+          );
+      }
+    }
   }
   return t ?? c.anyType;
 }
@@ -1210,7 +1224,8 @@ export function isTupleLikeType(c: Checker, t: Type): boolean {
 export function isMutableArrayLikeType(c: Checker, t: Type): boolean {
   return (
     isMutableArrayOrTuple(c, t) ||
-    ((t.flags & (TypeFlags.Any | TypeFlags.Nullable)) === 0 && isTypeAssignableTo(c, t, c.anyArrayType))
+    ((t.flags & (TypeFlags.Any | TypeFlags.Nullable | TypeFlags.Never)) === 0 &&
+      isTypeAssignableTo(c, t, c.anyArrayType))
   );
 }
 
@@ -1248,10 +1263,31 @@ export function getPropertyNameOfObjectLiteralElement(c: Checker, element: Node)
   return undefined;
 }
 
+/** Whether `node` is the object literal of the `with` property of an `import()` call's options argument. */
+function isInlineImportAttributes(node: Node): boolean {
+  const property = node.parent!;
+  if (
+    node.kind !== SyntaxKind.ObjectLiteralExpression ||
+    property.kind !== SyntaxKind.PropertyAssignment ||
+    getInitializer(property) !== node
+  )
+    return false;
+  const name = getName(property)!;
+  if ((name.kind !== SyntaxKind.Identifier && !isStringLiteralLike(name)) || getText(name) !== 'with') return false;
+  const options = property.parent!;
+  if (options.kind !== SyntaxKind.ObjectLiteralExpression) return false;
+  let importCall: Node | undefined = options;
+  while (importCall !== undefined && !isImportCall(importCall)) importCall = importCall.parent;
+  if (importCall === undefined) return false;
+  const args = (importCall as CallExpression).arguments.nodes;
+  return args.length > 1 && skipParentheses(args[1]!) === options;
+}
+
 /** Whether `node` is in an `as const` context, where literals keep their types. */
 export function isConstContext(c: Checker, node: Node): boolean {
   const parent = node.parent;
   if (parent === undefined) return false;
+  if (isInlineImportAttributes(node)) return true;
   // Literals contextually typed by a `const` type parameter are in a const context.
   if (isValidConstAssertionArgument(c, node) && isConstTypeVariable(c, getContextualType(c, node), 0)) return true;
   switch (parent.kind) {
@@ -1468,7 +1504,7 @@ export function entityNameToString(node: Node): string {
     }
     case SyntaxKind.QualifiedName: {
       const q = node as QualifiedName;
-      return entityNameToString(q.left) + '.' + q.right.text;
+      return entityNameToString(q.left) + '.' + getText(q.right);
     }
   }
   return getText(node);
@@ -1535,32 +1571,25 @@ export function getFlowTypeOfAccessExpression(
     return propType;
   if (propType === c.autoType) return getFlowTypeOfAutoTypedProperty(c, node, prop);
   propType = getNarrowableTypeForReference(c, propType, node, checkMode);
-  // `this.x` in the constructor of x's class starts out uninitialized under strictPropertyInitialization.
+  // `this.x` in the constructor of x's class starts out uninitialized under strictPropertyInitialization,
+  // and a JavaScript `this.x = …` declaration is unassigned before it in its own function.
   let assumeUninitialized = false;
-  const expression = getExpression(node);
-  if (
-    c.strictNullChecks &&
-    c.strictPropertyInitialization &&
-    expression !== undefined &&
-    expression.kind === SyntaxKind.ThisKeyword &&
-    prop !== undefined
-  ) {
+  if (c.strictNullChecks && prop !== undefined) {
     const declaration = prop.valueDeclaration;
-    if (declaration !== undefined && isPropertyWithoutInitializer(declaration) && !isStatic(declaration)) {
-      const flowContainer = getControlFlowContainer(node);
+    const expression = getExpression(node);
+    if (c.strictPropertyInitialization && expression !== undefined && expression.kind === SyntaxKind.ThisKeyword) {
+      if (declaration !== undefined && isPropertyWithoutInitializer(declaration) && !isStatic(declaration)) {
+        const flowContainer = getControlFlowContainer(node);
+        assumeUninitialized =
+          flowContainer.kind === SyntaxKind.Constructor &&
+          flowContainer.parent === declaration.parent &&
+          (declaration.flags & NodeFlags.Ambient) === 0;
+      }
+    } else
       assumeUninitialized =
-        flowContainer.kind === SyntaxKind.Constructor &&
-        flowContainer.parent === declaration.parent &&
-        (declaration.flags & NodeFlags.Ambient) === 0;
-    }
-  }
-  // A JavaScript `this.x = …` declaration is unassigned before it in its own function.
-  if (c.strictNullChecks && prop !== undefined && !assumeUninitialized) {
-    const declaration = prop.valueDeclaration;
-    assumeUninitialized =
-      declaration instanceof BinaryExpression &&
-      declaration.left.kind === SyntaxKind.PropertyAccessExpression &&
-      getControlFlowContainer(node) === getControlFlowContainer(declaration);
+        declaration instanceof BinaryExpression &&
+        declaration.left.kind === SyntaxKind.PropertyAccessExpression &&
+        getControlFlowContainer(node) === getControlFlowContainer(declaration);
   }
   const initialType = assumeUninitialized ? getOptionalType(c, propType, false) : propType;
   const flowType = getFlowTypeOfReference(c, node, propType, initialType, undefined);
@@ -1620,18 +1649,13 @@ export function checkIndexedAccessIndexType(c: Checker, t: Type, accessNode: Nod
   if ((t.flags & TypeFlags.IndexedAccess) === 0) return t;
   const objectType = (t as IndexedAccessType).objectType;
   const indexType = (t as IndexedAccessType).indexType;
-  // Remapping mapped types don't defer their index types.
-  const objectIndexType =
-    isGenericMappedType(c, objectType) &&
-    getMappedTypeNameTypeKind(c, objectType as MappedType) === MappedTypeNameTypeKind.Remapping
-      ? getIndexForMappedType(c, objectType as MappedType, IndexFlags.None)
-      : getIndexTypeEx(c, objectType, IndexFlags.None);
   const hasNumberIndexInfo = getIndexInfoOfType(c, objectType, c.numberType) !== undefined;
   if (
     everyType(
       indexType,
       (u) =>
-        isTypeAssignableTo(c, u, objectIndexType) || (hasNumberIndexInfo && isApplicableIndexType(c, u, c.numberType)),
+        isTypeAssignableTo(c, u, getIndexTypeEx(c, objectType, IndexFlags.None)) ||
+        (hasNumberIndexInfo && isApplicableIndexType(c, u, c.numberType)),
     )
   ) {
     if (
@@ -1737,6 +1761,15 @@ function hasNumericPropertyNames(c: Checker, t: Type): boolean {
 // ---- Assertions
 
 function checkAssertion(c: Checker, node: Node, checkMode: CheckMode): Type {
+  if (node.kind === SyntaxKind.TypeAssertionExpression) {
+    const file = getSourceFileOfNode(node);
+    if (fileExtensionIsOneOf(file.fileName, ['.mts', '.cts']))
+      grammarErrorOnNode(
+        c,
+        node,
+        Diagnostics.This_syntax_is_reserved_in_files_with_the_mts_or_cts_extension_Use_an_as_expression_instead,
+      );
+  }
   // `<T>expr`, over `<T>`.
   if (node.kind === SyntaxKind.TypeAssertionExpression && shouldCheckErasableSyntax(c, node)) {
     const file = getSourceFileOfNode(node);
@@ -1750,8 +1783,10 @@ function checkAssertion(c: Checker, node: Node, checkMode: CheckMode): Type {
       ),
     );
   }
+  const exprType = checkExpressionEx(c, getExpression(node)!, checkMode);
+  // The type node is checked in every case, including the `const` of `x as const`.
+  checkTypeNodeIfPresent(c, getType(node));
   if (isConstTypeReference(getType(node)!)) {
-    const exprType = checkExpressionEx(c, getExpression(node)!, checkMode);
     if (!isValidConstAssertionArgument(c, getExpression(node)!))
       c.error(
         getExpression(node)!,
@@ -1759,10 +1794,8 @@ function checkAssertion(c: Checker, node: Node, checkMode: CheckMode): Type {
       );
     return getRegularTypeOfLiteralType(c, exprType);
   }
-  const exprType = checkExpressionEx(c, getExpression(node)!, checkMode);
   // The operand is compared with the asserted type once, after the last check of the operand.
   c.nodeLinks(node).assertionExpressionType = exprType;
-  checkTypeNodeIfPresent(c, getType(node));
   checkNodeDeferred(c, node);
   return getTypeFromTypeNode(c, getType(node)!);
 }

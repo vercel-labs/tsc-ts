@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/checkhost"
-	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/checkhost"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
 )
 
 var moduleKinds = map[string]core.ModuleKind{
@@ -285,7 +285,7 @@ func print(w *bufio.Writer, diags []*ast.Diagnostic) {
 	for _, d := range diags {
 		name := ""
 		if d.File() != nil {
-			name = d.File().FileName()
+			name = string(d.File().FileName())
 		}
 		fmt.Fprintf(w, "%s %d %d %d %s\n", name, d.Code(), d.Pos(), d.Len(), d.String())
 	}

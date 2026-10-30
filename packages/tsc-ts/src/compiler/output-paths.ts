@@ -6,7 +6,6 @@ import {
   changeExtension,
   combinePaths,
   comparePaths,
-  containsPath,
   ensureTrailingDirectorySeparator,
   fileExtensionIs,
   fileExtensionIsOneOf,
@@ -182,22 +181,10 @@ function getDeclarationEmitOutputFilePath(file: string, options: CompilerOptions
   return removeFileExtension(path) + getDeclarationEmitExtensionForPath(path);
 }
 
-function getSourceFilePathInNewDir(
-  fileName: string,
-  newDirectory: string,
-  currentDirectory: string,
-  commonSourceDirectory: string,
-  useCaseSensitiveFileNames: boolean,
-): string {
-  let sourceFilePath = getNormalizedAbsolutePath(fileName, currentDirectory);
-  const common = ensureTrailingDirectorySeparator(commonSourceDirectory);
-  if (containsPath(common, sourceFilePath, useCaseSensitiveFileNames, currentDirectory)) {
-    sourceFilePath = sourceFilePath.slice(common.length);
-  }
-  return combinePaths(newDirectory, sourceFilePath);
-}
-
-/** Like `getSourceFilePathInNewDir`, but with a case-folded prefix check. */
+/**
+ * `fileName` moved from `commonSourceDirectory` to `newDirectory`. The prefix check is case-folded when file names
+ * are case-insensitive; case folding keeps each code point's length, so the prefix is removed by its own length.
+ */
 export function getSourceFilePathInNewDirWorker(
   fileName: string,
   newDirectory: string,
@@ -223,7 +210,7 @@ function getOwnEmitOutputFilePath(
     options.outDir === undefined
       ? removeFileExtension(fileName)
       : removeFileExtension(
-          getSourceFilePathInNewDir(
+          getSourceFilePathInNewDirWorker(
             fileName,
             options.outDir,
             host.currentDirectory,

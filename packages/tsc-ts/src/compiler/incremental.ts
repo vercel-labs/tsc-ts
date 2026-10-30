@@ -41,6 +41,7 @@ import {
   modeMismatchDetails,
   moduleNotFoundDetails,
   resolveExternalModuleName,
+  getImportAttributesTypeForModuleSpecifier,
 } from './checker-modules.js';
 import { getSymbolAtLocation } from './checker-services.js';
 import { resolveAlias } from './checker-symbols.js';
@@ -1231,7 +1232,17 @@ function addOwnReferencedFiles(checked: CheckedProgram, file: SourceFile, refere
   // call that does not initialize a variable (`exports.a = require("./a").a`), so its build info leaves out that
   // module and its incremental builds keep outputs that depend on it.
   for (const importName of file.imports) {
-    addReferencedFilesFromSymbol(file, referenced, resolveExternalModuleName(checker, importName, importName, true));
+    addReferencedFilesFromSymbol(
+      file,
+      referenced,
+      resolveExternalModuleName(
+        checker,
+        importName,
+        importName,
+        true,
+        getImportAttributesTypeForModuleSpecifier(checker, importName),
+      ),
+    );
   }
   const sourceFileDirectory = getDirectoryPath(file.fileName);
   for (const reference of file.referencedFiles) {
@@ -1275,9 +1286,16 @@ function programToSnapshot(checked: CheckedProgram, oldSnapshot: Snapshot | unde
   // Reuse from the old state.
   if (oldSnapshot !== undefined) {
     if (options.composite === true) snapshot.latestChangedDtsFile = oldSnapshot.latestChangedDtsFile;
-    for (const path of oldSnapshot.changedFilesSet) snapshot.changedFilesSet.add(path);
-    for (const [path, kind] of oldSnapshot.affectedFilesPendingEmit) snapshot.affectedFilesPendingEmit.set(path, kind);
     snapshot.buildInfoEmitPending = oldSnapshot.buildInfoEmitPending;
+    // Changes and pending emit of files no longer in the program are dropped, which changes the build info.
+    for (const path of oldSnapshot.changedFilesSet) {
+      if (program.getSourceFileByPath(path) !== undefined) snapshot.changedFilesSet.add(path);
+      else snapshot.buildInfoEmitPending = true;
+    }
+    for (const [path, kind] of oldSnapshot.affectedFilesPendingEmit) {
+      if (program.getSourceFileByPath(path) !== undefined) snapshot.affectedFilesPendingEmit.set(path, kind);
+      else snapshot.buildInfoEmitPending = true;
+    }
     snapshot.hasErrorsFromOldState = oldSnapshot.hasErrors;
     snapshot.hasSemanticErrorsFromOldState = oldSnapshot.hasSemanticErrors;
     const oldPackageJsons = oldSnapshot.packageJsons;
@@ -1425,13 +1443,23 @@ function programToSnapshot(checked: CheckedProgram, oldSnapshot: Snapshot | unde
   if (oldSnapshot !== undefined) {
     for (const [path, oldInfo] of oldSnapshot.fileInfos) {
       if (snapshot.fileInfos.has(path)) continue;
-      if (oldInfo.affectsGlobalScope) {
-        for (const file of snapshot.getAllFilesExcludingDefaultLibraryFile(program, undefined)) {
-          snapshot.addFileToChangeSet(file.path);
-        }
-        globalFileRemoved = true;
-      } else snapshot.buildInfoEmitPending = true;
-      break;
+      snapshot.buildInfoEmitPending = true;
+      snapshot.changedFilesSet.delete(path);
+      snapshot.affectedFilesPendingEmit.delete(path);
+      if (oldInfo.affectsGlobalScope) globalFileRemoved = true;
+    }
+    if (globalFileRemoved) invalidateGlobalScope(checked, snapshot);
+  }
+
+  // A file that no longer affects the global scope changes it as its removal would.
+  if (oldSnapshot !== undefined && !globalFileRemoved) {
+    for (const [path, oldInfo] of oldSnapshot.fileInfos) {
+      if (!oldInfo.affectsGlobalScope) continue;
+      const info = snapshot.fileInfos.get(path);
+      if (info !== undefined && !info.affectsGlobalScope) {
+        invalidateGlobalScope(checked, snapshot);
+        break;
+      }
     }
   }
 
@@ -1458,6 +1486,19 @@ function programToSnapshot(checked: CheckedProgram, oldSnapshot: Snapshot | unde
     snapshot.buildInfoEmitPending = true;
   }
   return snapshot;
+}
+
+/**
+ * After a change to the global scope, every file but the default libraries is changed, and the default
+ * libraries that are checked are checked again.
+ */
+function invalidateGlobalScope(checked: CheckedProgram, snapshot: Snapshot): void {
+  const program = checked.program;
+  snapshot.buildInfoEmitPending = true;
+  for (const file of program.getSourceFiles()) {
+    if (!program.isSourceFileDefaultLibrary(file.path)) snapshot.addFileToChangeSet(file.path);
+    else if (!checked.skipTypeChecking(file, true)) snapshot.semanticDiagnosticsPerFile.delete(file.path);
+  }
 }
 
 // ---- Affected files
@@ -1510,7 +1551,12 @@ class AffectedFilesHandler {
   private computeDtsSignature(file: SourceFile): string {
     const known = this.incremental.signatures.get(file.path);
     if (known !== undefined) return known;
-    return declarationSignature(this.incremental.emitter, file, this.snapshot.options);
+    const done = this.incremental.beginNestedEmit();
+    try {
+      return declarationSignature(this.incremental.emitter, file, this.snapshot.options);
+    } finally {
+      done();
+    }
   }
 
   updateShapeSignature(file: SourceFile, useFileVersionAsSignature: boolean): boolean {
@@ -1519,7 +1565,10 @@ class AffectedFilesHandler {
     if (info === undefined) return false;
     const previous = info.signature;
     let signature = '';
-    if (!file.isDeclarationFile && !useFileVersionAsSignature) signature = this.computeDtsSignature(file);
+    // A JSON file has no declaration output, so its version is its signature, which invalidates its importers.
+    if (!file.isDeclarationFile && !isJsonSourceFile(file) && !useFileVersionAsSignature) {
+      signature = this.computeDtsSignature(file);
+    }
     if (signature === '') signature = info.version;
     this.updatedSignatures.set(file.path, signature);
     return signature !== previous;
@@ -1549,7 +1598,7 @@ class AffectedFilesHandler {
     const info = this.snapshot.fileInfos.get(file.path);
     if (info !== undefined && info.affectsGlobalScope) {
       this.hasAllFilesExcludingDefaultLibraryFile = true;
-      this.snapshot.getAllFilesExcludingDefaultLibraryFile(this.program, file);
+      return this.snapshot.getAllFilesExcludingDefaultLibraryFile(this.program, file);
     }
     if (this.snapshot.options.isolatedModules === true) return [file];
     const seen = this.forEachFileReferencedBy(file, (currentFile) => {
@@ -1966,7 +2015,7 @@ class EmitFilesHandler {
       results.push(
         declarations !== undefined
           ? this.writeThreadOutputs(file, declarations, writer)
-          : program.emitter.emit([file], EmitOnly.Dts, wrapped),
+          : program.emitter.emit([file], emitOnly === EmitOnly.Dts ? EmitOnly.Dts : EmitOnly.DtsAfterJs, wrapped),
       );
     return combineEmitResults(results);
   }
@@ -2558,11 +2607,31 @@ export class IncrementalProgram extends CompilerProgram {
     readonly signatures: ReadonlyMap<string, string> = new Map(),
   ) {
     super(checked, times);
+    checked.globalsInFileDiagnostics = true;
     this.snapshot = programToSnapshot(checked, oldSnapshot);
   }
 
   get hasChangedDtsFile(): boolean {
     return this.snapshot.hasChangedDtsFile;
+  }
+
+  /** Time spent in declaration emit for signatures while checking (`computeDtsSignature`), not yet taken. */
+  private nestedEmitTime = 0;
+  private nestedEmitDepth = 0;
+  private nestedEmitStart = 0;
+
+  /** Starts timing a nested declaration emit; returns the function that ends it. */
+  beginNestedEmit(): () => void {
+    if (this.nestedEmitDepth++ === 0) this.nestedEmitStart = performance.now();
+    return () => {
+      if (--this.nestedEmitDepth === 0) this.nestedEmitTime += performance.now() - this.nestedEmitStart;
+    };
+  }
+
+  override takeNestedEmitTime(): number {
+    const time = this.nestedEmitTime;
+    this.nestedEmitTime = 0;
+    return time;
   }
 
   /**
@@ -2697,10 +2766,9 @@ export class IncrementalProgram extends CompilerProgram {
   emit(writer: OutputWriter): EmitResult {
     const options = this.snapshot.options;
     let result: EmitResult | undefined;
-    if (options.noEmit === true) {
-      result = new EmitResult();
-      result.emitSkipped = true;
-    } else result = handleNoEmitOnError(this);
+    // A `noEmit` program emits only its build info, and its emit is not skipped (tsgo's `HandleNoEmitOptions`).
+    if (options.noEmit === true) result = new EmitResult();
+    else result = handleNoEmitOnError(this);
     if (result !== undefined) {
       const buildInfoResult = this.emitBuildInfo(writer);
       if (buildInfoResult !== undefined) {

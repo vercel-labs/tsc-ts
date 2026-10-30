@@ -9,10 +9,7 @@ import {
   ModuleKind,
   ModuleResolutionKind,
   NewLineKind,
-  PollingKind,
   ScriptTarget,
-  WatchDirectoryKind,
-  WatchFileKind,
 } from './options.js';
 import { Diagnostics, type DiagnosticMessage } from './diagnostics.js';
 
@@ -88,6 +85,7 @@ export const targetValues: EnumValues = new Map<string, number | string>([
   ['es2023', ScriptTarget.ES2023],
   ['es2024', ScriptTarget.ES2024],
   ['es2025', ScriptTarget.ES2025],
+  ['es2026', ScriptTarget.ES2026],
   ['esnext', ScriptTarget.ESNext],
 ]);
 
@@ -124,6 +122,7 @@ export const libMap: EnumValues = new Map<string, number | string>([
   ['es2023', 'lib.es2023.d.ts'],
   ['es2024', 'lib.es2024.d.ts'],
   ['es2025', 'lib.es2025.d.ts'],
+  ['es2026', 'lib.es2026.d.ts'],
   ['esnext', 'lib.esnext.d.ts'],
   ['dom', 'lib.dom.d.ts'],
   ['dom.iterable', 'lib.dom.iterable.d.ts'],
@@ -195,6 +194,13 @@ export const libMap: EnumValues = new Map<string, number | string>([
   ['es2025.iterator', 'lib.es2025.iterator.d.ts'],
   ['es2025.promise', 'lib.es2025.promise.d.ts'],
   ['es2025.regexp', 'lib.es2025.regexp.d.ts'],
+  ['es2026.array', 'lib.es2026.array.d.ts'],
+  ['es2026.collection', 'lib.es2026.collection.d.ts'],
+  ['es2026.error', 'lib.es2026.error.d.ts'],
+  ['es2026.iterator', 'lib.es2026.iterator.d.ts'],
+  ['es2026.json', 'lib.es2026.json.d.ts'],
+  ['es2026.math', 'lib.es2026.math.d.ts'],
+  ['es2026.typedarrays', 'lib.es2026.typedarrays.d.ts'],
   ['esnext.asynciterable', 'lib.es2018.asynciterable.d.ts'],
   ['esnext.symbol', 'lib.es2019.symbol.d.ts'],
   ['esnext.bigint', 'lib.es2020.bigint.d.ts'],
@@ -203,18 +209,19 @@ export const libMap: EnumValues = new Map<string, number | string>([
   ['esnext.regexp', 'lib.es2024.regexp.d.ts'],
   ['esnext.string', 'lib.es2024.string.d.ts'],
   ['esnext.float16', 'lib.es2025.float16.d.ts'],
-  ['esnext.iterator', 'lib.es2025.iterator.d.ts'],
-  ['esnext.promise', 'lib.es2025.promise.d.ts'],
-  ['esnext.array', 'lib.esnext.array.d.ts'],
-  ['esnext.collection', 'lib.esnext.collection.d.ts'],
+  ['esnext.array', 'lib.es2026.array.d.ts'],
+  ['esnext.collection', 'lib.es2026.collection.d.ts'],
+  ['esnext.error', 'lib.es2026.error.d.ts'],
+  ['esnext.typedarrays', 'lib.es2026.typedarrays.d.ts'],
+  ['esnext.iterator', 'lib.esnext.iterator.d.ts'],
+  ['esnext.promise', 'lib.esnext.promise.d.ts'],
   ['esnext.date', 'lib.esnext.date.d.ts'],
   ['esnext.decorators', 'lib.esnext.decorators.d.ts'],
   ['esnext.disposable', 'lib.esnext.disposable.d.ts'],
-  ['esnext.error', 'lib.esnext.error.d.ts'],
   ['esnext.intl', 'lib.esnext.intl.d.ts'],
+  ['esnext.modulesource', 'lib.esnext.modulesource.d.ts'],
   ['esnext.sharedmemory', 'lib.esnext.sharedmemory.d.ts'],
   ['esnext.temporal', 'lib.esnext.temporal.d.ts'],
-  ['esnext.typedarrays', 'lib.esnext.typedarrays.d.ts'],
   ['decorators', 'lib.decorators.d.ts'],
   ['decorators.legacy', 'lib.decorators.legacy.d.ts'],
 ]);
@@ -245,29 +252,6 @@ export const moduleDetectionValues: EnumValues = new Map<string, number | string
   ['auto', ModuleDetectionKind.Auto],
   ['legacy', ModuleDetectionKind.Legacy],
   ['force', ModuleDetectionKind.Force],
-]);
-
-export const watchFileValues: EnumValues = new Map<string, number | string>([
-  ['fixedpollinginterval', WatchFileKind.FixedPollingInterval],
-  ['prioritypollinginterval', WatchFileKind.PriorityPollingInterval],
-  ['dynamicprioritypolling', WatchFileKind.DynamicPriorityPolling],
-  ['fixedchunksizepolling', WatchFileKind.FixedChunkSizePolling],
-  ['usefsevents', WatchFileKind.UseFsEvents],
-  ['usefseventsonparentdirectory', WatchFileKind.UseFsEventsOnParentDirectory],
-]);
-
-export const watchDirectoryValues: EnumValues = new Map<string, number | string>([
-  ['usefsevents', WatchDirectoryKind.UseFsEvents],
-  ['fixedpollinginterval', WatchDirectoryKind.FixedPollingInterval],
-  ['dynamicprioritypolling', WatchDirectoryKind.DynamicPriorityPolling],
-  ['fixedchunksizepolling', WatchDirectoryKind.FixedChunkSizePolling],
-]);
-
-export const fallbackPollingValues: EnumValues = new Map<string, number | string>([
-  ['fixedinterval', PollingKind.FixedInterval],
-  ['priorityinterval', PollingKind.PriorityInterval],
-  ['dynamicpriority', PollingKind.DynamicPriority],
-  ['fixedchunksize', PollingKind.FixedChunkSize],
 ]);
 
 /** `--build`, `-b`. Only valid as the first argument. */
@@ -506,6 +490,15 @@ export const commonOptionsWithBuild: readonly OptionDeclaration[] = [
     defaultValueMessage: Diagnostics.X_4_unless_singleThreaded_is_passed,
     minValue: 1,
   },
+  {
+    // Content mappers aren't supported; the option is accepted and has no effect.
+    name: 'runExternalCode',
+    kind: 'boolean',
+    isCommandLineOnly: true,
+    category: Diagnostics.Command_line_Options,
+    description: Diagnostics.Allow_loading_external_content_mapper_plugins_that_execute_code_during_compilation,
+    defaultValueDescription: false,
+  },
 ];
 
 /** Options of `tsc` that `tsc --build` rejects. */
@@ -581,7 +574,7 @@ export const optionsForCompiler: readonly OptionDeclaration[] = [
     category: Diagnostics.Language_and_Environment,
     description:
       Diagnostics.Set_the_JavaScript_language_version_for_emitted_JavaScript_and_include_compatible_library_declarations,
-    defaultValueDescription: ScriptTarget.ES2025,
+    defaultValueDescription: ScriptTarget.ES2026,
     affects: Affects.BuildInfo | Affects.SourceFile | Affects.ModuleResolution | Affects.Emit,
   },
   {
@@ -1426,75 +1419,6 @@ export const optionsForBuild: readonly OptionDeclaration[] = [
   },
 ];
 
-/** Watch options, accepted on the command line and in `watchOptions`. */
-export const optionsForWatch: readonly OptionDeclaration[] = [
-  {
-    name: 'watchInterval',
-    kind: 'number',
-    category: Diagnostics.Watch_and_Build_Modes,
-  },
-  {
-    name: 'watchFile',
-    kind: 'enum',
-    values: watchFileValues,
-    category: Diagnostics.Watch_and_Build_Modes,
-    description: Diagnostics.Specify_how_the_TypeScript_watch_mode_works,
-    defaultValueDescription: WatchFileKind.UseFsEvents,
-  },
-  {
-    name: 'watchDirectory',
-    kind: 'enum',
-    values: watchDirectoryValues,
-    category: Diagnostics.Watch_and_Build_Modes,
-    description:
-      Diagnostics.Specify_how_directories_are_watched_on_systems_that_lack_recursive_file_watching_functionality,
-    defaultValueDescription: WatchDirectoryKind.UseFsEvents,
-  },
-  {
-    name: 'fallbackPolling',
-    kind: 'enum',
-    values: fallbackPollingValues,
-    category: Diagnostics.Watch_and_Build_Modes,
-    description:
-      Diagnostics.Specify_what_approach_the_watcher_should_use_if_the_system_runs_out_of_native_file_watchers,
-    defaultValueDescription: PollingKind.PriorityInterval,
-  },
-  {
-    name: 'synchronousWatchDirectory',
-    kind: 'boolean',
-    category: Diagnostics.Watch_and_Build_Modes,
-    description:
-      Diagnostics.Synchronously_call_callbacks_and_update_the_state_of_directory_watchers_on_platforms_that_don_t_support_recursive_watching_natively,
-    defaultValueDescription: false,
-  },
-  {
-    name: 'excludeDirectories',
-    kind: 'list',
-    element: {
-      name: 'excludeDirectory',
-      kind: 'string',
-      isFilePath: true,
-      extraValidation: 'spec',
-    },
-    category: Diagnostics.Watch_and_Build_Modes,
-    description: Diagnostics.Remove_a_list_of_directories_from_the_watch_process,
-    allowConfigDirTemplateSubstitution: true,
-  },
-  {
-    name: 'excludeFiles',
-    kind: 'list',
-    element: {
-      name: 'excludeFile',
-      kind: 'string',
-      isFilePath: true,
-      extraValidation: 'spec',
-    },
-    category: Diagnostics.Watch_and_Build_Modes,
-    description: Diagnostics.Remove_a_list_of_files_from_the_watch_mode_s_processing,
-    allowConfigDirTemplateSubstitution: true,
-  },
-];
-
 /** Keys of `typeAcquisition` in tsconfig.json. */
 export const typeAcquisitionDeclarations: readonly OptionDeclaration[] = [
   {
@@ -1547,6 +1471,13 @@ export class OptionNameMap {
     return this.byName.get(name.toLowerCase());
   }
 
+  /** The declared names, for spelling suggestions. */
+  names(): string[] {
+    const names: string[] = [];
+    for (const declaration of this.byName.values()) names.push(declaration.name);
+    return names;
+  }
+
   /** Looks up `name`, or with `allowShort` the option it abbreviates. */
   find(name: string, allowShort: boolean): OptionDeclaration | undefined {
     const lower = name.toLowerCase();
@@ -1557,4 +1488,3 @@ export class OptionNameMap {
 
 export const compilerOptionsByName = new OptionNameMap(optionDeclarations);
 export const buildOptionsByName = new OptionNameMap(buildOptionDeclarations);
-export const watchOptionsByName = new OptionNameMap(optionsForWatch);

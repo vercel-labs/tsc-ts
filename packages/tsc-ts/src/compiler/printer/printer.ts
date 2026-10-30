@@ -375,6 +375,8 @@ const enum ListItem {
   ImportSpecifier,
   ExportSpecifier,
   ExpressionWithTypeArguments,
+  /** An `ExpressionWithTypeArguments` or a type reference in a heritage clause. */
+  HeritageClauseElement,
   JsxChild,
   JsxAttributeLike,
 }
@@ -606,7 +608,8 @@ export class Printer extends NameGeneratorHost {
 
   isFileLevelUniqueName(name: string): boolean {
     const file = this.currentSourceFile;
-    return file === undefined || isFileLevelUniqueName(file, name);
+    // The names of the source file as parsed, not as transformed.
+    return file === undefined || isFileLevelUniqueName(this.context.mostOriginal(file) as SourceFile, name);
   }
 
   private getLiteralTextOfNode(node: Node, sourceFile: SourceFile | undefined, flags: LiteralTextFlags): string {
@@ -1217,7 +1220,8 @@ export class Printer extends NameGeneratorHost {
     const state = this.enterNode(node);
     this.emitEntityName(node.left);
     this.write1('.');
-    this.emitIdentifierName(node.right);
+    if (node.right instanceof PrivateIdentifier) this.emitPrivateIdentifier(node.right);
+    else this.emitIdentifierName(node.right as Identifier);
     this.exitNode(node, state);
     return true;
   }
@@ -1914,10 +1918,11 @@ export class Printer extends NameGeneratorHost {
       this.emitOptionalToken(questionToken);
       if (questionToken.kind !== SyntaxKind.QuestionToken) this.write1('?');
     }
-    this.write1(': ');
-    // tsgo's printer fails on a mapped type without a type, too.
-    if (node.type === undefined) throw new Error('Mapped type without a type');
-    this.emitTypeNodeOutsideExtends(node.type);
+    // A mapped type written without a type, `{ [K in keyof T] }`, prints without one.
+    if (node.type !== undefined) {
+      this.write1(': ');
+      this.emitTypeNodeOutsideExtends(node.type);
+    }
     this.write1(';');
     if (node.members !== undefined && node.members.nodes.length > 0) {
       if (singleLine) this.space();
@@ -2948,8 +2953,8 @@ export class Printer extends NameGeneratorHost {
       case SyntaxKind.MetaProperty:
         if (node instanceof MetaProperty) {
           const state = this.enterNode(node);
-          this.emitToken(node.keywordToken, node.pos, node);
-          this.write1('.');
+          const pos = this.emitToken(node.keywordToken, node.pos, node);
+          this.emitToken(SyntaxKind.DotToken, pos, node);
           this.emitIdentifierName(node.name);
           this.exitNode(node, state);
           return true;
@@ -3311,6 +3316,10 @@ export class Printer extends NameGeneratorHost {
       this.emitIdentifierOrString(body.name, false);
       body = body.body;
     }
+    if (node.attributes !== undefined) {
+      this.write1(' with ');
+      this.emitTypeNode(node.attributes, TypePrecedence.NonArray);
+    }
     if (body === undefined) this.write1(';');
     else if (body instanceof ModuleBlock) {
       this.space();
@@ -3419,12 +3428,17 @@ export class Printer extends NameGeneratorHost {
       this.emitBindingIdentifier(bindings.name);
       this.exitNode(bindings, bindingsState);
     } else if (bindings instanceof NamedImports) {
-      const bindingsState = this.enterNode(bindings);
-      this.write1('{');
-      this.emitList(ListItem.ImportSpecifier, bindings, bindings.elements, ListFormat.NamedImportsOrExportsElements);
-      this.write1('}');
-      this.exitNode(bindings, bindingsState);
+      this.emitNamedImports(bindings);
     }
+    this.exitNode(node, state);
+    return true;
+  }
+
+  private emitNamedImports(node: NamedImports): boolean {
+    const state = this.enterNode(node);
+    this.write1('{');
+    this.emitList(ListItem.ImportSpecifier, node, node.elements, ListFormat.NamedImportsOrExportsElements);
+    this.write1('}');
     this.exitNode(node, state);
     return true;
   }
@@ -3871,7 +3885,7 @@ export class Printer extends NameGeneratorHost {
     this.space();
     this.emitToken(node.token, node.pos, node);
     this.space();
-    this.emitList(ListItem.ExpressionWithTypeArguments, node, node.types, ListFormat.HeritageClauseTypes);
+    this.emitList(ListItem.HeritageClauseElement, node, node.types, ListFormat.HeritageClauseTypes);
     this.exitNode(node, state);
     return true;
   }
@@ -4091,6 +4105,10 @@ export class Printer extends NameGeneratorHost {
         break;
       case ListItem.ExpressionWithTypeArguments:
         if (node instanceof ExpressionWithTypeArguments) return this.emitExpressionWithTypeArguments(node);
+        break;
+      case ListItem.HeritageClauseElement:
+        if (node instanceof ExpressionWithTypeArguments) return this.emitExpressionWithTypeArguments(node);
+        if (node.kind === SyntaxKind.TypeReference) return this.emitTypeNodeWorker(node);
         break;
       case ListItem.JsxChild:
         return this.emitJsxChild(node);
@@ -4390,6 +4408,9 @@ export class Printer extends NameGeneratorHost {
         break;
       case SyntaxKind.ImportClause:
         if (node instanceof ImportClause) return this.emitImportClause(node);
+        break;
+      case SyntaxKind.NamedImports:
+        if (node instanceof NamedImports) return this.emitNamedImports(node);
         break;
       case SyntaxKind.ImportSpecifier:
         return this.emitListItem(ListItem.ImportSpecifier, node);

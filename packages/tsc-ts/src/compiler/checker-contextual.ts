@@ -470,7 +470,12 @@ function getContextualTypeForInitializer(c: Checker, declaration: Node, contextF
   ) {
     const parentType = getContextualTypeEx(c, declaration.parent!, contextFlags);
     const symbol = getSymbolOfDeclaration(c, declaration);
-    if (parentType !== undefined && symbol !== undefined)
+    // The class's own type might still be in progress, so contextually typing by it would report a spurious circularity.
+    if (
+      parentType !== undefined &&
+      symbol !== undefined &&
+      parentType.symbol !== getSymbolOfDeclaration(c, declaration.parent!)
+    )
       return getTypeOfPropertyOfContextualType(c, parentType, symbol.name);
   }
   return undefined;
