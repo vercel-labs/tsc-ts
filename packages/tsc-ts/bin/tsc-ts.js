@@ -67,7 +67,9 @@ function writeOnce(file) {
   const temporary = `${file}.${process.pid}.tmp`;
   try {
     const bytes = readFileSync(file);
-    writeFileSync(temporary, bytes, { mode: statSync(file).mode & 0o777 });
+    writeFileSync(temporary, bytes);
+    // The umask does not narrow the copy's mode.
+    chmodSync(temporary, statSync(file).mode & 0o7777);
     renameSync(temporary, file);
     writeFileSync(marker, String(bytes.length));
   } catch {
