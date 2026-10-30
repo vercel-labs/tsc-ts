@@ -141,6 +141,12 @@ import {
 } from './symbol.js';
 
 export function getTypeOfSymbol(c: Checker, symbol: Symbol): Type {
+  // TSC_TS_SHARE: checker threads share the value types of variables and properties (shared-results.ts).
+  if (c.threadSharing !== undefined && isSharedValueSymbol(symbol)) {
+    const sharing = c.threadSharing;
+    if (sharing.computing === symbol) sharing.computing = undefined;
+    else return threadTypeOfSymbol(c, symbol);
+  }
   const checkFlags = symbol.checkFlags;
   if ((checkFlags & CheckFlags.DeferredType) !== 0) return getTypeOfSymbolWithDeferredType(c, symbol);
   if ((checkFlags & CheckFlags.Instantiated) !== 0) return getTypeOfInstantiatedSymbol(c, symbol);
@@ -996,6 +1002,7 @@ import { getParameterTypeOfFullSignature } from './checker-jsdoc.js';
 import { isFunctionLikeDeclarationKind, isInJSFile } from './ast-utilities.js';
 import { isEmptyArrayLiteralType } from './relations.js';
 import { isCheckJsEnabledForFile } from './program-utilities.js';
+import { isSharedValueSymbol, threadTypeOfSymbol } from './shared-results.js';
 
 function getDeclarationModifierFlags(c: Checker, symbol: Symbol): ModifierFlags {
   return getDeclarationModifierFlagsFromSymbol(c, symbol, false);

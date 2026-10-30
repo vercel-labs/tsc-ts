@@ -282,7 +282,20 @@ function getReturnTypesOfSignatures(c: Checker, signatures: readonly Signature[]
 export function getReturnTypeOfSignature(c: Checker, sig: Signature): Type {
   if (sig.resolvedReturnType !== undefined) return sig.resolvedReturnType;
   const side = signatureSideOf(c, sig);
-  if (side.resolvedReturnType !== undefined) return side.resolvedReturnType;
+  if (side.resolvedReturnType !== undefined) {
+    if (c.threadSharing !== undefined) noteReturnTypeUse(c, sig);
+    return side.resolvedReturnType;
+  }
+  // TSC_TS_SHARE: checker threads share the return types of declared signatures (shared-results.ts).
+  if (c.threadSharing !== undefined && isSharedReturnSignature(c, sig)) {
+    const sharing = c.threadSharing;
+    if (sharing.computingSignature === sig) sharing.computingSignature = undefined;
+    else {
+      const t = threadReturnType(c, sig);
+      if (side.resolvedReturnType === undefined) side.resolvedReturnType = t;
+      return side.resolvedReturnType;
+    }
+  }
   if (!pushTypeResolution(c, sig, TypeSystemPropertyName.ResolvedReturnType)) return c.errorType;
   let t: Type;
   if (sig.target !== undefined) t = instantiateType(c, getReturnTypeOfSignature(c, sig.target), sig.mapper);
@@ -335,6 +348,7 @@ export function getReturnTypeOfSignature(c: Checker, sig: Signature): Type {
 }
 
 import { getOptionalType as getOptionalTypeLocal, addOptionalTypeMarker } from './checker-symbol-types.js';
+import { isSharedReturnSignature, noteReturnTypeUse, threadReturnType } from './shared-results.js';
 
 export function isResolvingReturnTypeOfSignature(c: Checker, sig: Signature): boolean {
   if (sig.composite !== undefined)

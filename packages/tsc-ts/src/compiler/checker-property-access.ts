@@ -199,7 +199,7 @@ export function checkPropertyAccessExpressionOrQualifiedName(
         // Deferred, since printing the containing type can resolve it completely, and report circularities
         // while it is being resolved.
         const containingType = isThisTypeParameter(leftType) ? apparentType : leftType;
-        c.deferredDiagnostics.push(() => reportNonexistentProperty(c, right, containingType));
+        c.deferDiagnostic(right, () => reportNonexistentProperty(c, right, containingType));
       }
       return c.errorType;
     }

@@ -52,6 +52,14 @@ import { lastSymbolIdValue } from './symbol.js';
 import { shareMergedGlobals } from './checker-symbols.js';
 import { readFileSync } from 'node:fs';
 import { availableParallelism, totalmem } from 'node:os';
+import {
+  numberLogSize,
+  recordTableSize,
+  resultTableSize,
+  shareThreads,
+  stringLogSize,
+  type ThreadSharingData,
+} from './shared-results.js';
 
 /** With TSC_TS_CHECKERS_TRACE: the process's resident and peak resident set in MB (Linux), else 0. */
 export function residentMB(): number[] {
@@ -89,6 +97,7 @@ export type CheckerSpawn = (
   checking: boolean,
   units: number[],
   globalsInFileDiagnostics: boolean,
+  sharing: ThreadSharingData | undefined,
 ) => Worker;
 
 export class ParallelCheck {
@@ -1551,6 +1560,137 @@ export function traceSingleChecker(checked: CheckedProgram): void {
   );
 }
 
+/** The file a position of the order checks: a file index, or for a statement range, its file's. */
+function fileOfPosition(order: readonly number[], units: readonly number[], k: number): number {
+  const i = order[k]!;
+  return i >= 0 ? i : units[3 * (-1 - i)]!;
+}
+
+/** Whether checker `index` took results for declarations of file `i` before any checker took the file. */
+function isForbidden(forbidden: Int32Array, i: number, index: number): boolean {
+  return (Atomics.load(forbidden, i) & (1 << index)) !== 0;
+}
+
+/**
+ * Hands position `k` of the order on to another checker (TSC_TS_SHARE). The handed-on positions are a list in
+ * `handoff`: a lock, their number, the number of checkers that may still hand positions on, then the positions.
+ */
+function handOff(handoff: Int32Array, k: number): void {
+  while (Atomics.compareExchange(handoff, 0, 0, 1) !== 0) {
+    // Another checker hands a position on or takes one.
+  }
+  const n = handoff[1]!;
+  handoff[3 + n] = k;
+  Atomics.store(handoff, 1, n + 1);
+  Atomics.store(handoff, 0, 0);
+  // Checkers with nothing else to check wait for handed-on positions.
+  Atomics.notify(handoff, 1);
+}
+
+/**
+ * Once checker `index` has no more positions of its own: a handed-on position it may check, waiting while other
+ * checkers may still hand some on; -1 when none is left for it.
+ */
+function waitForHandedOff(
+  handoff: Int32Array,
+  forbidden: Int32Array,
+  order: readonly number[],
+  units: readonly number[],
+  index: number,
+): number {
+  Atomics.sub(handoff, 2, 1);
+  const start = performance.now();
+  for (;;) {
+    const n = Atomics.load(handoff, 1);
+    const k = takeHandedOff(handoff, forbidden, order, units, index);
+    if (k >= 0) {
+      // Checking it, this checker may hand positions on again.
+      Atomics.add(handoff, 2, 1);
+      return k;
+    }
+    // The main thread checks what is handed on later, as it does the files of a thread that failed.
+    if (Atomics.load(handoff, 2) === 0 || performance.now() - start > 2000) return -1;
+    Atomics.wait(handoff, 1, n, 1);
+  }
+}
+
+/** A handed-on position checker `index` may check, removed from the handed-on positions; -1 if there is none. */
+function takeHandedOff(
+  handoff: Int32Array,
+  forbidden: Int32Array,
+  order: readonly number[],
+  units: readonly number[],
+  index: number,
+): number {
+  if (Atomics.load(handoff, 1) === 0) return -1;
+  while (Atomics.compareExchange(handoff, 0, 0, 1) !== 0) {
+    // Another checker hands a position on or takes one.
+  }
+  const n = handoff[1]!;
+  let found = -1;
+  for (let j = 0; j < n; j++) {
+    const k = handoff[3 + j]!;
+    if ((Atomics.load(forbidden, fileOfPosition(order, units, k)) & (1 << index)) === 0) {
+      found = k;
+      handoff[3 + j] = handoff[3 + n - 1]!;
+      Atomics.store(handoff, 1, n - 1);
+      break;
+    }
+  }
+  Atomics.store(handoff, 0, 0);
+  return found;
+}
+
+/** TSC_TS_SHARE: the sharing data of each of `count` checker threads. */
+function threadSharingOf(
+  count: number,
+  order: readonly number[],
+  units: readonly number[],
+  files: number,
+): ThreadSharingData[] {
+  const takers = new SharedArrayBuffer(4 * files);
+  const forbidden = new SharedArrayBuffer(4 * files);
+  const handoff = new SharedArrayBuffer(4 * (3 + order.length));
+  new Int32Array(handoff)[2] = count;
+  const taken = new Int32Array(takers);
+  taken.fill(-2);
+  for (let k = 0; k < order.length; k++) {
+    const i = order[k]!;
+    if (i >= 0) {
+      if (taken[i] === -2) taken[i] = 0;
+    } else taken[units[3 * (-1 - i)]!] = -1;
+  }
+  const typeTable = new SharedArrayBuffer(8 * resultTableSize);
+  const returnTable = new SharedArrayBuffer(8 * resultTableSize);
+  const numberLogs: SharedArrayBuffer[] = [];
+  const recordTables: SharedArrayBuffer[] = [];
+  const stringLogs: SharedArrayBuffer[] = [];
+  for (let i = 0; i < count; i++) {
+    numberLogs.push(new SharedArrayBuffer(4 * numberLogSize));
+    recordTables.push(new SharedArrayBuffer(8 * recordTableSize));
+    stringLogs.push(new SharedArrayBuffer(2 * stringLogSize));
+  }
+  const used = new SharedArrayBuffer(8 * count);
+  const data: ThreadSharingData[] = [];
+  for (let i = 0; i < count; i++)
+    data.push({
+      index: i,
+      count,
+      takers,
+      forbidden,
+      handoff,
+      typeTable,
+      returnTable,
+      nodeIds: lastNodeIdValue(),
+      symbolIds: lastSymbolIdValue(),
+      numberLogs,
+      recordTables,
+      stringLogs,
+      used,
+    });
+  return data;
+}
+
 /**
  * Checks files from the shared queue until it is empty; the main thread and checker threads alike.
  * A checker thread (`onMainThread` false) also sends back its global diagnostics. At `limit` files
@@ -1572,8 +1712,13 @@ export function checkFromQueue(
   emitKinds: readonly number[] | undefined = undefined,
   checking: boolean = true,
   units: readonly number[] = [],
+  sharing: ThreadSharingData | undefined = undefined,
 ): CheckerResult {
   const start = performance.now();
+  // TSC_TS_SHARE: each file's taker, which other checkers then take the results of its declarations from.
+  const takers = sharing === undefined ? undefined : new Int32Array(sharing.takers);
+  const forbidden = sharing === undefined ? undefined : new Int32Array(sharing.forbidden);
+  const handoff = sharing === undefined ? undefined : new Int32Array(sharing.handoff);
   const readyAt = Date.now();
   const verbose = process.env.TSC_TS_CHECKERS_TRACE === '3';
   mark('checking');
@@ -1615,16 +1760,29 @@ export function checkFromQueue(
     if (limit > 0 && done.length >= limit) {
       more = true;
       left = reservedBy(index).splice(0);
+      // The thread that continues doesn't share results, so it hands nothing on.
+      if (handoff !== undefined) Atomics.sub(handoff, 2, 1);
       break;
     }
     // Except on checker 0, read the process's memory every 20 ms at most.
     if (retirement > 0 && performance.now() - memoryReadAt >= 20) {
       memoryReadAt = performance.now();
-      if (retires(counter, index, retirement)) break;
+      if (retires(counter, index, retirement)) {
+        if (handoff !== undefined) Atomics.sub(handoff, 2, 1);
+        break;
+      }
     }
-    const k = takePosition(counter, order.length, index, plan);
+    let k = handoff !== undefined ? takeHandedOff(handoff, forbidden!, order, units, index) : -1;
+    if (k < 0) k = takePosition(counter, order.length, index, plan);
+    if (k < 0 && handoff !== undefined) k = waitForHandedOff(handoff, forbidden!, order, units, index);
     if (k < 0) break;
     const i = order[k]!;
+    // A file this checker took results for before anyone took it goes to another checker.
+    if (forbidden !== undefined && i >= 0 && isForbidden(forbidden, i, index)) {
+      handOff(handoff!, k);
+      continue;
+    }
+    if (takers !== undefined && i >= 0) Atomics.store(takers, i, index + 1);
     if (i < 0) {
       // A statement range of a declaration file, which has nothing to emit.
       const u = -1 - i;
@@ -1955,9 +2113,15 @@ export function startParallelCheck(
     }
     if (checking) {
       joinRanges(checked, units, perUnit, perFile);
-      // A thread that failed may have taken files it never checked: check them here.
+      // A thread that failed may have taken files it never checked, and with TSC_TS_SHARE every checker left may
+      // have taken results for declarations of a file handed on: check them here.
+      let left = 0;
       for (const i of order)
-        if (i >= 0 && perFile[i] === undefined) perFile[i] = checked.unfilteredDiagnosticsOfFile(files[i]!);
+        if (i >= 0 && perFile[i] === undefined) {
+          perFile[i] = checked.unfilteredDiagnosticsOfFile(files[i]!);
+          left++;
+        }
+      if (trace && left > 0) process.stderr.write(`checkers: the main thread checked ${left} files\n`);
       checked.checkedInParallel = perFile;
     }
     mark('all checked');
@@ -2020,6 +2184,15 @@ export function startParallelCheck(
     if (remaining === 0 && ownDone) finish();
   };
   const diagnosticFiles = new Map<string, DiagnosticFile>();
+  // TSC_TS_SHARE: checker threads share results (shared-results.ts).
+  const sharing =
+    shareThreads && shared && !mainChecks && count > 1 ? threadSharingOf(count, order, units, files.length) : undefined;
+  const sharingStarted: boolean[] = [];
+  for (let i = 0; i < count; i++) sharingStarted.push(false);
+  const startSharingOf = (i: number): ThreadSharingData => {
+    sharingStarted[i] = true;
+    return sharing![i]!;
+  };
   const spawn = (i: number, reserved: number[]): void => {
     const worker = parallelCheck.spawn!(
       shared ? program : undefined,
@@ -2034,6 +2207,8 @@ export function startParallelCheck(
       checking,
       units,
       checked.globalsInFileDiagnostics,
+      // A thread that continues another's index doesn't share.
+      reserved.length === 0 && sharing !== undefined && !sharingStarted[i] ? startSharingOf(i) : undefined,
     );
     worker.on('message', (message: unknown) => {
       mark(`result from c${i}`);
@@ -2050,7 +2225,8 @@ export function startParallelCheck(
       else threadDone();
     });
     worker.on('error', (error: unknown) => {
-      if (trace) process.stderr.write(`checkers: thread ${i} failed: ${String(error)}\n`);
+      // Sharing results (TSC_TS_SHARE) is still checked for such failures, which the main thread hides otherwise.
+      if (trace || shareThreads) process.stderr.write(`checkers: thread ${i} failed: ${String(error)}\n`);
       threadDone();
     });
   };
