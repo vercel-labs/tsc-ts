@@ -1136,8 +1136,39 @@ export const recordTableSize = 1 << 20;
 export const resultTableSize = 1 << 20;
 
 /**
+ * The most checker threads that share results: a result's state (`postedState`) holds the checker and an offset in
+ * its number log, below `numberLogSize` (2^21), in one int32, so the count times 2^21 stays below 2^31 - 2.
+ */
+export const maxSharingCheckers = 1023;
+
+/** The state of the result checker `producer` of `count` posted at `offset` of its number log. */
+export function postedState(count: number, producer: number, offset: number): number {
+  return -2 - (producer + count * offset);
+}
+
+/** The checker that posted the result of `state`, of `count` checkers. */
+export function postedProducer(count: number, state: number): number {
+  return (-2 - state) % count;
+}
+
+/** The offset in its producer's number log of the result of `state`, of `count` checkers. */
+export function postedOffset(count: number, state: number): number {
+  return Math.floor((-2 - state) / count);
+}
+
+/** The int32 words of each file's forbidden bits (`ThreadSharingData.forbidden`): a bit for each of `count` checkers. */
+export function forbiddenWords(count: number): number {
+  return (count + 31) >>> 5;
+}
+
+/** Whether checker `index` of `count` took results for declarations of file `file` before any checker took it. */
+export function isForbidden(forbidden: Int32Array, count: number, file: number, index: number): boolean {
+  return (Atomics.load(forbidden, file * forbiddenWords(count) + (index >>> 5)) & (1 << (index & 31))) !== 0;
+}
+
+/**
  * An open-addressing table in a SharedArrayBuffer, from a key (a symbol or node id) to a result's state: 0 until a
- * checker posts it, then -2 - (k + 64 * n) for the result checker k posted at offset n of its number log.
+ * checker posts it, then `postedState`.
  */
 export class ResultTable {
   readonly words: Int32Array;
@@ -1570,7 +1601,9 @@ export class ThreadSharing {
   forbid(file: SourceFile): void {
     const index = this.c.fileIndex.get(file);
     if (index === undefined) return;
-    if (Atomics.load(this.takers, index) === 0) Atomics.or(this.forbidden, index, 1 << this.data.index);
+    const me = this.data.index;
+    if (Atomics.load(this.takers, index) === 0)
+      Atomics.or(this.forbidden, index * forbiddenWords(this.data.count) + (me >>> 5), 1 << (me & 31));
   }
 
   /**
@@ -1579,8 +1612,17 @@ export class ThreadSharing {
    */
   forbidsLast(index: number): boolean {
     if (Atomics.load(this.takers, index) !== 0) return false;
-    const all = this.data.count >= 31 ? -1 : (1 << this.data.count) - 1;
-    return (Atomics.load(this.forbidden, index) | (1 << this.data.index)) === all;
+    const count = this.data.count;
+    const me = this.data.index;
+    const words = forbiddenWords(count);
+    for (let w = 0; w < words; w++) {
+      // The bits of the checkers this word holds, and this checker's.
+      const n = Math.min(32, count - 32 * w);
+      const all = n === 32 ? -1 : (1 << n) - 1;
+      const mine = me >>> 5 === w ? 1 << (me & 31) : 0;
+      if ((Atomics.load(this.forbidden, index * words + w) | mine) !== all) return false;
+    }
+    return true;
   }
 
   forbidsLastNamed(fileName: string): boolean {
@@ -1688,7 +1730,7 @@ export class ThreadSharing {
     exporter.addedProperties.length = 0;
     this.posted++;
     this.storedRecords += count;
-    return -2 - (me + 64 * (offset + header));
+    return postedState(this.data.count, me, offset + header);
   }
 
   /** The records this checker stored. */
@@ -1832,8 +1874,8 @@ function threadTypeOfSymbolWorker(c: Checker, symbol: Symbol): Type {
       findResolutionCycleStartIndex(c, symbol, TypeSystemPropertyName.Type) < 0 &&
       !translationBlocked(symbol.valueDeclaration!)
     ) {
-      const producer = (-2 - state) % 64;
-      const posted = sharing.result(producer, Math.floor((-2 - state) / 64));
+      const producer = postedProducer(sharing.data.count, state);
+      const posted = sharing.result(producer, postedOffset(sharing.data.count, state));
       const file = getSourceFileOfNode(symbol.valueDeclaration!);
       if (shareVerifyValue === '1') {
         const own = sharing.tracked(sharing.typeFiles, id, symbol, undefined);
@@ -1902,8 +1944,8 @@ function threadReturnTypeWorker(c: Checker, sig: Signature): Type {
       findResolutionCycleStartIndex(c, sig, TypeSystemPropertyName.ResolvedReturnType) < 0 &&
       !translationBlocked(declaration)
     ) {
-      const producer = (-2 - state) % 64;
-      const posted = sharing.result(producer, Math.floor((-2 - state) / 64));
+      const producer = postedProducer(sharing.data.count, state);
+      const posted = sharing.result(producer, postedOffset(sharing.data.count, state));
       const file = getSourceFileOfNode(declaration);
       if (shareVerifyValue === '1') {
         const own = sharing.tracked(sharing.returnFiles, key, undefined, sig);

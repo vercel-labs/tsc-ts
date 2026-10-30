@@ -53,6 +53,9 @@ import { shareMergedGlobals } from './checker-symbols.js';
 import { readFileSync } from 'node:fs';
 import { availableParallelism, totalmem } from 'node:os';
 import {
+  forbiddenWords,
+  isForbidden,
+  maxSharingCheckers,
   numberLogSize,
   recordTableSize,
   resultTableSize,
@@ -1566,11 +1569,6 @@ function fileOfPosition(order: readonly number[], units: readonly number[], k: n
   return i >= 0 ? i : units[3 * (-1 - i)]!;
 }
 
-/** Whether checker `index` took results for declarations of file `i` before any checker took the file. */
-function isForbidden(forbidden: Int32Array, i: number, index: number): boolean {
-  return (Atomics.load(forbidden, i) & (1 << index)) !== 0;
-}
-
 /**
  * Hands position `k` of the order on to another checker (TSC_TS_SHARE). The handed-on positions are a list in
  * `handoff`: a lock, their number, the number of checkers that may still hand positions on, then the positions.
@@ -1594,6 +1592,7 @@ function handOff(handoff: Int32Array, k: number): void {
 function waitForHandedOff(
   handoff: Int32Array,
   forbidden: Int32Array,
+  count: number,
   order: readonly number[],
   units: readonly number[],
   index: number,
@@ -1602,7 +1601,7 @@ function waitForHandedOff(
   const start = performance.now();
   for (;;) {
     const n = Atomics.load(handoff, 1);
-    const k = takeHandedOff(handoff, forbidden, order, units, index);
+    const k = takeHandedOff(handoff, forbidden, count, order, units, index);
     if (k >= 0) {
       // Checking it, this checker may hand positions on again.
       Atomics.add(handoff, 2, 1);
@@ -1614,10 +1613,14 @@ function waitForHandedOff(
   }
 }
 
-/** A handed-on position checker `index` may check, removed from the handed-on positions; -1 if there is none. */
+/**
+ * A handed-on position checker `index` of `count` may check, removed from the handed-on positions; -1 if there is
+ * none.
+ */
 function takeHandedOff(
   handoff: Int32Array,
   forbidden: Int32Array,
+  count: number,
   order: readonly number[],
   units: readonly number[],
   index: number,
@@ -1630,7 +1633,7 @@ function takeHandedOff(
   let found = -1;
   for (let j = 0; j < n; j++) {
     const k = handoff[3 + j]!;
-    if ((Atomics.load(forbidden, fileOfPosition(order, units, k)) & (1 << index)) === 0) {
+    if (!isForbidden(forbidden, count, fileOfPosition(order, units, k), index)) {
       found = k;
       handoff[3 + j] = handoff[3 + n - 1]!;
       Atomics.store(handoff, 1, n - 1);
@@ -1649,7 +1652,7 @@ function threadSharingOf(
   files: number,
 ): ThreadSharingData[] {
   const takers = new SharedArrayBuffer(4 * files);
-  const forbidden = new SharedArrayBuffer(4 * files);
+  const forbidden = new SharedArrayBuffer(4 * files * forbiddenWords(count));
   const handoff = new SharedArrayBuffer(4 * (3 + order.length));
   new Int32Array(handoff)[2] = count;
   const taken = new Int32Array(takers);
@@ -1719,6 +1722,7 @@ export function checkFromQueue(
   const takers = sharing === undefined ? undefined : new Int32Array(sharing.takers);
   const forbidden = sharing === undefined ? undefined : new Int32Array(sharing.forbidden);
   const handoff = sharing === undefined ? undefined : new Int32Array(sharing.handoff);
+  const sharingCount = sharing === undefined ? 0 : sharing.count;
   const readyAt = Date.now();
   const verbose = process.env.TSC_TS_CHECKERS_TRACE === '3';
   mark('checking');
@@ -1772,13 +1776,13 @@ export function checkFromQueue(
         break;
       }
     }
-    let k = handoff !== undefined ? takeHandedOff(handoff, forbidden!, order, units, index) : -1;
+    let k = handoff !== undefined ? takeHandedOff(handoff, forbidden!, sharingCount, order, units, index) : -1;
     if (k < 0) k = takePosition(counter, order.length, index, plan);
-    if (k < 0 && handoff !== undefined) k = waitForHandedOff(handoff, forbidden!, order, units, index);
+    if (k < 0 && handoff !== undefined) k = waitForHandedOff(handoff, forbidden!, sharingCount, order, units, index);
     if (k < 0) break;
     const i = order[k]!;
     // A file this checker took results for before anyone took it goes to another checker.
-    if (forbidden !== undefined && i >= 0 && isForbidden(forbidden, i, index)) {
+    if (forbidden !== undefined && i >= 0 && isForbidden(forbidden, sharingCount, i, index)) {
       handOff(handoff!, k);
       continue;
     }
@@ -2186,7 +2190,9 @@ export function startParallelCheck(
   const diagnosticFiles = new Map<string, DiagnosticFile>();
   // TSC_TS_SHARE: checker threads share results (shared-results.ts).
   const sharing =
-    shareThreads && shared && !mainChecks && count > 1 ? threadSharingOf(count, order, units, files.length) : undefined;
+    shareThreads && shared && !mainChecks && count > 1 && count <= maxSharingCheckers
+      ? threadSharingOf(count, order, units, files.length)
+      : undefined;
   const sharingStarted: boolean[] = [];
   for (let i = 0; i < count; i++) sharingStarted.push(false);
   const startSharingOf = (i: number): ThreadSharingData => {
