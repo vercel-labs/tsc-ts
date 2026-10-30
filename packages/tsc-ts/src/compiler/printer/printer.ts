@@ -1918,10 +1918,11 @@ export class Printer extends NameGeneratorHost {
       this.emitOptionalToken(questionToken);
       if (questionToken.kind !== SyntaxKind.QuestionToken) this.write1('?');
     }
-    this.write1(': ');
-    // tsgo's printer fails on a mapped type without a type, too.
-    if (node.type === undefined) throw new Error('Mapped type without a type');
-    this.emitTypeNodeOutsideExtends(node.type);
+    // A mapped type written without a type, `{ [K in keyof T] }`, prints without one.
+    if (node.type !== undefined) {
+      this.write1(': ');
+      this.emitTypeNodeOutsideExtends(node.type);
+    }
     this.write1(';');
     if (node.members !== undefined && node.members.nodes.length > 0) {
       if (singleLine) this.space();

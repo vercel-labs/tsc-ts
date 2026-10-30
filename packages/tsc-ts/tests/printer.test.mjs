@@ -29,3 +29,25 @@ test(
     }
   },
 );
+
+test(
+  'printer prints mapped types written without a type as tsgo does',
+  { skip: (!existsSync(printOracle) || !existsSync(cases)) && 'needs upstream sources and the print oracle' },
+  async () => {
+    const command = buildPrintDriver();
+    const files = [
+      join(cases, 'compiler/anyMappedTypesError.ts'),
+      join(cases, 'compiler/mappedTypeNoTypeNoCrash.ts'),
+      join(cases, 'conformance/types/mapped/mappedTypeProperties.ts'),
+    ];
+    const paths = materialize(files, 'tsc-ts-print-mapped-').paths.map((unit) => unit.path);
+    for (const flags of [[], ['--remove-comments'], ['--sourcemap']]) {
+      const failures = await comparePrints(command, paths, flags, 3);
+      assert.deepEqual(
+        failures.map((i) => paths[i]),
+        [],
+        `printing with ${flags.join(' ') || 'defaults'}`,
+      );
+    }
+  },
+);
