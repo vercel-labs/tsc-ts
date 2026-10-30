@@ -25,6 +25,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -163,6 +164,14 @@ function check({ main, platform }) {
 
     const version = run('npx', ['tsc-ts', '--version'], { cwd: dir, stdio: 'pipe' }).stdout.trim();
     console.log(`npx tsc-ts --version: ${version}`);
+    if (process.platform === 'linux') {
+      // The launcher's first run writes the executable again with one write (bin/tsc-ts.js).
+      const installed = join(dir, 'node_modules', packageName(hostPlatform()), 'lib');
+      const size = String(statSync(join(installed, executableName())).size);
+      const marker = readFileSync(join(installed, '.tsc-ts-written'), 'utf8');
+      if (marker !== size) throw new Error(`.tsc-ts-written holds ${marker}, the executable is ${size} bytes`);
+      console.log('executable written once: ok');
+    }
     run('npx', ['tsc-ts', '-p', '.'], { cwd: dir });
     const emitted = readFileSync(join(dir, 'out/index.js'), 'utf8');
     if (!emitted.includes('greeting')) throw new Error(`unexpected output:\n${emitted}`);
