@@ -42,9 +42,9 @@ export function checkCollisionsForDeclarationName(c: Checker, node: Node, name: 
     c.languageVersion <= ScriptTarget.ES2021 &&
     (needCollisionCheckForIdentifier(node, name, 'WeakMap') || needCollisionCheckForIdentifier(node, name, 'WeakSet'))
   )
-    c.deferredDiagnostics.push(() => checkWeakMapSetCollision(c, node));
+    c.deferDiagnostic(node, () => checkWeakMapSetCollision(c, node));
   if (c.languageVersion <= ScriptTarget.ES2021 && needCollisionCheckForIdentifier(node, name, 'Reflect'))
-    c.deferredDiagnostics.push(() => checkReflectCollision(c, node));
+    c.deferDiagnostic(node, () => checkReflectCollision(c, node));
   if (isClassLike(node) && (node.flags & NodeFlags.Ambient) === 0 && getText(name) === 'Object') {
     if (c.host.getEmitModuleFormatOfFile(getSourceFileOfNode(name)) < ModuleKind.ES2015)
       c.error(

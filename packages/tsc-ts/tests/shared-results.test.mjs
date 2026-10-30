@@ -1,0 +1,49 @@
+// Sharing results between checker threads (TSC_TS_SHARE, shared-results.ts): a posted result's state names the
+// checker that posted it and the offset of the result in its number log, and each file has a forbidden bit for each
+// checker, at every checker count sharing supports.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { compileSources } from './temp.mjs';
+
+const out = compileSources('tsc-ts-shared-results-', ['main.ts']);
+const { forbiddenWords, isForbidden, maxSharingCheckers, numberLogSize, postedOffset, postedProducer, postedState } =
+  await import(pathToFileURL(join(out, 'compiler/shared-results.js')).href);
+
+const counts = [2, 31, 32, 33, 63, 64, 65, 100, 128, 129, maxSharingCheckers];
+
+test('a posted state names its checker and offset at every checker count', () => {
+  for (const count of counts)
+    for (const producer of [0, 1, count >> 1, count - 1])
+      for (const offset of [0, 1, 12345, numberLogSize - 1]) {
+        const state = postedState(count, producer, offset);
+        assert.ok(
+          state <= -2 && state >= -(2 ** 31),
+          `state of ${producer}/${count} at ${offset} is an int32 below -1`,
+        );
+        assert.equal(state | 0, state);
+        assert.equal(postedProducer(count, state), producer);
+        assert.equal(postedOffset(count, state), offset);
+      }
+});
+
+test('each checker has its own forbidden bit', () => {
+  for (const count of counts) {
+    const words = forbiddenWords(count);
+    const files = 3;
+    const forbidden = new Int32Array(new SharedArrayBuffer(4 * files * words));
+    const file = 1;
+    for (let index = 0; index < count; index++) {
+      Atomics.or(forbidden, file * words + (index >>> 5), 1 << (index & 31));
+      for (let other = 0; other < count; other++)
+        assert.equal(
+          isForbidden(forbidden, count, file, other),
+          other <= index,
+          `checker ${other} after ${index} of ${count}`,
+        );
+      assert.equal(isForbidden(forbidden, count, 0, index), false);
+      assert.equal(isForbidden(forbidden, count, 2, index), false);
+    }
+  }
+});

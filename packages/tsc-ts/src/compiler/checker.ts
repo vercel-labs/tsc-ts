@@ -84,6 +84,8 @@ import {
   type ConditionalType,
   type InterfaceType,
   type TypeChecking,
+  type ConditionalResultKey,
+  type DistributedConditional,
 } from './checker-types.js';
 import { getBaseTypes } from './checker-declared-types.js';
 import type { ModuleResolution } from './checker-modules.js';
@@ -136,6 +138,7 @@ import type { GrammarChecker } from './checker-grammar.js';
 import type { ResolvedModule } from './module-resolution-types.js';
 import type { ModuleSpecifierHost } from './module-specifiers.js';
 import type { PropertyListIndex } from './checker-members.js';
+import { shareThreads, startThreadSharing, type ThreadSharing } from './shared-results.js';
 
 /** What the checker needs from a program. */
 export abstract class CheckerHost {
@@ -225,6 +228,7 @@ class DiagnosticCollection {
   /** Adds `diagnostic` unless an equal one was added; returns the one the collection holds. */
   add(diagnostic: Diagnostic): Diagnostic {
     if (this.log !== undefined) this.log.push(diagnostic);
+    if (this.added !== undefined) this.added.push(diagnostic);
     const file = diagnostic.file;
     const key = `${file === undefined ? '' : file.fileName}\0${diagnostic.pos}\0${diagnostic.end}\0${diagnostic.code}`;
     const existing = this.byLocation.get(key);
@@ -283,6 +287,8 @@ class DiagnosticCollection {
 
   /** The global diagnostics `withoutNewGlobals` removed. */
   removedGlobals = 0;
+  /** Where results are shared between checker threads (shared-results.ts): every diagnostic added, in order. */
+  added: Diagnostic[] | undefined = undefined;
 
   /** Runs `run`, then removes the global diagnostics it added. */
   withoutNewGlobals<T>(run: () => T): T {
@@ -706,6 +712,14 @@ export class Checker implements TypeChecking {
    * that are being resolved.
    */
   deferredDiagnostics: (() => void)[] = [];
+
+  /** Defers the diagnostic `report` reports at `node` (`deferredDiagnostics`). */
+  deferDiagnostic(node: Node, report: () => void): void {
+    this.deferredDiagnostics.push(report);
+    if (this.deferredDiagnosticFiles !== undefined)
+      this.deferredDiagnosticFiles.push(getSourceFileOfNode(node).fileName);
+  }
+
   /**
    * The checked object literals of each file whose members may set deprecated properties of their contextual
    * types, reported when the file's suggestion diagnostics are asked for (`checkObjectLiteralDeprecations`).
@@ -814,6 +828,22 @@ export class Checker implements TypeChecking {
    * than one of the resolved properties.
    */
   unresolvedPropertySearches: Type[] | undefined = undefined;
+  // The fields of shared results come last, so the fields before keep their places.
+  /** TSC_TS_SHARE: the checker thread's sharing with the other checker threads. */
+  threadSharing: ThreadSharing | undefined = undefined;
+  /**
+   * Where results are shared (shared-results.ts): for each conditional type made as a member of the distribution of a
+   * conditional type instantiation, that instantiation and the constituent it is for.
+   */
+  distributedConditionals: Map<Type, DistributedConditional> | undefined = undefined;
+  /** The same members by `distributedKey`. */
+  distributedByKey: Map<string, Type> | undefined = undefined;
+  /** The conditional types conditional type instantiations resolved to, with the instantiation's root and key. */
+  conditionalResults: Map<Type, ConditionalResultKey> | undefined = undefined;
+  /** The access flags of the key `getIndexedAccessTypeEx` keeps each indexed access type by. */
+  indexedAccessKeyFlags: Map<Type, number> | undefined = undefined;
+  /** Where results are shared between checker threads (shared-results.ts): the file of each diagnostic deferred. */
+  deferredDiagnosticFiles: string[] | undefined = undefined;
 
   constructor(host: CheckerHost) {
     this.host = host;
@@ -1026,6 +1056,13 @@ export class Checker implements TypeChecking {
     mergeAmbientModulesAndAugmentations(this);
     this.modulesMerged = true;
     this.mergeDiagnostics.push(this.diagnostics.takeLog(), this.suggestionDiagnostics.takeLog());
+    if (shareThreads) startThreadSharing(this);
+    if (this.threadSharing !== undefined) {
+      this.distributedConditionals = new Map<Type, DistributedConditional>();
+      this.distributedByKey = new Map<string, Type>();
+      this.conditionalResults = new Map<Type, ConditionalResultKey>();
+      this.indexedAccessKeyFlags = new Map<Type, number>();
+    }
   }
 
   // ---- Public API

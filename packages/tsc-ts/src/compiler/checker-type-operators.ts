@@ -37,6 +37,8 @@ import {
   IndexFlags,
   IndexInfo,
   type IndexType,
+  ConditionalResultKey,
+  DistributedConditional,
   IndexedAccessType,
   type IntersectionType,
   type LiteralType,
@@ -589,6 +591,7 @@ export function getIndexedAccessTypeOrUndefinedEx(
     let t = c.indexedAccessTypes.get(key);
     if (t === undefined) {
       t = newIndexedAccessType(c, objectType, indexType, persistent);
+      if (c.indexedAccessKeyFlags !== undefined) c.indexedAccessKeyFlags.set(t, accessFlags);
       t.alias = alias;
       c.indexedAccessTypes.set(key, t);
     }
@@ -1998,15 +2001,35 @@ export function getConditionalTypeInstantiation(
       distributionType !== undefined &&
       checkType !== distributionType &&
       (distributionType.flags & (TypeFlags.Union | TypeFlags.Never)) !== 0
-    )
+    ) {
+      const distributed = c.distributedConditionals;
       result = mapTypeWithAlias(
         c,
         distributionType,
-        (u) => getConditionalType(c, root, prependTypeMapping(checkType, u, newMapper), forConstraint, undefined),
+        (u) => {
+          const member = getConditionalType(
+            c,
+            root,
+            prependTypeMapping(checkType, u, newMapper),
+            forConstraint,
+            undefined,
+          );
+          // Sharing results (shared-results.ts) names a distributed member by the instantiation it is part of.
+          if (distributed !== undefined && (member.flags & TypeFlags.Conditional) !== 0) {
+            if (!distributed.has(member))
+              distributed.set(member, new DistributedConditional(typeArguments.slice(), alias, tag, u));
+            c.distributedByKey!.set(distributedKey(root.node.id, typeArguments, alias, tag, u), member);
+          }
+          return member;
+        },
         alias,
       );
-    else result = getConditionalType(c, root, newMapper, forConstraint, alias);
+    } else result = getConditionalType(c, root, newMapper, forConstraint, alias);
     root.instantiations.set(hash, typeArguments, alias, tag, result);
+    // Sharing results names a conditional type made for another root (a tail or nested root) by this instantiation.
+    const results = c.conditionalResults;
+    if (results !== undefined && (result.flags & TypeFlags.Conditional) !== 0 && !results.has(result))
+      results.set(result, new ConditionalResultKey(root, typeArguments.slice(), alias, tag));
   }
   return result;
 }
@@ -2524,4 +2547,21 @@ export type { TupleType, UnionType };
 export function mappedTypeTarget(t: MappedType): MappedType {
   const target = t.target;
   return target !== undefined ? (target as MappedType) : t;
+}
+
+/** The key of the member of a conditional type instantiation's distribution for one constituent (shared-results.ts). */
+export function distributedKey(
+  root: number,
+  typeArguments: readonly Type[],
+  alias: TypeAlias | undefined,
+  tag: number,
+  constituent: Type,
+): string {
+  let key = root + ':' + tag + ':' + constituent.id + ':';
+  for (const t of typeArguments) key += t.id + ',';
+  if (alias !== undefined) {
+    key += '@' + getSymbolId(alias.symbol);
+    for (const t of alias.typeArguments) key += ',' + t.id;
+  }
+  return key;
 }

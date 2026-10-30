@@ -136,7 +136,7 @@ function deferTypeNotIterableError(
   allowAsyncIterables: boolean,
   related: Diagnostic[],
 ): void {
-  c.deferredDiagnostics.push(() => {
+  c.deferDiagnostic(errorNode, () => {
     const diagnostic = reportTypeNotIterableError(c, errorNode, t, allowAsyncIterables);
     for (const d of related) diagnostic.addRelatedInfo(d);
   });

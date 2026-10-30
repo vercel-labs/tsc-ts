@@ -2631,3 +2631,33 @@ export class RareNodeLinks implements ProgramLifetime {
     this.mentionsArguments = 0;
   }
 }
+
+/** A conditional type made as a member of a distribution: the instantiation's key, and the constituent it is for. */
+export class DistributedConditional {
+  readonly typeArguments: Type[];
+  readonly alias: TypeAlias | undefined;
+  readonly tag: number;
+  readonly constituent: Type;
+
+  constructor(typeArguments: Type[], alias: TypeAlias | undefined, tag: number, constituent: Type) {
+    this.typeArguments = typeArguments;
+    this.alias = alias;
+    this.tag = tag;
+    this.constituent = constituent;
+  }
+}
+
+/** The instantiation of a conditional type whose result is a conditional type: its root and key. */
+export class ConditionalResultKey {
+  readonly root: ConditionalRoot;
+  readonly typeArguments: Type[];
+  readonly alias: TypeAlias | undefined;
+  readonly tag: number;
+
+  constructor(root: ConditionalRoot, typeArguments: Type[], alias: TypeAlias | undefined, tag: number) {
+    this.root = root;
+    this.typeArguments = typeArguments;
+    this.alias = alias;
+    this.tag = tag;
+  }
+}

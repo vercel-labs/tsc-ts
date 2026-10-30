@@ -24,6 +24,7 @@ import { CheckedProgram } from './program-checker.js';
 import type { Program } from './program.js';
 import { assignSymbolIdsAtCreation, reserveSymbolIds, shareSymbolIds } from './symbol.js';
 import { mark, setTimelineThread } from './timeline.js';
+import { setThreadSharingData, type ThreadSharingData } from './shared-results.js';
 
 /** What threads need from the command line that starts them. */
 export interface ThreadDrivers {
@@ -60,6 +61,8 @@ export interface CheckerThreadData {
   readonly globalsInFileDiagnostics: boolean;
   /** The main thread's report format (`formattedReports`), which the thread formats its diagnostics in. */
   readonly reportFormat: DiagnosticFormatOptions | undefined;
+  /** TSC_TS_SHARE: what the thread shares results with the other checker threads through. */
+  readonly sharing: ThreadSharingData | undefined;
 }
 
 export interface EmitThreadData {
@@ -106,6 +109,7 @@ export function startThreads(spawn: ThreadSpawn, drivers: ThreadDrivers, args: r
     checking,
     units,
     globalsInFileDiagnostics,
+    sharing,
   ) =>
     spawn({
       kind: 'check',
@@ -123,6 +127,7 @@ export function startThreads(spawn: ThreadSpawn, drivers: ThreadDrivers, args: r
       units,
       globalsInFileDiagnostics,
       reportFormat: formattedReports.format,
+      sharing,
     });
   if (sharesPublishedGraphs) {
     parallelEmit.spawn = (program, index, counter, files, kinds, nodeIds, symbolIds) =>
@@ -209,6 +214,8 @@ function runCheckerThread(job: CheckerThreadData, drivers: ThreadDrivers): void 
   // Without a program this thread checks nothing; the main thread checks the files it would have.
   let checked: CheckedProgram | undefined = undefined;
   if (program !== undefined) {
+    // The checker the program creates shares results with the other checker threads.
+    setThreadSharingData(job.sharing);
     checked = new CheckedProgram(program);
     checked.globalsInFileDiagnostics = job.globalsInFileDiagnostics;
   }
@@ -228,6 +235,7 @@ function runCheckerThread(job: CheckerThreadData, drivers: ThreadDrivers): void 
           job.emitKinds,
           job.checking,
           job.units,
+          job.sharing,
         );
   // Packed results are copied: nothing this thread allocated stays reachable after it ends.
   if (packsResults) parentPort!.postMessage(packResult(result, program!));
