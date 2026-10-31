@@ -201,6 +201,7 @@ import {
 import { modifiersToFlags } from './ast-utilities.js';
 import { protocolVersion } from './encoder.js';
 import { SyntaxKind } from './syntax-kind.js';
+import { IdentifierName } from './identifier-name.js';
 
 const nodeSize = 28;
 const headerSize = 64;
@@ -354,7 +355,7 @@ class Decoder {
   createString(kind: SyntaxKind, text: string, common: number): Node {
     switch (kind) {
       case SyntaxKind.Identifier:
-        return new Identifier(text);
+        return new Identifier(new IdentifierName(text));
       case SyntaxKind.PrivateIdentifier:
         return new PrivateIdentifier(text);
       case SyntaxKind.JsxText:

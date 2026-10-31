@@ -161,6 +161,7 @@ import { ConstantKind } from './reference-resolver.js';
 import { DeclarationTracker } from './declarations-tracker.js';
 import { Transformer } from './transformer.js';
 import { declarationCount, getDeclarations, SymbolFlags } from '../symbol.js';
+import { IdentifierName } from '../identifier-name.js';
 
 export class DeclarationTransformer extends Transformer {
   readonly host: OutputPathsHost;
@@ -1934,7 +1935,7 @@ export class DeclarationTransformer extends Transformer {
         keyword === SyntaxKind.DefaultKeyword
       ) {
         // A parse tree node, so names it uses are resolved where it's written.
-        const identifier = new Identifier(text);
+        const identifier = new Identifier(new IdentifierName(text));
         identifier.parent = name.parent;
         return identifier;
       }

@@ -107,6 +107,7 @@ import {
 } from './checker-heritage.js';
 import { checkDecorators, getFirstTransformableStaticClassElement } from './checker-decorators.js';
 import { getTypeOfNode } from './checker-services.js';
+import { IdentifierName } from './identifier-name.js';
 
 export function checkClassDeclaration(c: Checker, node: Node): void {
   checkClassLikeDeclaration(c, node);
@@ -588,7 +589,7 @@ function newThisPropertyReference(symbol: Symbol, container: Node, flowNode: Flo
   const name = symbol.name;
   let accessName: Node;
   if (name.startsWith('\ufffe#')) accessName = new PrivateIdentifier(name.substring(name.indexOf('@') + 1));
-  else accessName = new Identifier(name);
+  else accessName = new Identifier(new IdentifierName(name));
   const thisExpression = new KeywordExpression(SyntaxKind.ThisKeyword);
   const reference = new PropertyAccessExpression(thisExpression, undefined, accessName, NodeFlags.None);
   thisExpression.parent = reference;
