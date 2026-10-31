@@ -291,7 +291,7 @@ export class MergedOrigins {
 }
 
 /** Writes a result as records; `failure` names the first part that has no record kind. */
-class Exporter {
+export class Exporter {
   readonly c: Checker;
   records: PortableRecord[] = [];
   readonly indexes = new Map<Type, number>();
@@ -760,7 +760,8 @@ class Exporter {
     if (this.failure !== undefined) return -1;
     const record = new PortableRecord(RecordKind.Instantiation, t.id, 0, args.length, '', undefined, declaration, refs);
     const index = this.add(t, this.aliasOf(record, t.alias));
-    if (index >= 0) this.resolvedReturnTypes(t, refs);
+    // Only for an export that hasn't failed (its alias may have): optionalType would forget that failure.
+    if (index >= 0 && this.failure === undefined) this.resolvedReturnTypes(t, refs);
     return index;
   }
 
@@ -781,8 +782,12 @@ class Exporter {
       }
   }
 
-  /** The record of `t`, or -1 if it can't be exported; that leaves the export in progress as it was. */
+  /**
+   * The record of `t`, or -1 if it can't be exported; that leaves the export in progress as it was. An export that
+   * failed before stays failed.
+   */
   optionalType(t: Type): number {
+    if (this.failure !== undefined) return -1;
     const records = this.records.length;
     const types = this.addedTypes.length;
     const properties = this.addedProperties.length;
