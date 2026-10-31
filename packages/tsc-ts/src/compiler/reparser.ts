@@ -388,7 +388,10 @@ export class Reparser {
           let name: Node = (param as JSDocParameterOrPropertyTag).name;
           if (name instanceof Identifier && !isValidIdentifier((name as Identifier).text)) {
             // Replace invalid characters with `_`, or use `_N` for an empty name, for a valid parameter name.
-            name = this.addTransformedReparse(new Identifier(new IdentifierName(sanitizeIdentifier((name as Identifier).text, pi))), name);
+            name = this.addTransformedReparse(
+              new Identifier(new IdentifierName(sanitizeIdentifier((name as Identifier).text, pi))),
+              name,
+            );
           } else {
             name = this.addDeepCloneReparse(name);
           }
