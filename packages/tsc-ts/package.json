@@ -1,6 +1,6 @@
 {
   "name": "tsc-ts",
-  "version": "0.0.10",
+  "version": "0.1.0",
   "private": true,
   "description": "The TypeScript 7 compiler, ported to TypeScript and compiled to a native executable.",
   "license": "Apache-2.0",
@@ -40,10 +40,10 @@
     "refresh-profile": "node scripts/refresh-profile.mjs"
   },
   "dependencies": {
-    "@scriptc/threads": "0.4.6"
+    "@scriptc/threads": "0.4.7"
   },
   "devDependencies": {
-    "@scriptc/types": "^0.4.6",
+    "@scriptc/types": "^0.4.7",
     "@tsc-ts/tsgo": "*"
   },
   "engines": {
