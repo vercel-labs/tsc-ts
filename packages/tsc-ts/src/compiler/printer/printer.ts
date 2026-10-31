@@ -660,7 +660,8 @@ export class Printer extends NameGeneratorHost {
       case SyntaxKind.PrivateIdentifier:
       case SyntaxKind.JsxNamespacedName:
         // Its text either way: the source text, or the text of a node from elsewhere.
-        if (this.textIsSourceText(node)) return (node as Identifier | PrivateIdentifier).text;
+        if (this.textIsSourceText(node))
+          return node instanceof Identifier ? node.text : (node as PrivateIdentifier).text;
         if (!canUseSourceFile || !this.isInCurrentSourceFile(node)) {
           if (node instanceof Identifier) return node.text;
           if (node instanceof PrivateIdentifier) return node.text;
@@ -691,7 +692,8 @@ export class Printer extends NameGeneratorHost {
     if (!(node instanceof Identifier) && !(node instanceof PrivateIdentifier)) return false;
     if ((node.flags & (NodeFlags.Reparsed | NodeFlags.JSDoc | NodeFlags.ReparserTransformedLiteral)) !== 0)
       return false;
-    const text = node.text;
+    // Natively an identifier's text is read through its name, and a private identifier's from its field.
+    const text = node instanceof Identifier ? node.text : (node as PrivateIdentifier).text;
     const source = this.sourceText;
     const end = node.end;
     const start = end - text.length;

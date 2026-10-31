@@ -202,6 +202,7 @@ import {
   newCallExpression,
   newPropertyAssignment,
 } from './ast.js';
+import { IdentifierName } from './identifier-name.js';
 import {
   OperatorPrecedence,
   canHaveDecorators,
@@ -3038,7 +3039,7 @@ export class Parser extends ScannerErrorReporter {
       identifierName = name;
     } else {
       this.parseErrorAt(skipTrivia(this.sourceText, name.pos), name.end, Diagnostics.Identifier_expected);
-      identifierName = this.newIdentifier('');
+      identifierName = this.newIdentifier(new IdentifierName(''));
       this.finishNode(identifierName, name.pos);
     }
     return this.checkJSSyntax(this.finishNode(new ImportSpecifier(isTypeOnly, propertyName, identifierName), pos));
@@ -3559,12 +3560,12 @@ export class Parser extends ScannerErrorReporter {
    * A new identifier of the class `use` calls for. Callers create it after the identifier's token, so
    * for an element name the current token tells a shorthand property from an assignment or a method.
    */
-  newIdentifier(text: string, use: IdentifierUse = IdentifierUse.Reference): Identifier {
+  newIdentifier(name: IdentifierName, use: IdentifierUse = IdentifierUse.Reference): Identifier {
     this.identifierCount++;
-    if (text === 'await') this.statementHasAwaitIdentifier = true;
+    if (name.text === 'await') this.statementHasAwaitIdentifier = true;
     if (use === IdentifierUse.Name || (use === IdentifierUse.ElementName && this.isElementNameEnd()))
-      return new Identifier(text);
-    return new ReferenceIdentifier(text);
+      return new Identifier(name);
+    return new ReferenceIdentifier(name);
   }
 
   /** Whether the current token ends an object literal element name that is not a shorthand property. */
@@ -3574,7 +3575,7 @@ export class Parser extends ScannerErrorReporter {
   }
 
   createMissingIdentifier(use: IdentifierUse = IdentifierUse.Reference): Identifier {
-    const result = this.newIdentifier('', use);
+    const result = this.newIdentifier(new IdentifierName(''), use);
     this.finishNode(result, this.nodePos());
     return result;
   }
@@ -4971,7 +4972,7 @@ export class Parser extends ScannerErrorReporter {
         // An unclosed opening element took its parent's closing element: restructure
         // (<div>(...<span>...</div>)) into (<div>(...<span>...</>)</div>). The parent reports it.
         const end = (lastChild as JsxElement).children.end;
-        const missingIdentifier = this.finishNodeWithEnd(this.newIdentifier(''), end, end);
+        const missingIdentifier = this.finishNodeWithEnd(this.newIdentifier(new IdentifierName('')), end, end);
         const newClosingElement = new JsxClosingElement(missingIdentifier);
         this.finishNodeWithEnd(newClosingElement, end, end);
         const newLast = new JsxElement(
@@ -6091,10 +6092,11 @@ export class Parser extends ScannerErrorReporter {
     if (isIdentifier) {
       const pos = this.scanner.hasPrecedingJSDocLeadingAsterisks() ? this.scanner.getTokenStart() : this.nodePos();
       const text = this.scanner.getIdentifierValue();
+      const name = this.scanner.getIdentifierName();
       const record = this.scanner.recordIdentifierValue(text);
       this.nextTokenWithoutCheck();
       if (record) this.identifierTexts.push(text);
-      const result = this.newIdentifier(text, use);
+      const result = this.newIdentifier(name, use);
       this.finishNode(result, pos);
       return result;
     }

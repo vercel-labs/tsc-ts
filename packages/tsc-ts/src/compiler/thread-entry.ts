@@ -257,7 +257,9 @@ function runParseThread(job: ParseThreadData, drivers: ThreadDrivers): void {
   const port = parentPort!;
   port.on('message', (message: unknown) => {
     const chunk = message as LoadMessage;
-    if (chunk.stop) port.close();
+    if (chunk.stop) {
+      port.close();
+    }
     // The main thread read the project, so this one can too; if not, the program's FileLoader
     // parses the files of the chunk (the main thread sees this thread fail).
     else if (thread === undefined) throw new Error('A parse thread could not read the project');

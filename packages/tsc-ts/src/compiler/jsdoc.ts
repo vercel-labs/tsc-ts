@@ -57,6 +57,7 @@ import { Reparser } from './reparser.js';
 import { getLeadingCommentRanges, getTrailingCommentRanges } from './scanner.js';
 import { SyntaxKind } from './syntax-kind.js';
 import type { CommentRange } from './types.js';
+import { IdentifierName } from './identifier-name.js';
 
 const enum JSDocState {
   BeginningOfLine,
@@ -1230,16 +1231,17 @@ export class JSDocParser {
         p.parseErrorAtCurrentToken(Diagnostics.Identifier_expected_0_is_a_reserved_word_that_cannot_be_used_here, [
           p.scanner.getTokenText(),
         ]);
-      const missing = p.newIdentifier('');
+      const missing = p.newIdentifier(new IdentifierName(''));
       p.finishNode(missing, p.nodePos());
       return missing;
     }
     const pos = p.scanner.getTokenStart();
     const end = p.scanner.getTokenEnd();
     const text = p.scanner.getIdentifierValue();
+    const name = p.scanner.getIdentifierName();
     p.internIdentifier(text);
     p.nextTokenJSDoc();
-    const result = p.newIdentifier(text);
+    const result = p.newIdentifier(name);
     p.finishNodeWithEnd(result, pos, end);
     return result;
   }

@@ -3,6 +3,7 @@
 // Every node extends `Node`. Child fields are typed by category (`Expression`, `TypeNode`, …),
 // which are aliases of `Node`; narrow with the `is*` guards in ast-utilities.ts or `instanceof`.
 import type { ProgramLifetime } from '@scriptc/types';
+import { IdentifierName } from './identifier-name.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { type CommentDirective, type CommentRange, type LanguageVariant, TokenFlags } from './types.js';
 import { type Diagnostic, DiagnosticFile } from './diagnostics.js';
@@ -449,11 +450,15 @@ export class Token extends Node {
 }
 
 export class Identifier extends Node {
-  text: string;
+  readonly identifierName: IdentifierName;
 
-  constructor(text: string) {
+  constructor(name: IdentifierName) {
     super(SyntaxKind.Identifier);
-    this.text = text;
+    this.identifierName = name;
+  }
+
+  get text(): string {
+    return this.identifierName.text;
   }
 
   forEachChild(_v: NodeVisitor): boolean {
@@ -467,7 +472,7 @@ export class Identifier extends Node {
   }
 
   copy(): Identifier {
-    const node = new Identifier(this.text);
+    const node = new Identifier(this.identifierName);
     node.flags = this.flags;
     node.pos = this.pos;
     node.end = this.end;
@@ -484,13 +489,13 @@ export class ReferenceIdentifier extends Identifier {
   // Set by the binder.
   flowNode: FlowNode | undefined;
 
-  constructor(text: string) {
-    super(text);
+  constructor(name: IdentifierName) {
+    super(name);
     this.flowNode = undefined;
   }
 
   copy(): Identifier {
-    const node = new ReferenceIdentifier(this.text);
+    const node = new ReferenceIdentifier(this.identifierName);
     node.flags = this.flags;
     node.pos = this.pos;
     node.end = this.end;

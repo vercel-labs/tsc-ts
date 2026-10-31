@@ -1,7 +1,9 @@
 // Generates the node classes and shared-field accessors in src/compiler/ast.ts from
 // TypeScript's tools/scripts/tsc/ast.json. Only the marked regions of ast.ts are rewritten.
 //
-// Usage: node scripts/generate-ast.mjs [--schema PATH]
+// Usage: node scripts/generate-ast.mjs [--schema PATH] [--check]
+//
+// With --check, writes nothing and fails if ast.ts differs from what it would write.
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -12,7 +14,9 @@ const args = process.argv.slice(2);
 const schemaAt = args.indexOf('--schema');
 const schemaPath =
   schemaAt >= 0 ? resolve(args[schemaAt + 1]) : resolve(root, '../../upstream/TypeScript/tools/scripts/tsc/ast.json');
+const check = args.includes('--check');
 const astPath = join(root, 'src/compiler/ast.ts');
+const oxfmt = resolve(root, '../../node_modules/.bin/oxfmt');
 
 const spec = JSON.parse(readFileSync(schemaPath, 'utf8'));
 const bases = spec.bases;
@@ -99,6 +103,12 @@ const binderFieldTypes = {
   EndFlowNode: 'FlowNode',
   ReturnFlowNode: 'FlowNode',
   FallthroughFlowNode: 'FlowNode',
+};
+
+// Members a class holds under another name and type, read through a getter: an identifier stores the name
+// of its text, which a scanner interns once per text of a file, and reads `text` from that name.
+const storedMembers = {
+  Identifier: { text: { field: 'identifierName', fieldType: 'IdentifierName', param: 'name' } },
 };
 
 // Fields that only a subclass holds: the parser creates the subclass where the fields can be set,
@@ -271,6 +281,11 @@ function nodeClasses() {
       const optional = field.optional === true || nullable.has(`${name}.${m.name}`);
       members.push({ name: fieldName(m.name), type, optional, child });
     }
+    for (const [member, stored] of Object.entries(storedMembers[name] ?? {})) {
+      const i = members.findIndex((m) => m.name === member);
+      if (i < 0) throw new Error(`${name}.${member}`);
+      members[i] = { ...members[i], ...stored };
+    }
     // Literal-like kinds that store no token flags (template literals, JSX text) report none, as
     // TypeScript 7's API does.
     const noTokenFlags =
@@ -287,9 +302,10 @@ function emitClass(c) {
   const binder = sub === undefined ? c.binder : c.binder.filter((f) => !sub.binder.includes(f.name));
   const kindLiteral = c.kinds.length === 1 && !c.hasKindParam;
   const type = (m) => `${m.type}${m.optional ? ' | undefined' : ''}`;
+  const paramOf = (m) => (m.field ? `${m.param}: ${m.fieldType}` : `${paramName(m.name)}: ${type(m)}`);
   const paramsOf = (members) => [
     ...(kindLiteral ? [] : ['kind: SyntaxKind']),
-    ...members.map((m) => (m.isFlags ? 'flags: NodeFlags' : `${paramName(m.name)}: ${type(m)}`)),
+    ...members.map((m) => (m.isFlags ? 'flags: NodeFlags' : paramOf(m))),
   ];
   const assignment = (m) => {
     if (m.isFlags)
@@ -298,7 +314,7 @@ function emitClass(c) {
         : '    this.flags |= flags & NodeFlags.OptionalChain;';
     if (m.type === 'TokenFlags' && flagMasks[c.name] !== undefined)
       return `    this.${m.name} = ${paramName(m.name)} & TokenFlags.${flagMasks[c.name]};`;
-    return `    this.${m.name} = ${paramName(m.name)};`;
+    return `    this.${m.field ?? m.name} = ${m.field ? m.param : paramName(m.name)};`;
   };
 
   // forEachChild and setParentOfChildren over `members`, in their order.
@@ -354,7 +370,7 @@ function emitClass(c) {
         args.push('this.flags');
         continue;
       }
-      const f = `this.${m.name}`;
+      const f = `this.${m.field ?? m.name}`;
       const orUndefined = (expr) => (m.optional ? `${f} === undefined ? undefined : ${expr}` : expr);
       if (m.child === 'node')
         args.push(orUndefined(`${f}.${m.type === 'Token' || classTypes.has(m.type) ? 'copy' : 'deepClone'}()`));
@@ -377,7 +393,11 @@ function emitClass(c) {
   const lines = [];
   const fields = baseMembers.filter((m) => !m.isFlags);
   lines.push(`export class ${c.name} extends Node {`);
-  for (const m of fields) lines.push(`  ${m.name}: ${type(m)};`);
+  for (const m of fields) {
+    const readOnly = m.field === undefined ? '' : 'readonly ';
+    const fieldType = m.field === undefined ? type(m) : m.fieldType;
+    lines.push(`  ${readOnly}${m.field ?? m.name}: ${fieldType};`);
+  }
   if (binder.length > 0) {
     lines.push('  // Set by the binder.');
     for (const f of binder) lines.push(`  ${f.name}: ${f.type} | undefined;`);
@@ -389,6 +409,13 @@ function emitClass(c) {
   for (const f of binder) lines.push(`    this.${f.name} = undefined;`);
   lines.push('  }');
   lines.push('');
+  for (const m of baseMembers) {
+    if (m.field === undefined) continue;
+    lines.push(`  get ${m.name}(): ${type(m)} {`);
+    lines.push(`    return this.${m.field}.${m.name};`);
+    lines.push('  }');
+    lines.push('');
+  }
   if (c.noTokenFlags) {
     lines.push('  get tokenFlags(): TokenFlags {');
     lines.push('    return TokenFlags.None;');
@@ -616,5 +643,13 @@ text = replaceRegion(
     .join('\n\n'),
 );
 text = replaceRegion(text, 'accessors', emitAccessors(classes) + '\n\n' + emitBinderAccessors(classes));
-writeFileSync(astPath, text);
-execFileSync(resolve(root, '../../node_modules/.bin/oxfmt'), [astPath], { stdio: 'inherit' });
+if (check) {
+  const formatted = execFileSync(oxfmt, ['--stdin-filepath', astPath], { input: text, encoding: 'utf8' });
+  if (formatted !== readFileSync(astPath, 'utf8')) {
+    console.error('ast.ts is out of date: run node scripts/generate-ast.mjs');
+    process.exitCode = 1;
+  }
+} else {
+  writeFileSync(astPath, text);
+  execFileSync(oxfmt, [astPath], { stdio: 'inherit' });
+}
