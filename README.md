@@ -62,7 +62,7 @@ npm run build            # the Node build of tsc-ts (packages/tsc-ts/dist) and t
 npm run build:oracle     # tsgo reference builds in packages/tsgo/dist
 ```
 
-`package.json` pins scriptc `0.4.6`, with its `@scriptc/threads` package. The build fails with any other version.
+`package.json` pins scriptc `0.4.7`, with its `@scriptc/threads` package. The build fails with any other version.
 
 ## Compiler
 

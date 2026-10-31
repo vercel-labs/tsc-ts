@@ -4,6 +4,36 @@
 
 <!-- release:start -->
 
+## 0.1.0
+
+### Highlights
+
+- **TypeScript 7.1.0-beta:** tsc-ts now follows TypeScript 7.1.0-beta instead of 7.0.2, and `tsc-ts --version` reports 7.1.0-beta. The port covers the checker (relations, inference, types, statements, grammar, JSDoc and JavaScript), the parser, scanner, binder and program loading, the command line, tsconfig, paths and incremental builds, JavaScript and declaration emit, and the node builder, which now reports cycles and truncation as TypeScript 7.1 does.
+- **Faster checking:** tsc-ts is now built with scriptc 0.4.7 and a profile collected in two phases with it. TypeScript 7.1's narrowing fast paths for unions of unrelated primitives and the 7.1 way of inferring alias and reference type arguments once are ported. Repeated contextual return type inference for the same generic call is memoized, and the checker's resolved types, signatures and symbol links are kept in compact pages. Compared with 0.0.10, check-only builds of five of the benchmark projects are 1.16 to 1.21x faster at `--checkers 1` (VS Code 33.2 s to 28.6 s) and 1.08 to 1.19x faster at `--checkers 16` (VS Code 4.30 s to 3.60 s), and peak RSS is the same or up to 0.05 GB lower.
+- **Text on 2 MiB pages:** on Linux, the first run of the launcher writes the installed executable again with one write. On file systems with large folios (XFS, and ext4 from Linux 6.16) its code is then mapped with 2 MiB pages, which package managers' chunked writes prevent until the file is read from disk again. The copy is created with mode 0600 under a new name and never opens an existing path, and the executable keeps its mode.
+- **Shared checking (experimental):** with `TSC_TS_SHARE=1` and `--checkers` above 1, checker threads share the types of declared variables and properties and the return types of declared functions. A checker that needs a type another checker has computed translates it instead of computing it again. On the T3 server project `--checkers 16` checks 27% faster (3.77 s to 2.77 s); on the other benchmark projects it is within a few percent. Output is the same as with one checker. It is off by default and costs nothing when off.
+- **`--watch`:** the first build loads the program on parse threads as a compile does, reads the build info while they parse, and checks what changed on checker threads where that is enough files.
+- **API:**
+  - `tsc-ts --api` serves TypeScript 7.1's API protocol and encodes source files in its binary AST format.
+  - Completions offer auto-imports from the project's files and from packages in `node_modules`, and complete the cases of an exhaustive `switch` over an enum.
+  - `getImportAdderEdits` returns the edits that add imports to a file.
+  - A client that asks for object references at initialize gets the types, symbols and signatures an earlier reply carried as their ids.
+
+### Fixes
+
+- A watch rebuild after a file was written in place no longer fails with "Cannot assign to read only property 'shared'" when the last build checked on checker threads.
+- A value import type query with type arguments, such as `typeof import("./factory").fn<string>`, is instantiated with them, and wrong type arguments are reported.
+- Calling the `resolve` parameter of a `new Promise` executor without an argument reports TS2794 in TypeScript files and TS2810 in JavaScript files, as tsgo does.
+- A type reference directive such as `/// <reference types="./css" />` resolves against its type root as tsgo does, so `.tsbuildinfo` lists missing `package.json` files in tsgo's order.
+- Unused locals after a top-level `return` are reported.
+- The printer prints a mapped type written without a type (`{ [K in keyof T] }`) as tsgo 7.1 does instead of failing.
+- Completions:
+  - Completions and auto-import fixes no longer insert declaration or package text as code: exports whose names are not identifiers are not imported, and the exhaustive `switch` snippet is not offered for such names.
+  - An opening tag's completions list only names that can be written as tag names.
+  - Wildcard export targets of a package are not searched outside it.
+
+<!-- release:end -->
+
 ## 0.0.10
 
 ### Highlights
@@ -26,8 +56,6 @@
 ### Fixes
 
 - With checker threads, global diagnostics found while emitting declarations, such as TS2589 from serializing a type, are no longer reported, as with one checker. Global diagnostics found while checking files are still reported.
-
-<!-- release:end -->
 
 ## 0.0.9
 
