@@ -67,7 +67,7 @@ import {
 import { getESSymbolLikeTypeForNode, getTypeFromTypeNode } from './checker-type-nodes.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { instantiateTypeWithAlias } from './instantiation.js';
-import { sideOf } from './side-state.js';
+import { resolvedReturnTypeOf, sideOf } from './side-state.js';
 import { CheckFlags, getDeclarations, getSymbolId, setDeclarations, type Symbol, SymbolFlags } from './symbol.js';
 import { keepPropertiesOnly, scannedLiteralPropertiesLimit } from './checker-members.js';
 import { findResolutionCycleStartIndex, TypeSystemPropertyName } from './checker-symbols.js';
@@ -104,7 +104,10 @@ const enum RecordKind {
   Reference,
   /** The tuple target with the element flags `nums`, labeled by `nodes`, readonly when `num` is 1. */
   TupleTarget,
-  /** The instantiation of the anonymous, mapped or deferred reference type `refs[0]` with outer type arguments `refs[1..]`. */
+  /**
+   * The instantiation of the anonymous, mapped or deferred reference type `refs[0]` with the `num` outer type arguments
+   * after it, then the return types its signatures had resolved (built after it).
+   */
   Instantiation,
   /** A union of `refs`, with the origin `num` (a record index, or -1). */
   Union,
@@ -288,7 +291,7 @@ export class MergedOrigins {
 }
 
 /** Writes a result as records; `failure` names the first part that has no record kind. */
-class Exporter {
+export class Exporter {
   readonly c: Checker;
   records: PortableRecord[] = [];
   readonly indexes = new Map<Type, number>();
@@ -755,8 +758,48 @@ class Exporter {
       return this.fail('instantiation not found');
     const refs = [this.type(target), ...this.types(args)];
     if (this.failure !== undefined) return -1;
-    const record = new PortableRecord(RecordKind.Instantiation, t.id, 0, 0, '', undefined, declaration, refs);
-    return this.add(t, this.aliasOf(record, t.alias));
+    const record = new PortableRecord(RecordKind.Instantiation, t.id, 0, args.length, '', undefined, declaration, refs);
+    const index = this.add(t, this.aliasOf(record, t.alias));
+    // Only for an export that hasn't failed (its alias may have): optionalType would forget that failure.
+    if (index >= 0 && this.failure === undefined) this.resolvedReturnTypes(t, refs);
+    return index;
+  }
+
+  /**
+   * Adds to `refs` the return types the checker resolved for the signatures of the instantiation `t`, exported after
+   * it. The consumer then creates them right after `t` and before the types that contain it, as this checker did:
+   * inference stops at references whose type ids grow along its stack (`isDeeplyNestedType`), so a consumer that
+   * created them later, when it resolved them, could stop an inference this checker made.
+   */
+  resolvedReturnTypes(t: ObjectType, refs: number[]): void {
+    if ((t.objectFlags & ObjectFlags.MembersResolved) === 0) return;
+    for (const signatures of [t.callSignatures, t.constructSignatures])
+      for (const signature of signatures) {
+        const returnType = resolvedReturnTypeOf(this.c, signature);
+        if (returnType === undefined) continue;
+        const index = this.optionalType(returnType);
+        if (index >= 0) refs.push(index);
+      }
+  }
+
+  /**
+   * The record of `t`, or -1 if it can't be exported; that leaves the export in progress as it was. An export that
+   * failed before stays failed.
+   */
+  optionalType(t: Type): number {
+    if (this.failure !== undefined) return -1;
+    const records = this.records.length;
+    const types = this.addedTypes.length;
+    const properties = this.addedProperties.length;
+    const index = this.type(t);
+    if (this.failure === undefined) return index;
+    for (let i = types; i < this.addedTypes.length; i++) this.indexes.delete(this.addedTypes[i]!);
+    for (let i = properties; i < this.addedProperties.length; i++) this.properties.delete(this.addedProperties[i]!);
+    this.addedTypes.length = types;
+    this.addedProperties.length = properties;
+    this.records.length = records;
+    this.failure = undefined;
+    return -1;
   }
 
   conditional(t: ConditionalType): number {
@@ -919,7 +962,9 @@ export class Translator {
 
   build(r: PortableRecord, types: Type[]): Type {
     const c = this.c;
-    const refs = r.refs.map((i) => types[i]!);
+    // An instantiation's refs end with the return types of its signatures, which are built after it.
+    const own = r.kind === RecordKind.Instantiation ? r.refs.slice(0, 1 + r.num) : r.refs;
+    const refs = own.map((i) => types[i]!);
     switch (r.kind) {
       case RecordKind.Initial:
         return this.initial[r.num]!;
@@ -957,7 +1002,12 @@ export class Translator {
       case RecordKind.Instantiation: {
         const target = refs[0]!;
         const typeParameters = outerTypeParametersOf(c, r.node!, target);
-        return instantiateTypeWithAlias(c, target, newTypeMapper(typeParameters, refs.slice(1)), this.alias(r, types));
+        return instantiateTypeWithAlias(
+          c,
+          target,
+          newTypeMapper(typeParameters, refs.slice(1, 1 + r.num)),
+          this.alias(r, types),
+        );
       }
       case RecordKind.Union: {
         if (r.num === -2) return newUnionType(c, r.flags & ObjectFlags.None, refs);
