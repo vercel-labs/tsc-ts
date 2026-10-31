@@ -70,6 +70,7 @@ import {
 } from './helpers.js';
 import { formatGeneratedName, isMemberName, nodeIsSynthesized } from './utilities.js';
 import { OuterExpressionKinds, isOuterExpression, outerExpressionOperand } from '../transformers/utilities.js';
+import { IdentifierName } from '../identifier-name.js';
 
 /**
  * The node factory of an emit context. The context is the factory (`EmitContext` extends it), so the two are one
@@ -108,7 +109,7 @@ export abstract class NodeFactory extends NodeFactoryBase {
   }
 
   cloneIdentifier(node: Identifier): Identifier {
-    return this.cloneNode(node, new Identifier(node.text));
+    return this.cloneNode(node, new Identifier(node.identifierName));
   }
 
   createNodeList(nodes: Node[]): NodeList {
@@ -132,7 +133,7 @@ export abstract class NodeFactory extends NodeFactoryBase {
   }
 
   createIdentifier(text: string): Identifier {
-    return this.created(new Identifier(text));
+    return this.created(new Identifier(new IdentifierName(text)));
   }
 
   createKeywordExpression(kind: SyntaxKind): KeywordExpression {

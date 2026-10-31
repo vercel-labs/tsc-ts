@@ -13,6 +13,7 @@ import {
   isWhiteSpaceSingleLine,
 } from './character-codes.js';
 import { Diagnostics } from './diagnostic-messages.js';
+import { IdentifierName } from './identifier-name.js';
 import type { DiagnosticMessage } from './diagnostics.js';
 import { parsePseudoBigInt } from './pseudo-bigint.js';
 import {
@@ -358,59 +359,60 @@ function finishHash(hash: number): number {
   return hash ^ (hash >>> 15);
 }
 
-/** Strings for ranges of one text, keyed by their code units: equal identifiers share one string. */
+/**
+ * Names for ranges of one text, keyed by their code units: equal identifiers share one
+ * `IdentifierName`.
+ */
 class IdentifierTable {
-  private text: string;
   // Pairs of (entry index + 1, hash) per slot, (0, 0) when empty; linear probing.
   private slots: Int32Array;
   // Each entry's length in code units.
   private lengths: Int32Array;
-  private texts: string[];
+  private names: IdentifierName[];
   private count: number;
-  // Per entry: 1 once its text was recorded among the file's identifier texts (`markRecorded`).
+  // Per entry: 1 once its name was recorded among the file's identifier texts (`markRecorded`).
   private recorded: Uint8Array;
-  // The entry the last `intern` returned.
-  private lastEntry: number;
 
-  constructor(text: string) {
-    this.text = text;
+  constructor() {
     this.slots = new Int32Array(512);
     this.lengths = new Int32Array(128);
-    this.texts = [];
+    this.names = [];
     this.count = 0;
     this.recorded = new Uint8Array(128);
-    this.lastEntry = -1;
+  }
+
+  /** Empties the table for a new text. */
+  clear(): void {
+    if (this.count === 0) return;
+    this.slots.fill(0);
+    this.names.length = 0;
+    this.recorded.fill(0, 0, this.count);
+    this.count = 0;
   }
 
   /**
-   * Whether `text`, just returned by `intern`, still needs recording among the file's identifier
-   * texts; marks it recorded. Texts the table doesn't know are always recorded.
+   * Whether `text`, the text of the entry `entry` that `intern` returned (-1 for none), still needs
+   * recording among the file's identifier texts; marks it recorded. Texts the table doesn't know are
+   * always recorded.
    */
-  markRecorded(text: string): boolean {
-    const entry = this.lastEntry;
-    if (entry < 0 || this.texts[entry] !== text) return true;
+  markRecorded(entry: number, text: string): boolean {
+    if (entry < 0 || this.names[entry]!.text !== text) return true;
     if (this.recorded[entry] !== 0) return false;
     this.recorded[entry] = 1;
     return true;
   }
 
-  /** Empties the table for a new text. */
-  setText(text: string): void {
-    this.text = text;
-    if (this.count === 0) return;
-    this.slots.fill(0);
-    this.recorded.fill(0, 0, this.count);
-    this.texts.length = 0;
-    this.count = 0;
-    this.lastEntry = -1;
+  /** The name of the entry `intern` returned. */
+  name(entry: number): IdentifierName {
+    return this.names[entry]!;
   }
 
   /**
-   * `text.substring(start, end)`, or the string interned for an equal range; `hash` is its `rangeHash`.
-   * A candidate of the same hash and length is compared with `startsWith`, which natively compares
-   * the bytes of both strings at once.
+   * The entry of `text.substring(start, end)`, added when the table has no equal range; `hash` is its
+   * `rangeHash`. A candidate of the same hash and length is compared with `startsWith`, which natively
+   * compares the bytes of both strings at once.
    */
-  intern(start: number, end: number, hash: number): string {
+  intern(text: string, start: number, end: number, hash: number): number {
     start = start | 0;
     end = end | 0;
     hash = hash | 0;
@@ -422,15 +424,10 @@ class IdentifierTable {
       const entry = slots[(slot * 2) | 0] | 0;
       if (entry === 0) break;
       if ((slots[(slot * 2 + 1) | 0] | 0) === hash && (this.lengths[(entry - 1) | 0] | 0) === length) {
-        const candidate = this.texts[(entry - 1) | 0]!;
-        if (this.text.startsWith(candidate, start)) {
-          this.lastEntry = (entry - 1) | 0;
-          return candidate;
-        }
+        if (text.startsWith(this.names[(entry - 1) | 0]!.text, start)) return (entry - 1) | 0;
       }
       slot = (slot + 1) & mask;
     }
-    const value = this.text.substring(start, end);
     const index = this.count | 0;
     if (index === this.lengths.length) {
       const lengths = new Int32Array(index * 2);
@@ -441,13 +438,12 @@ class IdentifierTable {
       this.recorded = recorded;
     }
     this.lengths[index] = length;
-    this.texts.push(value);
+    this.names.push(new IdentifierName(text.substring(start, end)));
     this.count = (index + 1) | 0;
-    this.lastEntry = index;
     slots[(slot * 2) | 0] = (index + 1) | 0;
     slots[(slot * 2 + 1) | 0] = hash;
     if (this.count * 2 > mask + 1) this.slots = rehash(slots);
-    return value;
+    return index;
   }
 }
 
@@ -619,6 +615,8 @@ export class Scanner {
   // so identifiers and keywords don't allocate until their value is read.
   /** @internal */ tokenValue: string;
   /** @internal */ valueStart: number;
+  // The name `getIdentifierValue` last interned, whose text `tokenValue` then holds.
+  private tokenName: IdentifierName | undefined;
   /** @internal */ valueEnd: number;
   // `rangeHash` of `chars[hashStart, hashEnd)`, which the ASCII identifier scan computes as it goes.
   private valueHash: number;
@@ -629,6 +627,8 @@ export class Scanner {
   // The code units zeroed by `setTextEnd`.
   private readonly cutUnits: Uint16Array;
   private readonly identifiers: IdentifierTable;
+  // The entry `getIdentifierValue` last interned, -1 for none.
+  private lastEntry: number;
   // With code units on demand: per block of `unitBlockSize` code units, 1 once `chars` holds them
   // (`loadUnits`); `chars` is zero elsewhere.
   private loadedBlocks: Uint8Array | undefined;
@@ -667,6 +667,7 @@ export class Scanner {
     this.tokenFlags = TokenFlags.None;
     this.tokenValue = '';
     this.valueStart = -1;
+    this.tokenName = undefined;
     this.valueEnd = -1;
     this.valueHash = 0;
     this.hashStart = -1;
@@ -674,7 +675,8 @@ export class Scanner {
     this.commentDirectives = [];
     this.skipJSDocLeadingAsterisks = 0;
     this.cutUnits = new Uint16Array(4);
-    this.identifiers = new IdentifierTable(text);
+    this.identifiers = new IdentifierTable();
+    this.lastEntry = -1;
     this.textKind = TextKind.Unknown;
     this.lineFeedFrom = -1;
     this.lineFeedAt = -1;
@@ -687,7 +689,8 @@ export class Scanner {
     this.text = text;
     this.chars = toCodeUnits(text);
     this.loadedBlocks = undefined;
-    this.identifiers.setText(text);
+    this.identifiers.clear();
+    this.lastEntry = -1;
     this.textKind = TextKind.Unknown;
     this.lineFeedFrom = -1;
     this.lineFeedAt = -1;
@@ -820,7 +823,7 @@ export class Scanner {
    * file to be recorded; files record each identifier text once.
    */
   recordIdentifierValue(text: string): boolean {
-    return this.identifiers.markRecorded(text);
+    return this.identifiers.markRecorded(this.lastEntry, text);
   }
 
   /** @internal Like `getTokenValue`, but identifiers with the same text share one string. */
@@ -830,10 +833,23 @@ export class Scanner {
       const end = this.valueEnd;
       const hash =
         start === this.hashStart && end === this.hashEnd ? this.valueHash : rangeHash(this.chars, start, end);
-      this.tokenValue = this.identifiers.intern(start, end, hash);
+      const entry = this.identifiers.intern(this.text, start, end, hash);
+      this.lastEntry = entry;
+      this.tokenName = this.identifiers.name(entry);
+      this.tokenValue = this.tokenName.text;
       this.valueStart = -1;
     }
     return this.tokenValue;
+  }
+
+  /**
+   * The identifier value as a name that identifiers with the same text share, after
+   * `getIdentifierValue`; a cooked value (with escapes) gets a name of its own.
+   */
+  getIdentifierName(): IdentifierName {
+    const name = this.tokenName;
+    if (name !== undefined && name.text === this.tokenValue) return name;
+    return new IdentifierName(this.tokenValue);
   }
 
   getCommentDirectives(): readonly CommentDirective[] {

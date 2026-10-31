@@ -171,6 +171,7 @@ import {
   SymbolFlags,
   type SymbolTable,
 } from './symbol.js';
+import { IdentifierName } from './identifier-name.js';
 
 const enum JsxFlags {
   None = 0,
@@ -1067,7 +1068,7 @@ export function createJsxAttributesTypeFromAttributesProperty(
       // checked as an excess property like the attributes.
       const childrenDeclaration = new PropertySignatureDeclaration(
         undefined,
-        new Identifier(jsxChildrenPropertyName),
+        new Identifier(new IdentifierName(jsxChildrenPropertyName)),
         undefined,
         undefined,
         undefined,
