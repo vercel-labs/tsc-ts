@@ -1129,9 +1129,6 @@ export function isSharedReturnSignature(c: Checker, sig: Signature): boolean {
 // file: it hands the file on to another checker (`forbidden`, `handoff`), which then computes them itself, as the
 // checker of a file always does.
 
-/** Whether checker threads share results (TSC_TS_SHARE=1). */
-export const shareThreads = process.env.TSC_TS_SHARE === '1';
-
 /**
  * What a checker thread needs to share results with the others; posted in its `workerData` (a plain object: class
  * instances arrive without their class).

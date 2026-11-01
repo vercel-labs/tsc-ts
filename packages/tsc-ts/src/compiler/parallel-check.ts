@@ -59,10 +59,29 @@ import {
   numberLogSize,
   recordTableSize,
   resultTableSize,
-  shareThreads,
   stringLogSize,
   type ThreadSharingData,
 } from './shared-results.js';
+import {
+  autoCheckers,
+  CheckSignals,
+  checkersPolicy,
+  decideCheck,
+  libraryBoundCount,
+  maxAutoCheckers,
+  sharePin,
+  tsgoCheckers,
+  type RunConfig,
+} from './run-config.js';
+
+// The tests of the scheduler read these here, next to the plans they choose between.
+export { autoCheckers, libraryBoundCount };
+
+/**
+ * `TSC_TS_SHARE` for a run without a run configuration (the emit threads, which share no program to
+ * translate against): `1` shares, `0` does not, and unset shares nothing (`sharePin`).
+ */
+const shareThreads = sharePin(process.env);
 
 /** With TSC_TS_CHECKERS_TRACE: the process's resident and peak resident set in MB (Linux), else 0. */
 export function residentMB(): number[] {
@@ -455,22 +474,8 @@ function checkersEmit(checked: CheckedProgram, emits: boolean): boolean {
 }
 
 /**
- * How the number of checkers is chosen without `--checkers`: `auto` (the default) uses every CPU
- * this process may run on (`os.availableParallelism()`, at most `maxAutoCheckers`), and at least
- * tsgo's four; fewer than the CPUs, but never fewer than four, when the estimated peak memory of more
- * checkers would not fit (`memoryCheckers`). `fixed` (TSC_TS_CHECKERS=fixed) uses tsgo's four.
- */
-export const checkerPolicy: 'fixed' | 'auto' = process.env.TSC_TS_CHECKERS === 'fixed' ? 'fixed' : 'auto';
-
-/** tsgo's number of checkers, and the fewest `auto` starts. */
-const tsgoCheckers = 4;
-
-/** The most checkers `auto` starts (measured up to 16 CPUs). */
-const maxAutoCheckers = 16;
-
-/**
  * The number of checker threads for `checkers` (`--checkers`), or 1 to check on this thread. Without
- * the option, native builds follow `checkerPolicy` (with `program`, the memory estimate of `auto`
+ * the option, native builds follow the checker policy (with `program`, the memory estimate of `auto`
  * applies); under Node.js, where every thread builds its own copy of the program, tsc-ts checks on
  * one thread.
  */
@@ -487,7 +492,7 @@ export function checkerThreads(
 function defaultCheckers(program: Program | undefined): number {
   if (!sharesPublishedGraphs) return 1;
   if (program !== undefined && checksLittle(program)) return 1;
-  if (checkerPolicy === 'fixed') return tsgoCheckers;
+  if (checkersPolicy(process.env) === 'fixed') return tsgoCheckers;
   const cpus = Math.min(availableParallelism(), maxAutoCheckers);
   return autoCheckers(cpus, program === undefined ? Number.MAX_SAFE_INTEGER : memoryCheckers(program));
 }
@@ -512,24 +517,6 @@ function checksLittle(program: Program): boolean {
     if (text >= littleText) return false;
   }
   return true;
-}
-
-/** `auto` with `cpus` CPUs when the memory estimate fits `fit` checkers: tsgo's four at least. */
-export function autoCheckers(cpus: number, fit: number): number {
-  return Math.max(tsgoCheckers, Math.min(cpus, fit));
-}
-
-/**
- * The number of threads that parse ahead of a program checked by `checkers` checkers: every CPU this
- * process may run on, as tsgo parses on every core whatever its checker count (parse threads hand
- * their files to the shared program; what else they allocate is reused by the checker threads), but
- * one. The main thread hands out the chunks they load: with a thread on every CPU, it waits for a CPU
- * each time a thread returns a chunk, and so does that thread for its next chunk (VS Code's parse took
- * 18-57 ms longer with 16 threads on 16 CPUs than with 15).
- */
-export function parseThreads(checkers: number): number {
-  const cpus = availableParallelism();
-  return Math.max(1, Math.min(cpus - 1, Math.max(checkers, Math.min(cpus, maxAutoCheckers))));
 }
 
 /**
@@ -1920,50 +1907,39 @@ export function mainThreadChecks(shared: boolean): boolean {
 }
 
 /**
- * When a checker's own files are a small part of what it resolves (`libraryBoundCheckers`): the least
- * text, in characters, of the libraries the files of a checker's range reach, on average over the
- * ranges, and the least multiple of the text of the range's own files it is.
+ * What `plan`, made with `count` checkers, shows about the cost of checking (`CheckSignals`): the
+ * libraries a range reaches and the files it checks, the share of that a second range reaches too, and
+ * the shares of declaration and node_modules files of the program. Computed where a rule may read them
+ * — an automatic count above tsgo's four, with no `--checkers` — and left at zero elsewhere: a pinned
+ * count needs neither, and the pass over every range's libraries costs a millisecond on a large program.
  */
-const libraryBoundText = 6_000_000;
-const libraryBoundShare = 5;
-
-/**
- * The number of checkers for `count` checkers whose ranges reach `library` characters of libraries
- * and check `own` characters each, on average: three quarters of them (tsgo's four at least) where
- * every checker spends most of its time resolving the same large libraries (`libraryBoundText`,
- * `libraryBoundShare`), else `count`.
- *
- * Each checker resolves the declarations its files reach, whatever else it checks. Where they are
- * millions of characters, such as an Effect-based project's, and much more than the checker's own
- * files, a checker costs seconds of CPU and hundreds of MB before its files get cheap, and the last
- * quarter of the checkers (on 16 CPUs of 8 cores, the ones sharing a core with another) repeat that
- * work rather than save time: T3 Code's web and server projects ran 3% and 1% faster with 12
- * checkers than with 16, and used 16% and 8% less memory. Where checkers resolve less, or mostly
- * check their own files, 12 of 16 checkers were slower: Excalidraw (1.4M library and 0.15M own
- * characters per range) by 6%, Sentry (5.7M and 3.0M) and the tsc-ts sources by about 11%.
- */
-export function libraryBoundCount(count: number, library: number, own: number): number {
-  return library >= libraryBoundText && library >= libraryBoundShare * own
-    ? Math.max(tsgoCheckers, Math.ceil((count * 3) / 4))
-    : count;
-}
-
-/**
- * The number of checkers for `plan`, made with `count` checkers that `auto` chose
- * (`libraryBoundCount` of what its ranges reach and check).
- */
-function libraryBoundCheckers(checked: CheckedProgram, plan: CheckPlan, costs: CheckCosts, count: number): number {
-  if (checkerPolicy !== 'auto' || checked.program.options.checkers !== undefined || count <= tsgoCheckers) return count;
+function checkSignals(checked: CheckedProgram, plan: CheckPlan, costs: CheckCosts, count: number): CheckSignals {
+  const ranges = plan.ranges.length >> 1;
+  const signals = new CheckSignals(count, ranges);
   const program = checked.program;
+  if (
+    checkersPolicy(process.env) !== 'auto' ||
+    program.options.checkers !== undefined ||
+    count <= tsgoCheckers ||
+    ranges === 0
+  )
+    return signals;
   const files = program.getSourceFiles();
   const length = textLengths(program);
   const isChecked: boolean[] = [];
-  for (let i = 0; i < files.length; i++) isChecked.push(false);
+  let declarationFiles = 0;
+  let nodeModulesFiles = 0;
+  for (let i = 0; i < files.length; i++) {
+    isChecked.push(false);
+    if (files[i]!.isDeclarationFile) declarationFiles++;
+    if (files[i]!.path.indexOf('/node_modules/') >= 0) nodeModulesFiles++;
+  }
   for (const i of costs.order) isChecked[i] = true;
-  const ranges = plan.ranges.length >> 1;
-  if (ranges === 0) return count;
   let library = 0;
   let own = 0;
+  // The libraries every range reaches together, each counted once (`CheckSignals.redundancy`).
+  const union = new Set<number>();
+  let unionChars = 0;
   for (let r = 0; r < ranges; r++) {
     // The libraries the range's files import, and what they reach through other libraries (as checkCosts counts them).
     const reached = new Set<number>();
@@ -1980,6 +1956,10 @@ function libraryBoundCheckers(checked: CheckedProgram, plan: CheckPlan, costs: C
     while (stack.length > 0) {
       const k = stack.pop()!;
       library += length[k]!;
+      if (!union.has(k)) {
+        union.add(k);
+        unionChars += length[k]!;
+      }
       for (const t of costs.imports[k] ?? [])
         if (
           !reached.has(t) &&
@@ -1992,18 +1972,21 @@ function libraryBoundCheckers(checked: CheckedProgram, plan: CheckPlan, costs: C
         }
     }
   }
-  const fewer = libraryBoundCount(count, library / ranges, own / ranges);
+  signals.library = library / ranges;
+  signals.own = own / ranges;
+  signals.redundancy = (library - unionChars) / (library + own);
+  signals.declarationShare = declarationFiles / files.length;
+  signals.nodeModulesShare = nodeModulesFiles / files.length;
   if (process.env.TSC_TS_CHECKERS_TRACE !== undefined)
     process.stderr.write(
-      `checkers: ranges reach ${Math.round(library / ranges / 1000)}K library chars and check ${Math.round(own / ranges / 1000)}K on average: ${fewer} checkers\n`,
+      `checkers: ranges reach ${Math.round(signals.library / 1000)}K library chars and check ${Math.round(signals.own / 1000)}K on average, ${Math.round(signals.redundancy * 100)}% of it reached twice: ${libraryBoundCount(count, signals.library, signals.own)} checkers\n`,
     );
-  return fewer;
+  return signals;
 }
 
 /**
- * Checks `checked` with `checkers` checkers (fewer where `auto` chose them and they would mostly
- * resolve the same libraries: `libraryBoundCheckers`) and calls `done` with the wall time once
- * `checked` holds every file's diagnostics.
+ * Checks `checked` with `checkers` checkers (fewer where the configuration chooses so: `decideCheck`,
+ * run-config.ts) and calls `done` with the wall time once `checked` holds every file's diagnostics.
  */
 /**
  * Shares the program of `checked` with checker threads (scriptc builds): this thread's checker merges the
@@ -2037,7 +2020,8 @@ export function shareWithCheckers(checked: CheckedProgram): void {
  * `emitsTo`, the emit results go only there, by file index, and nothing else the threads find reaches
  * the program: a declaration thread (parallel-emit.ts), while this thread's checker checks. With
  * `declarationsTo`, the same holds for the declaration errors of a `noEmit` program
- * (`checkersReportDeclarations`).
+ * (`checkersReportDeclarations`). `config` is the run's configuration: the count it chose is decided
+ * here, once the program is bound and the plan made, and sharing is what it holds.
  */
 export function startParallelCheck(
   checked: CheckedProgram,
@@ -2048,6 +2032,7 @@ export function startParallelCheck(
   checking: boolean = true,
   emitsTo: (EmitResult | undefined)[] | undefined = undefined,
   declarationsTo: (Diagnostic[] | undefined)[] | undefined = undefined,
+  config: RunConfig | undefined = undefined,
 ): void {
   let count = checkers;
   const start = performance.now();
@@ -2067,7 +2052,11 @@ export function startParallelCheck(
   const orderStart = performance.now();
   const costs = costOrder(checked);
   let plan = planSchedule(checked, count, costs, checking);
-  const fewer = libraryBoundCheckers(checked, plan, costs, count);
+  const signals = checkSignals(checked, plan, costs, count);
+  const fewer =
+    config === undefined
+      ? libraryBoundCount(signals.count, signals.library, signals.own)
+      : decideCheck(config, signals);
   if (fewer < count) {
     count = fewer;
     plan = planSchedule(checked, count, costs, checking);
@@ -2188,9 +2177,11 @@ export function startParallelCheck(
     if (remaining === 0 && ownDone) finish();
   };
   const diagnosticFiles = new Map<string, DiagnosticFile>();
-  // TSC_TS_SHARE: checker threads share results (shared-results.ts).
+  // Whether checker threads share results (shared-results.ts), which the run's configuration decides;
+  // the emit threads of parallel-emit.ts have no configuration and never share (count 1).
+  const sharesResults = config === undefined ? shareThreads === true : config.share;
   const sharing =
-    shareThreads && shared && !mainChecks && count > 1 && count <= maxSharingCheckers
+    sharesResults && shared && !mainChecks && count > 1 && count <= maxSharingCheckers
       ? threadSharingOf(count, order, units, files.length)
       : undefined;
   const sharingStarted: boolean[] = [];
@@ -2232,7 +2223,7 @@ export function startParallelCheck(
     });
     worker.on('error', (error: unknown) => {
       // Sharing results (TSC_TS_SHARE) is still checked for such failures, which the main thread hides otherwise.
-      if (trace || shareThreads) process.stderr.write(`checkers: thread ${i} failed: ${String(error)}\n`);
+      if (trace || sharesResults) process.stderr.write(`checkers: thread ${i} failed: ${String(error)}\n`);
       threadDone();
     });
   };

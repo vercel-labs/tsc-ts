@@ -957,6 +957,8 @@ function normalize(text, dir) {
       .replaceAll(dir, '<dir>')
       .replace(/\d\d:\d\d:\d\d [AP]M/g, '<time>')
       .replace(/^((?:Aggregate )?[A-Za-z][A-Za-z ]+:) +\S+$/gm, '$1 <value>')
+      // The run configuration the compiler chose, which tsc-ts prints and tsgo does not.
+      .replace(/\nSuggestions:\n(?: {2}.*\n)+/g, '')
       // Outputs written in the same clock tick have the same time, so which one is oldest varies.
       .replace(/(is older than output )'[^']*'/g, "$1'<output>'")
   );

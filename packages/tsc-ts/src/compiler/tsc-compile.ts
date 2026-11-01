@@ -52,6 +52,7 @@ import {
   type System,
   SystemFileSystem,
 } from './tsc-cli.js';
+import { reportRunConfig, type RunConfig } from './run-config.js';
 
 type CompileWork = Extract<CommandLineResult, { kind: 'compile' }>;
 
@@ -106,7 +107,7 @@ export function compile(sys: System, work: CompileWork): ExitStatus {
     outputLocale(program.options),
   );
   traceSingleChecker(checked);
-  return emitStatusAndReportStatistics(sys, compilerProgram, result);
+  return emitStatusAndReportStatistics(sys, compilerProgram, result, work.config);
 }
 
 /** The old state of `work`'s incremental program: read while threads parsed its files, or now. */
@@ -136,7 +137,12 @@ function oldSnapshotOf(sys: System, work: CompileWork, times: CompileTimes): Sna
 export function compileThreads(_sys: System, work: CompileWork): number {
   const options = work.program.options;
   mark('compile threads');
-  return checkerThreads(options.checkers, options.singleThreaded, work.program);
+  // The run's configuration counts the checkers the program allows: one where it checks little, or
+  // where its text doesn't fit the machine's memory as many. A checker thread run decides again once
+  // the plan is made (`startParallelCheck`, run-config.ts).
+  const count = checkerThreads(options.checkers, options.singleThreaded, work.program);
+  work.config.checkers = count;
+  return count;
 }
 
 /** The number of threads to emit JavaScript on while this thread checks (`compileWithEmitThreads`), or 0. */
@@ -186,7 +192,7 @@ export function compileWithEmitThreads(
       outputLocale(program.options),
     );
     traceSingleChecker(checked);
-    done(emitStatusAndReportStatistics(sys, compilerProgram, result));
+    done(emitStatusAndReportStatistics(sys, compilerProgram, result, work.config));
   };
   const emitKinds = emitKindsOf(compilerProgram);
   if (emitKinds !== undefined) threads = emitThreads(program, program.options.singleThreaded, emitKinds);
@@ -333,7 +339,7 @@ export function compileWithDeclarationThread(
       outputLocale(options),
     );
     traceSingleChecker(checked);
-    done(emitStatusAndReportStatistics(sys, compilerProgram, result));
+    done(emitStatusAndReportStatistics(sys, compilerProgram, result, work.config));
   };
   startDeclarationErrorThread(checked, (declarations) => {
     // `PlainProgram.getDeclarationDiagnostics` reads them.
@@ -402,7 +408,7 @@ export function compileInParallel(
     );
     times.checkTime = checkTime;
     mark(`reported ${result.diagnostics.length} diagnostics`);
-    done(emitStatusAndReportStatistics(sys, compilerProgram, result));
+    done(emitStatusAndReportStatistics(sys, compilerProgram, result, work.config));
   };
   const options = program.options;
   if (!checking && (options.noEmit === true || options.noEmitOnError === true)) return finish(0);
@@ -440,10 +446,13 @@ export function compileInParallel(
       true,
       kinds,
       checking,
+      undefined,
+      undefined,
+      work.config,
     );
     return;
   }
-  startParallelCheck(checked, threads, finish, true, undefined, checking);
+  startParallelCheck(checked, threads, finish, true, undefined, checking, undefined, undefined, work.config);
 }
 
 /**
@@ -487,7 +496,7 @@ function recheckInParallel(
     );
     times.checkTime += threadsCheckTime;
     mark(`reported ${result.diagnostics.length} diagnostics`);
-    done(emitStatusAndReportStatistics(sys, incrementalProgram, result));
+    done(emitStatusAndReportStatistics(sys, incrementalProgram, result, work.config));
   };
   // Reporting checks only programs without syntactic, program and global errors (getDiagnosticsOfProgram).
   // The threads emit the files they check, as the checker that checks a file emits it on this thread: into
@@ -513,6 +522,9 @@ function recheckInParallel(
     true,
     incrementalProgram.emitKindsOnCheckers(files),
     incrementalProgram.checksOnCheckers,
+    undefined,
+    undefined,
+    work.config,
   );
 }
 
@@ -580,16 +592,21 @@ export function reportEmitAndErrors(
   return new CompileResult(all, emitResult);
 }
 
-/** The exit status of a compilation, after printing `--diagnostics` statistics. */
+/**
+ * The exit status of a compilation, after printing `--diagnostics` statistics and, under
+ * `--extendedDiagnostics` only, the run configuration's `Suggestions:` section (run-config.ts).
+ */
 export function emitStatusAndReportStatistics(
   sys: System,
   program: CompilerProgram,
   result: CompileResult,
+  config: RunConfig | undefined = undefined,
 ): ExitStatus {
   const options = program.options;
   if (options.diagnostics === true || options.extendedDiagnostics === true) {
     program.times.totalTime = sys.sinceStart();
     statisticsOf(program).report(sys);
+    if (options.extendedDiagnostics === true && config !== undefined) reportRunConfig(sys, config);
   }
   return exitStatusOf(result);
 }
