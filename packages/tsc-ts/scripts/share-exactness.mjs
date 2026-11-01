@@ -57,11 +57,18 @@ const work = option(args, '--work', undefined) ?? tempDir('tsc-ts-share-exactnes
 
 const projects = projectsFile === undefined ? [] : loadProjects(projectsFile);
 
-/** A run at one checker count, with `share` choosing whether the sharing variables stay in the environment. */
+/**
+ * A run at one checker count, with `share` choosing whether the sharing variables stay in the environment.
+ * The unshared arm pins sharing off: the selection shares a program it pays on at an unpinned count too, so
+ * a run that pinned nothing would not be the unshared run the shared one is compared with.
+ */
 function run(project, checkers, share) {
   const env = {};
   if (share) env.TSC_TS_SHARE = '1';
-  else for (const name of Object.keys(process.env)) if (name.startsWith('TSC_TS_SHARE')) env[name] = undefined;
+  else {
+    for (const name of Object.keys(process.env)) if (name.startsWith('TSC_TS_SHARE')) env[name] = undefined;
+    env.TSC_TS_SHARE = '0';
+  }
   return runBinary({
     binary,
     project,

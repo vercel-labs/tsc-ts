@@ -19,13 +19,21 @@ const {
   Source,
   decideCheck,
   defaultParseThreads,
+  isLibraryBound,
   libraryBoundCount,
+  minSharingCheckers,
   pinsOf,
   preParseConfig,
   reportRunConfig,
   sharePin,
+  sharingCandidate,
+  sharingFileShare,
+  sharingPeakShare,
   tsgoCheckers,
 } = await load('compiler/run-config.js');
+const { sharingNumbers, signalsNeeded, stopLevel } = await load('compiler/parallel-check.js');
+const { shareStatColumns, shareStatExport, shareStatSaved, shareStatTranslation, shareStatUnpack } =
+  await load('compiler/shared-results.js');
 
 /** A `RunConfigOutput` collecting what the section writes. */
 function output() {
@@ -134,17 +142,179 @@ test('decideCheck cuts an automatic count that mostly resolves the same librarie
   assert.ok(decideCheck(new RunConfig(), signals(16, 12_145_000, 889_000)) >= tsgoCheckers);
 });
 
-test('decideCheck never overrides a pinned count, nor shares on its own', () => {
+/** T3 Code's web project's signals at `count` checkers: 66% of its files are in node_modules. */
+function t3web(count = 16) {
+  const s = signals(count, 12_145_000, 889_000);
+  s.declarationShare = 0.62;
+  s.nodeModulesShare = 0.66;
+  return s;
+}
+
+/** T3 Code's server project: 48% of its files are in node_modules. */
+function t3server(count = 16) {
+  const s = signals(count, 8_727_000, 1_134_000);
+  s.declarationShare = 0.41;
+  s.nodeModulesShare = 0.48;
+  return s;
+}
+
+test('decideCheck never overrides a pinned count, and keeps sharing off where it does not pay', () => {
   const config = preParseConfig({ checkers: 16 }, 16, {});
   config.checkers = 16;
-  assert.equal(decideCheck(config, signals(16, 12_145_000, 889_000)), 16);
+  // The count is the pin's; sharing stays off where the memory fit does not allow it.
+  assert.equal(decideCheck(config, t3web(), { possible: true, fit: { sharing: 15 } }), 16);
   assert.equal(config.checkersSource, Source.Pinned);
-  // No rule turns sharing on yet: what the pin says is what the run keeps.
   assert.equal(config.share, false);
+  // A pinned count with the fit and the signals shares: the pin fixes the count, not sharing.
+  assert.equal(decideCheck(config, t3web(), { possible: true, fit: { sharing: 16 } }), 16);
+  assert.equal(config.share, true);
+  assert.equal(config.shareSource, Source.Static);
+  assert.equal(config.checkersSource, Source.Pinned);
+  // What TSC_TS_SHARE says wins over the rule, and a sharing pin does not keep the count from being
+  // cut: the pin decides sharing, the count rule decides the count.
+  const off = preParseConfig({ checkers: 16 }, 16, { TSC_TS_SHARE: '0' });
+  off.checkers = 16;
+  assert.equal(decideCheck(off, t3web(), { possible: true, fit: { sharing: 16 } }), 16);
+  assert.equal(off.share, false);
+  assert.equal(off.shareSource, Source.Pinned);
   const pinned = preParseConfig({}, 16, { TSC_TS_SHARE: '1' });
   pinned.checkers = 16;
-  decideCheck(pinned, signals(16, 12_145_000, 889_000));
+  assert.equal(decideCheck(pinned, signals(16, 12_145_000, 889_000)), 12);
+  assert.equal(pinned.checkers, 12);
   assert.equal(pinned.share, true);
+});
+
+test('decideCheck turns sharing on for a count whose checkers mostly resolve libraries', () => {
+  for (const [name, make] of [
+    ['T3 Code web', t3web],
+    ['T3 Code server', t3server],
+  ]) {
+    const config = preParseConfig({}, 16, {});
+    config.checkers = 16;
+    assert.equal(decideCheck(config, make(), { possible: true, fit: { sharing: 16 } }), 12, name);
+    assert.equal(config.share, true, name);
+    assert.equal(config.shareSource, Source.Static, name);
+    // The cut stays on: 16 checkers with sharing are within noise of the cut count with it (Q2), and
+    // the cut uses less memory, so sharing does not raise the count.
+    assert.equal(config.checkers, 12, name);
+    assert.equal(config.checkersSource, Source.Default, name);
+    assert.deepEqual(config.checkersReasons, [], name);
+  }
+  const config = new RunConfig();
+  config.checkers = 16;
+  decideCheck(config, t3web(), { possible: true, fit: { sharing: 16 } });
+  assert.deepEqual(config.shareReasons, [
+    '66% of files in node_modules; ranges reach 12.1M library characters for 0.9M checked',
+  ]);
+  const server = new RunConfig();
+  server.checkers = 16;
+  decideCheck(server, t3server(), { possible: true, fit: { sharing: 16 } });
+  assert.deepEqual(server.shareReasons, [
+    '48% of files in node_modules; ranges reach 8.7M library characters for 1.1M checked',
+  ]);
+  // Sharing is on only when it can be: the emit threads and Node builds have no shared program.
+  const alone = preParseConfig({}, 16, {});
+  assert.equal(decideCheck(alone, t3web()), 12);
+  assert.equal(alone.share, false);
+});
+
+test('the sharing rule needs 12 checkers, 40% of the files, library-bound ranges and the memory fit', () => {
+  const at = (signals, fit = { sharing: 16 }, possible = true) => {
+    const config = preParseConfig({}, signals.count, {});
+    decideCheck(config, signals, { possible, fit });
+    return config;
+  };
+  assert.equal(sharingCandidate(t3web()), true);
+  assert.equal(sharingCandidate(t3server()), true);
+  // c4 is neutral to slightly worse, and c8 and c12 are unmeasured: the rule starts at 12.
+  assert.equal(minSharingCheckers, 12);
+  assert.equal(sharingCandidate(t3web(11)), false);
+  assert.equal(at(t3web(11)).share, false);
+  // F = max(declaration, node_modules share) of 0.40: TypeORM and VS Code are at 0.08, Sentry at 0.26.
+  assert.equal(sharingFileShare, 0.4);
+  const typeorm = signals(16, 12_145_000, 889_000);
+  typeorm.declarationShare = 0.08;
+  typeorm.nodeModulesShare = 0.05;
+  assert.equal(sharingCandidate(typeorm), false);
+  assert.equal(at(typeorm).share, false);
+  const sentry = signals(16, 5_704_000, 3_037_000);
+  sentry.declarationShare = 0.21;
+  sentry.nodeModulesShare = 0.26;
+  assert.equal(sharingCandidate(sentry), false);
+  assert.equal(at(sentry).share, false);
+  // The ranges must mostly resolve the same large libraries: Excalidraw reaches 1.4M.
+  const excalidraw = signals(16, 1_400_000, 150_000);
+  excalidraw.declarationShare = 0.5;
+  excalidraw.nodeModulesShare = 0.6;
+  assert.equal(isLibraryBound(1_400_000, 150_000), false);
+  assert.equal(sharingCandidate(excalidraw), false);
+  // The count it leaves must fit memory with the peak sharing adds (1.12 of the estimate): the cut
+  // count, which is 12 here, not the plan's 16.
+  assert.equal(sharingPeakShare, 1.12);
+  assert.equal(at(t3web(), { sharing: 11 }).share, false);
+  assert.equal(at(t3web(), { sharing: 12 }).share, true);
+  // A cut below the count sharing was measured at does not share: 13 checkers leave 10.
+  assert.equal(libraryBoundCount(13, 12_145_000, 889_000), 10);
+  assert.equal(at(t3web(13), { sharing: 16 }).share, false);
+  // TSC_TS_AUTO=0 keeps the decisions of a run before the rule.
+  const off = preParseConfig({}, 16, { TSC_TS_AUTO: '0' });
+  assert.equal(decideCheck(off, t3web(), { possible: true, fit: { sharing: 16 } }), 12);
+  assert.equal(off.share, false);
+  // TSC_TS_AUTO=static keeps the rule: it is what a run without records uses.
+  const staticRun = preParseConfig({}, 16, { TSC_TS_AUTO: 'static' });
+  assert.equal(decideCheck(staticRun, t3web(), { possible: true, fit: { sharing: 16 } }), 12);
+  assert.equal(staticRun.share, true);
+});
+
+test('TSC_TS_AUTO=0 still collects the signals the library-bound cut reads', () => {
+  // With selection off the sharing rule is not consulted, but the cut is: an unpinned count at more
+  // than tsgo's four is still cut to three quarters where the ranges mostly resolve large libraries,
+  // and the cut reads the ranges' characters. Dropping the signals with the rule would leave the cut
+  // with zeros and run every checker.
+  const off = preParseConfig({}, 16, { TSC_TS_AUTO: '0' });
+  assert.equal(off.checkersSource, Source.Default);
+  assert.equal(signalsNeeded(off, 16), true);
+  assert.equal(signalsNeeded(off, 4), false);
+  assert.equal(decideCheck(off, signals(16, 12_145_000, 889_000)), 12);
+  // A pinned count is never cut, and reads nothing.
+  const pinned = preParseConfig({ checkers: 16 }, 16, { TSC_TS_AUTO: '0' });
+  assert.equal(signalsNeeded(pinned, 16), false);
+  // With selection on, the sharing rule reads them at 12 checkers or more, where the count is not
+  // pinned either; the cut reads them above tsgo's four.
+  const on = preParseConfig({}, 16, {});
+  assert.equal(signalsNeeded(on, 16), true);
+  const countPinned = preParseConfig({ checkers: 12 }, 12, {});
+  assert.equal(countPinned.checkersSource, Source.Pinned);
+  assert.equal(countPinned.shareSource, Source.Default);
+  assert.equal(signalsNeeded(countPinned, 12), true);
+  assert.equal(signalsNeeded(preParseConfig({ checkers: 11 }, 11, {}), 11), false);
+  // A count and sharing both pinned: no rule reads them, and the pass over the ranges is not made.
+  const both = preParseConfig({ checkers: 16 }, 16, { TSC_TS_SHARE: '1' });
+  assert.equal(signalsNeeded(both, 16), false);
+});
+
+test('the sharing window counts unpacking inside translating, not on both sides', () => {
+  // Two checkers that each exported 50 ms and translated 50 ms of records, 75 ms of that unpacking
+  // them, and each saved 150 ms of computation by translating instead. Unpacking is timed inside the
+  // translation that reads the records (`ThreadSharing.translatePosted`), so what posting cost is 200
+  // ms over the two: 300 saved for 200 spent is past the 1.5-times threshold, and sharing keeps
+  // running. Counted on both sides it would be 350 spent, and the window would stop what pays.
+  const stats = new Float64Array(shareStatColumns * 2);
+  for (let i = 0; i < 2; i++) {
+    const row = i * shareStatColumns;
+    stats[row + shareStatExport] = 50;
+    stats[row + shareStatTranslation] = 50;
+    stats[row + shareStatUnpack] = 75;
+    stats[row + shareStatSaved] = 150;
+  }
+  const numbers = sharingNumbers(stats, 2);
+  assert.equal(numbers.saved, 300);
+  assert.equal(numbers.spent, 200);
+  assert.equal(stopLevel(numbers), 0);
+  // Without the saving, what posting costs is what stops it.
+  stats[shareStatSaved] = 0;
+  stats[shareStatColumns + shareStatSaved] = 0;
+  assert.equal(stopLevel(sharingNumbers(stats, 2)), 2);
 });
 
 test('CheckSignals.fileShare is the larger of the declaration and node_modules shares', () => {
@@ -323,6 +493,36 @@ test('--extendedDiagnostics reports the pins of sharing and the parse threads', 
   assert.match(output, /^ {2}Sharing: on \(pinned: TSC_TS_SHARE\)$/m);
   assert.match(output, /^ {2}Parse threads: 2 \(pinned: TSC_TS_PARSE_THREADS\)$/m);
 });
+
+// The stop switch: TSC_TS_SHARE_STOP_AT_MS stops a sharing run at that many milliseconds, and the
+// section says what the window saw instead of the source that turned sharing on.
+test(
+  'the sharing window stops sharing, and the section says what it saw',
+  { skip: tscTs.length !== 1 && 'needs a native build (TSC_TS_BIN)' },
+  () => {
+    const dir = project();
+    for (const level of ['2', '1']) {
+      const stopped = run(dir, ['-p', '.', '--checkers', '4', '--extendedDiagnostics'], {
+        TSC_TS_SHARE: '1',
+        TSC_TS_SHARE_STOP_AT_MS: '0:' + level,
+      });
+      assert.equal(stopped.status, 0);
+      assert.match(
+        stopped.output,
+        /^ {2}Sharing: on \(measured: stopped after 0 ms: \d+ ms saved for \d+ ms spent\)(; pin with TSC_TS_SHARE=1)?$/m,
+      );
+      // The switch keeps the diagnostics: the project checks clean.
+      assert.doesNotMatch(stopped.output, /error TS/);
+    }
+    // A run that finishes before the window keeps the source that chose sharing, and the timer goes with it.
+    const long = run(dir, ['-p', '.', '--checkers', '4', '--extendedDiagnostics'], {
+      TSC_TS_SHARE: '1',
+      TSC_TS_SHARE_STOP_AT_MS: '60000',
+    });
+    assert.equal(long.status, 0);
+    assert.match(long.output, /^ {2}Sharing: on \(pinned: TSC_TS_SHARE\)$/m);
+  },
+);
 
 test('--diagnostics and the default print no section', { skip }, () => {
   const dir = project();
