@@ -92,6 +92,25 @@ test('a hunk whose lines are gone fails instead of patching something else', () 
 
 const milliseconds = (value) => value.toFixed(3);
 
+/** One `t` line of a price log: a translation of a posted result, and the checker that posted it. */
+function translation(fields) {
+  return [
+    't',
+    fields.key,
+    fields.kind ?? 0,
+    fields.producer,
+    milliseconds(fields.start),
+    milliseconds(fields.end),
+    fields.walked ?? 1,
+    fields.built ?? 1,
+    milliseconds(fields.unpackMs ?? 0),
+    milliseconds(fields.buildMs ?? 0),
+    fields.types ?? 0,
+    fields.symbols ?? 0,
+    fields.taken === false ? 0 : 1,
+  ].join(' ');
+}
+
 /** One `c` line of a price log: a computation, its outcome, its file, and the dry run of its export. */
 function computation(fields) {
   return [
@@ -174,6 +193,32 @@ test('a take whose translation fits the budget is taken, and its translation is 
     assert.ok(Math.abs(budgeted.netMs - (10 - 0.063 - 0.0123)) < 1e-9, `netMs ${budgeted.netMs}`);
     // The consumer's checker is the longest one, so the rule's wall time is its busy time with the take priced in.
     assert.ok(Math.abs(budgeted.wallMs - (1000 - 10 + 0.063)) < 1e-6, `wallMs ${budgeted.wallMs}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ρ pairs a translation with the producer’s own computation, not a longer duplicate', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tsc-ts-price-rho-'));
+  try {
+    const report = replay(dir, {
+      // The owner computes the result for a file it owns and posts it; the consumer translates it.
+      'price-c0-1.log': log(0, ['src/a.ts'], [computation({ key: 42, outcome: 0, start: 0, end: 1 })], 0, 60),
+      'price-c1-1.log': log(
+        1,
+        ['src/a.ts'],
+        [
+          // The consumer computes the same key itself, for longer than the producer did.
+          computation({ key: 42, start: 20, end: 60 }),
+          translation({ key: 42, producer: 0, start: 40, end: 50, unpackMs: 0.3, buildMs: 0.2 }),
+        ],
+        0,
+        60,
+      ),
+    });
+    // 0.5 ms of translation over the owner's 1 ms, not over the consumer's 40 ms computation of the same key.
+    assert.ok(Math.abs(report.rhoP10 - 0.5) < 1e-9, `rhoP10 ${report.rhoP10}`);
+    assert.equal(report.rhoSmallCount, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

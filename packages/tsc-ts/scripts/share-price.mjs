@@ -2,11 +2,12 @@
 // and prices what result sharing costs and could save on that run.
 //
 // It measures, from the run itself, what a record costs to translate (`c`, split into unpacking and building) and
-// the ratio of a consumer's translation to the producer's computation (`ρ`); it classifies every computation of
-// another checker's file by why it was not taken (nothing posted, the producer was still computing, a refused
-// take, or a post the producer did not make); it counts the evaluations of the type operators a shared evaluation
-// cache would cover and how many of them another checker had already done; and it walks candidate takes under a
-// posting rule and reports the checker time each rule would save and the wall time that implies.
+// the ratio of a consumer's translation to the computation the producer it names made of that key (`ρ`); it
+// classifies every computation of another checker's file by why it was not taken (nothing posted, the producer was
+// still computing, a refused take, or a post the producer did not make); it counts the evaluations of the type
+// operators a shared evaluation cache would cover and how many of them another checker had already done; and it
+// walks candidate takes under a posting rule and reports the checker time each rule would save and the wall time
+// that implies.
 //
 // A take, under a rule, replays like this: for every computation of a key in another checker's file, the rule
 // finds the earliest finish of the same key on another checker. A finish before this computation's start is a
@@ -328,19 +329,34 @@ if (summaryFile !== undefined) {
   }
 }
 
-// `ρ`: the consumer's translation against the producer's computation of the same key.
+// `ρ`: the consumer's translation against the producer's computation of the same key. The producer is the checker
+// the translation names, and its computation is one it made itself, of its own file or of another checker's: a
+// computation another checker made of the same key is not the result that was posted, and a result the producer
+// took is one it did not compute.
 const producerOf = new Map();
 for (const c of computations) {
-  if (c.outcome !== Computed || !c.shareable) continue;
-  const key = c.kind + ':' + c.key;
-  const known = producerOf.get(key);
-  if (known === undefined || c.end - c.start > known.end - known.start) producerOf.set(key, c);
+  if (c.outcome === Taken || c.outcome === Local) continue;
+  const key = `${c.checker}:${c.kind}:${c.key}`;
+  const list = producerOf.get(key);
+  if (list === undefined) producerOf.set(key, [c]);
+  else list.push(c);
+}
+for (const list of producerOf.values()) list.sort((a, b) => a.end - b.end);
+/** The producer's computation the translation was made from: its last one that ended before the translation. */
+function producedBefore(list, at) {
+  let found;
+  for (const c of list) {
+    if (c.end > at) break;
+    found = c;
+  }
+  return found ?? list[0];
 }
 const rhoSmall = [];
 const rhoAll = [];
 for (const t of translations) {
-  const producer = producerOf.get(t.kind + ':' + t.key);
-  if (producer === undefined) continue;
+  const list = producerOf.get(`${t.producer}:${t.kind}:${t.key}`);
+  if (list === undefined) continue;
+  const producer = producedBefore(list, t.start);
   const compute = producer.end - producer.start;
   if (compute <= 0) continue;
   const rho = (t.unpackMs + t.buildMs) / compute;
