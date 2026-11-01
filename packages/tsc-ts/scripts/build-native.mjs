@@ -17,12 +17,16 @@
 //                            the code again after inlining
 //   --record-profile         writes the number of functions the profile describes beside it (tsc-ts.json or
 //                            tsc-ts.cs.json)
+//   --with-share-price       builds with the price log compiled in, from a copy of src/ that
+//                            scripts/share-price-sources.patch edits (share-price-sources.mjs); a build without it
+//                            compiles the sources as they are, which carry none of the log
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { judgeProfileMatch, parseProfileReport } from './profile-match.mjs';
+import { writeSharePriceSources } from './share-price-sources.mjs';
 import {
   SINGLE_PHASE_PROFILE,
   TWO_PHASE_PROFILE,
@@ -40,11 +44,12 @@ const { values, tokens } = parseArgs({
     'profile-generate': { type: 'string' },
     'profile-use': { type: 'string' },
     'record-profile': { type: 'boolean', default: false },
+    'with-share-price': { type: 'boolean', default: false },
   },
   strict: false,
   tokens: true,
 });
-const ours = new Set(['dev', 'output', 'profile-generate', 'profile-use', 'record-profile']);
+const ours = new Set(['dev', 'output', 'profile-generate', 'profile-use', 'record-profile', 'with-share-price']);
 // The arguments for scriptc, in their order: every option this script does not handle, with its value.
 const passed = [];
 for (const token of tokens) {
@@ -55,6 +60,11 @@ for (const token of tokens) {
     else passed.push(token.rawName, token.value);
   }
 }
+// A price build writes dist/tsc-price unless --output names a file, so it does not replace the release binary.
+const output =
+  values['with-share-price'] && !tokens.some((token) => token.kind === 'option' && token.name === 'output')
+    ? 'dist/tsc-price'
+    : values.output;
 
 // SCRIPTC selects another scriptc executable than the installed one.
 const require = createRequire(join(root, 'package.json'));
@@ -67,7 +77,9 @@ const useProfile = !values.dev && generate === undefined;
 const profile = values['profile-use'] ?? (useProfile ? committedProfile() : undefined);
 const info = profile === undefined ? undefined : profileInfoPath(profile);
 const profileInfo = info === undefined ? undefined : join(root, info);
-const args = ['build', 'src/main.ts'];
+// --with-share-price builds the sources writeSharePriceSources writes: a copy of src/ with the price log added.
+const entry = values['with-share-price'] ? writeSharePriceSources(root, join(root, 'dist/share-price')) : 'src/main.ts';
+const args = ['build', entry];
 if (values.dev) args.push('--optimization=dev');
 else {
   args.push('--optimization=speed', '--detached-exit');
@@ -95,7 +107,7 @@ if (windows) {
   else run('clang', flags);
   args.push('--ffi', 'native/listen-posix.ffi.json');
 }
-args.push(...passed, '-o', values.output);
+args.push(...passed, '-o', output);
 if (!useProfile) run(scriptc, args);
 else {
   const { status, stderr } = await runCollectingStderr(scriptc, args);
@@ -107,7 +119,7 @@ else {
 // The checker's hot classes keep 32-bit number fields (scripts/check-int32-fields.mjs), in the IR scriptc keeps
 // beside the executable.
 if (!passed.includes('--no-keep-llvm'))
-  run(process.execPath, ['scripts/check-int32-fields.mjs', join(dirname(values.output), 'main.ll')]);
+  run(process.execPath, ['scripts/check-int32-fields.mjs', join(dirname(output), 'main.ll')]);
 
 // The committed profile for this scriptc: the two-phase one when scriptc accepts a second profile phase.
 function committedProfile() {
