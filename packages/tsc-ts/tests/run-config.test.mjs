@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compileSources, tempDir } from './temp.mjs';
 import { tscTs, tscTsMissing, typescriptLib } from './toolchain.mjs';
@@ -47,6 +47,7 @@ const { recordsAllowed } = await load('compiler/run-record-read.js');
 const { nextRecord } = await load('compiler/run-records.js');
 const { shareStatColumns, shareStatExport, shareStatSaved, shareStatTranslation, shareStatUnpack } =
   await load('compiler/shared-results.js');
+const { availableCpus, cgroupCpuQuota, cgroupMemoryLimit } = await load('compiler/cgroup.js');
 
 /** A `RunConfigOutput` collecting what the section writes. */
 function output() {
@@ -89,6 +90,71 @@ test('the default parse threads use every CPU but one, up to the checker cap', (
   assert.equal(defaultParseThreads(4), Math.max(1, Math.min(cpus - 1, Math.max(4, cap))));
   // More checkers than CPUs never gives more parse threads than there are CPUs but one.
   assert.equal(defaultParseThreads(64), Math.max(1, cpus - 1));
+});
+
+/** A root for the cgroup readers: the files `files` maps paths below it to their text. */
+function cgroupTree(files) {
+  const root = tempDir('tsc-ts-cgroup-');
+  for (const [path, text] of Object.entries(files)) {
+    const file = join(root, path);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${text}\n`);
+  }
+  return root;
+}
+
+test('the CPUs a run uses are lowered to its cgroup CPU quota', () => {
+  const cpus = availableParallelism();
+  // cgroup v2, a container limited to four CPUs on the machine's sixteen: the affinity reports every
+  // CPU, the quota four.
+  const four = cgroupTree({
+    'apps/web/cpu.max': '400000 100000',
+    'apps/cpu.max': 'max 100000',
+    'cpu.max': 'max 100000',
+  });
+  assert.equal(cgroupCpuQuota('0::/apps/web\n', four), 4);
+  assert.equal(availableCpus('0::/apps/web\n', four), Math.min(cpus, 4));
+
+  // The smallest quota of the process's cgroup and its ancestors counts.
+  const two = cgroupTree({ 'apps/web/cpu.max': '400000 100000', 'apps/cpu.max': '200000 100000' });
+  assert.equal(cgroupCpuQuota('0::/apps/web\n', two), 2);
+
+  // A quota below one CPU is one: a run cannot check with fewer than one thread.
+  const half = cgroupTree({ 'cpu.max': '50000 100000' });
+  assert.equal(cgroupCpuQuota('0::/\n', half), 1);
+
+  // No quota leaves every CPU this process reports, and no membership file leaves the same.
+  const unlimited = cgroupTree({ 'cpu.max': 'max 100000' });
+  assert.equal(cgroupCpuQuota('0::/\n', unlimited), 0);
+  assert.equal(availableCpus('0::/\n', unlimited), cpus);
+  assert.equal(cgroupCpuQuota('', unlimited), 0);
+  assert.equal(availableCpus('', unlimited), cpus);
+});
+
+test('a cgroup v1 CPU quota comes from the cpu controller mount', () => {
+  const tree = cgroupTree({
+    'cpu/docker/abc/cpu.cfs_quota_us': '250000',
+    'cpu/docker/abc/cpu.cfs_period_us': '100000',
+  });
+  assert.equal(cgroupCpuQuota('4:cpu,cpuacct:/docker/abc\n', tree), 2);
+  const none = cgroupTree({
+    'cpu/docker/abc/cpu.cfs_quota_us': '-1',
+    'cpu/docker/abc/cpu.cfs_period_us': '100000',
+  });
+  assert.equal(cgroupCpuQuota('4:cpu,cpuacct:/docker/abc\n', none), 0);
+});
+
+test('the memory limit is the smallest of the cgroup and its ancestors', () => {
+  const v2 = cgroupTree({
+    'apps/web/memory.max': 'max',
+    'apps/web/memory.high': '6000000000',
+    'apps/memory.max': '8000000000',
+  });
+  assert.equal(cgroupMemoryLimit('0::/apps/web\n', v2), 6000000000);
+  const v1 = cgroupTree({ 'memory/docker/abc/memory.limit_in_bytes': '4294967296' });
+  assert.equal(cgroupMemoryLimit('4:memory:/docker/abc\n', v1), 4294967296);
+  const unlimited = cgroupTree({ 'memory.max': 'max', 'memory.high': 'max' });
+  assert.equal(cgroupMemoryLimit('0::/\n', unlimited), 0);
 });
 
 test('preParseConfig takes the pins, and the defaults where there are none', () => {

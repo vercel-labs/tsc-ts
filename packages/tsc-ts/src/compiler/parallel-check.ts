@@ -50,8 +50,9 @@ import type { Program } from './program.js';
 import type { SourceFile } from './ast.js';
 import { lastSymbolIdValue } from './symbol.js';
 import { shareMergedGlobals } from './checker-symbols.js';
+import { availableCpus, cgroupMemoryLimit } from './cgroup.js';
 import { readFileSync } from 'node:fs';
-import { availableParallelism, totalmem } from 'node:os';
+import { totalmem } from 'node:os';
 import {
   forbiddenWords,
   isForbidden,
@@ -531,7 +532,7 @@ function defaultCheckers(program: Program | undefined): number {
   if (!sharesPublishedGraphs) return 1;
   if (program !== undefined && checksLittle(program)) return 1;
   if (checkersPolicy(process.env) === 'fixed') return tsgoCheckers;
-  const cpus = Math.min(availableParallelism(), maxAutoCheckers);
+  const cpus = Math.min(availableCpus(), maxAutoCheckers);
   return autoCheckers(cpus, program === undefined ? Number.MAX_SAFE_INTEGER : memoryCheckers(program));
 }
 
@@ -614,59 +615,6 @@ export function memoryLimit(): number {
   const cgroup = cgroupMemoryLimit();
   if (cgroup > 0 && cgroup < limit) limit = cgroup;
   return limit;
-}
-
-/**
- * The smallest memory limit of this process's cgroup and its ancestors (Linux), or 0 where there is
- * none or it is unknown: `memory.max` and `memory.high` under cgroup v2, `memory.limit_in_bytes`
- * under v1. `process.constrainedMemory()` does not always see these: libuv reads only the process's
- * own cgroup, and scriptc's runtime only the root of the cgroup mount, which is the process's own
- * cgroup only inside a cgroup namespace.
- */
-export function cgroupMemoryLimit(): number {
-  let membership: string;
-  try {
-    membership = readFileSync('/proc/self/cgroup', 'utf8');
-  } catch {
-    return 0;
-  }
-  let limit = 0;
-  const lower = (value: number): void => {
-    if (value > 0 && (limit === 0 || value < limit)) limit = value;
-  };
-  for (const line of membership.split('\n')) {
-    // "0::/path" (v2), "N:memory:/path" or "N:cpu,memory:/path" (v1).
-    const first = line.indexOf(':');
-    const second = line.indexOf(':', first + 1);
-    if (first < 0 || second < 0) continue;
-    const controllers = line.substring(first + 1, second);
-    const path = line.substring(second + 1);
-    if (controllers === '') {
-      for (let dir = path; ; dir = dir.substring(0, dir.lastIndexOf('/'))) {
-        const base = '/sys/fs/cgroup' + (dir === '/' ? '' : dir);
-        lower(cgroupLimitValue(base + '/memory.max'));
-        lower(cgroupLimitValue(base + '/memory.high'));
-        if (dir === '/' || dir === '' || dir.lastIndexOf('/') < 0) break;
-      }
-    } else if (controllers.split(',').indexOf('memory') >= 0) {
-      lower(cgroupLimitValue('/sys/fs/cgroup/memory' + (path === '/' ? '' : path) + '/memory.limit_in_bytes'));
-    }
-  }
-  return limit;
-}
-
-/** A cgroup memory limit file's value in bytes, or 0 for `max`, an unreadable file or no number. */
-function cgroupLimitValue(file: string): number {
-  let text: string;
-  try {
-    text = readFileSync(file, 'utf8').trim();
-  } catch {
-    return 0;
-  }
-  if (text === '' || text === 'max') return 0;
-  const value = Number(text);
-  // cgroup v1 reports no limit as a page-aligned value near 2^63.
-  return Number.isFinite(value) && value > 0 && value < 2 ** 62 ? value : 0;
 }
 
 /** The program whose text lengths `textLengths` holds. */
@@ -2029,7 +1977,7 @@ function checkDecisionOf(config: RunConfig, signals: CheckSignals, program: Prog
     possible,
     fit,
     shape: learning ? recordShapeOf(program, signals) : undefined,
-    cpus: Math.min(availableParallelism(), maxAutoCheckers),
+    cpus: Math.min(availableCpus(), maxAutoCheckers),
     memoryBytes: memoryLimit(),
     now: Math.floor(Date.now() / 1000),
   };

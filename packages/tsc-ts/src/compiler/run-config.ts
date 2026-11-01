@@ -13,7 +13,7 @@
  * (`decideCheck`). `--extendedDiagnostics` prints the values, their sources and how to pin them after the
  * statistics table (`reportRunConfig`).
  */
-import { availableParallelism } from 'node:os';
+import { availableCpus } from './cgroup.js';
 import {
   shapeChanged,
   type RecordChoice,
@@ -157,7 +157,7 @@ export function pinsOf(env: Record<string, string | undefined>): Pins {
 
 /**
  * How the number of checkers is chosen without `--checkers`: `auto` (the default) uses every CPU this
- * process may run on (`os.availableParallelism()`, at most `maxAutoCheckers`), and at least tsgo's four;
+ * process may run on (`availableCpus()`, at most `maxAutoCheckers`), and at least tsgo's four;
  * fewer than the CPUs, but never fewer than four, when the estimated peak memory of more checkers would
  * not fit. `fixed` (`TSC_TS_CHECKERS=fixed`) uses tsgo's four.
  */
@@ -382,7 +382,7 @@ function percent(fraction: number): number {
  * 18-57 ms longer with 16 threads on 16 CPUs than with 15).
  */
 export function defaultParseThreads(checkers: number): number {
-  const cpus = availableParallelism();
+  const cpus = availableCpus();
   return Math.max(1, Math.min(cpus - 1, Math.max(checkers, Math.min(cpus, maxAutoCheckers))));
 }
 
@@ -514,7 +514,7 @@ export interface CheckDecision {
   readonly fit: CheckFit | undefined;
   /** The program's shape, where this run read a record: its samples describe this program only if it matches. */
   readonly shape?: RecordShape;
-  /** The CPUs automatic selection may use (`min(availableParallelism(), maxAutoCheckers)`). */
+  /** The CPUs automatic selection may use (`min(availableCpus(), maxAutoCheckers)`). */
   readonly cpus?: number;
   /** The memory limit, in bytes: a configuration whose recorded peak exceeds `memoryShare` of it is not chosen. */
   readonly memoryBytes?: number;
@@ -603,7 +603,7 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
         staticCheckers >= minSharingCheckers;
   const changed = decision.shape !== undefined && shapeChanged(record.shape, decision.shape);
   const samples = changed ? [] : usableSamples(record);
-  const cpus = Math.min(decision.cpus ?? availableParallelism(), maxAutoCheckers);
+  const cpus = Math.min(decision.cpus ?? availableCpus(), maxAutoCheckers);
   const parseDefault = defaultParseThreads(signals.count);
   const checkersPinned = config.checkersSource === Source.Pinned;
   const sharePinned = config.shareSource === Source.Pinned;
@@ -986,7 +986,7 @@ function exploreParseThreads(
   const checkMs = medianOf(checkTimes(samples, record.chosen.checkers, record.chosen.share));
   if (checkMs === undefined || checkMs < exploreCheckMs) return undefined;
   if (openSetting(record, samples)) return undefined;
-  for (const candidate of parseCandidates(parseDefault, availableParallelism())) {
+  for (const candidate of parseCandidates(parseDefault, availableCpus())) {
     const own = parseTimes(samples, candidate);
     if (own.length >= comparisonSamples || loses(own, parseTimes(samples, parseDefault))) continue;
     return candidate;
@@ -1000,7 +1000,7 @@ function exploreParseThreads(
  */
 function openSetting(record: RunRecord, samples: readonly RecordSample[]): boolean {
   const chosen = record.chosen;
-  const cpus = Math.min(availableParallelism(), maxAutoCheckers);
+  const cpus = Math.min(availableCpus(), maxAutoCheckers);
   const open = (checkers: number, share: boolean) =>
     openCandidate(samples, checkers, share, chosen.checkers, chosen.share);
   if (recordSharingBand(record) && open(chosen.checkers, !chosen.share)) return true;

@@ -13,9 +13,10 @@
 import { sharesPublishedGraphs } from '@scriptc/threads';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
-import { availableParallelism, loadavg, tmpdir } from 'node:os';
+import { loadavg, tmpdir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import { memoryLimit } from '../compiler/parallel-check.js';
+import { availableCpus } from '../compiler/cgroup.js';
 import {
   displayPath,
   recordsDirectory,
@@ -273,7 +274,7 @@ function usage(): string {
 
 /** Measures the project and prints the result. */
 function measure(options: DoctorOptions, work: Work): number {
-  const cpus = Math.max(1, availableParallelism());
+  const cpus = Math.max(1, availableCpus());
   const memoryGiB = memoryLimit() / 1073741824;
   // The machine's load before the session's first run: doctor's runs are its own work, spread over every
   // configuration, so what the comparison has to know is whether other work competed with the session,

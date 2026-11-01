@@ -55,6 +55,7 @@ import {
   SystemFileSystem,
 } from './tsc-cli.js';
 import { reportRunConfig, Source, type CheckSignals, type RunConfig, type RecordsReport } from './run-config.js';
+import { availableCpus } from './cgroup.js';
 import { doctorReportPath, setDoctorCompile, type DoctorCompile, type DoctorSignals } from './doctor-report.js';
 import {
   displayPath,
@@ -68,7 +69,7 @@ import {
 } from './run-records.js';
 import { recordOptionsOf } from './run-record-read.js';
 import { version } from './help.js';
-import { availableParallelism, loadavg } from 'node:os';
+import { loadavg } from 'node:os';
 
 type CompileWork = Extract<CommandLineResult, { kind: 'compile' }>;
 
@@ -691,7 +692,7 @@ function recordKeyOf(program: CompilerProgram): string {
     configFile: program.options.configFilePath,
     rootNames: program.program.commandLine.fileNames,
     options: recordOptionsOf(program.options),
-    cpus: Math.max(1, availableParallelism()),
+    cpus: Math.max(1, availableCpus()),
     memoryBytes: memoryLimit(),
   });
 }
@@ -759,7 +760,7 @@ function recordShapeOf(program: CompilerProgram, config: RunConfig | undefined):
 function recordSampleOf(sys: System, program: CompilerProgram, config: RunConfig): Omit<RecordSample, 'run'> {
   const times = program.times;
   const usage = process.cpuUsage();
-  const cpus = Math.max(1, availableParallelism());
+  const cpus = Math.max(1, availableCpus());
   return {
     at: Math.floor(Date.now() / 1000),
     role: config.role,
