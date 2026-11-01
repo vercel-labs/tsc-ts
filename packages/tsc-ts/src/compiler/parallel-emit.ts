@@ -15,12 +15,12 @@
  * thread's checker finds every diagnostic but those of declaration emit.
  */
 import type { Worker } from 'node:worker_threads';
-import { availableParallelism } from 'node:os';
 import { publish } from '@scriptc/threads';
 import { lastNodeIdValue, type SourceFile } from './ast.js';
 import { JavaScriptEmitter, type OutputWriter } from './compile-program.js';
 import type { Diagnostic, DiagnosticFile } from './diagnostics.js';
 import { EmitOnly, EmitResult, sourceFileMayBeEmitted } from './emitter.js';
+import { availableCpus } from './cgroup.js';
 import {
   CheckerResult,
   packResult,
@@ -78,7 +78,7 @@ export function emitThreads(
   emitKinds: readonly number[] | undefined = undefined,
 ): number {
   if (parallelEmit.spawn === undefined || singleThreaded === true) return 0;
-  const cpus = availableParallelism();
+  const cpus = availableCpus();
   if (cpus < 2) return 0;
   const files = program.getSourceFiles();
   let text = 0;
@@ -220,7 +220,7 @@ const maxDeclarationThreadCheckers = 8;
  * from 1 to 8 checkers, about even at 12, and 32-38% slower at 16. It also needs a CPU of its own.
  */
 export function declarationThreadPays(checkers: number): boolean {
-  return checkers <= maxDeclarationThreadCheckers && checkers < availableParallelism();
+  return checkers <= maxDeclarationThreadCheckers && checkers < availableCpus();
 }
 
 /**

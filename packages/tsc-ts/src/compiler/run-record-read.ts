@@ -7,10 +7,10 @@
  * wrote, and it needs the root files only where no config file names the project. Best effort throughout:
  * a record that cannot be read is absent, and a run without a cache directory reads nothing.
  */
-import { availableParallelism } from 'node:os';
 import { version } from './help.js';
 import type { CompilerOptions } from './options.js';
 import { memoryLimit } from './parallel-check.js';
+import { availableCpus } from './cgroup.js';
 import { learns, pinsOf } from './run-config.js';
 import {
   readRecord,
@@ -62,7 +62,7 @@ export function openRecord(
     configFile: project.configFile,
     rootNames: project.rootNames,
     options: recordOptionsOf(project.options),
-    cpus: Math.max(1, availableParallelism()),
+    cpus: Math.max(1, availableCpus()),
     memoryBytes: memoryLimit(),
   });
   const file = recordFile(directory, key);
