@@ -167,6 +167,28 @@ test('an unreadable or malformed record is replaced, not merged', () => {
   }
 });
 
+test('a record keeps the configuration a fast revert rejected', () => {
+  const dir = tempDir('tsc-ts-run-records-');
+  const file = recordFile(dir, 'abc');
+  const rejection = { checkers: 8, share: true, run: 1 };
+  writeRecord(dir, 'abc', sample(), shape(), chosen(), rejection);
+  assert.deepEqual(readRecord(file).rejected, rejection);
+  // A later run that rejects nothing keeps it, and one that rejects another configuration replaces it.
+  writeRecord(dir, 'abc', sample({ at: now + 1 }), shape(), chosen());
+  assert.deepEqual(readRecord(file).rejected, rejection);
+  const next = { checkers: 16, share: false, run: 2 };
+  writeRecord(dir, 'abc', sample({ at: now + 2 }), shape(), chosen(), next);
+  assert.deepEqual(readRecord(file).rejected, next);
+  // A project that changed past the shape limits starts over, the rejection with the samples.
+  writeRecord(dir, 'abc', sample({ at: now + 3 }), shape({ files: 200 }), chosen());
+  const changed = readRecord(file);
+  assert.equal(changed.rejected, undefined);
+  assert.equal(changed.samples.length, 1);
+  // A rejection that is not one this build writes is ignored, like a malformed sample.
+  writeFileSync(file, JSON.stringify({ ...changed, rejected: { checkers: 'x' } }));
+  assert.equal(readRecord(file).rejected, undefined);
+});
+
 test('a shape change discards the samples but keeps the run count', () => {
   const dir = tempDir('tsc-ts-run-records-');
   const file = recordFile(dir, 'abc');

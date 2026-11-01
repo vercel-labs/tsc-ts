@@ -671,7 +671,14 @@ export function saveRunRecord(
   if (directory === undefined) return { off: 'TSC_TS_CACHE=0' };
   const shape = config.shape ?? recordShapeOf(program, config);
   const key = config.recordKey ?? recordKeyOf(program);
-  const written = writeRecord(directory, key, recordSampleOf(sys, program, config), shape, chosenOf(config));
+  const written = writeRecord(
+    directory,
+    key,
+    recordSampleOf(sys, program, config),
+    shape,
+    chosenOf(config),
+    config.rejected,
+  );
   if (written.path !== undefined) return { path: displayPath(written.path) };
   return { unavailable: written.reason };
 }

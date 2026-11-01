@@ -1989,11 +1989,22 @@ export function mainThreadChecks(shared: boolean): boolean {
 /**
  * Whether the run reads the memory fit of sharing (`checkDecisionOf`): the static rule reads it where
  * the signals point at sharing, and a run the learning rules read may adopt sharing the static rule
- * leaves off, or explore it, when its samples show the configuration faster (DESIGN 4.3-4.4). A pin on
- * sharing and `TSC_TS_AUTO=0` choose sharing without any rule, and read nothing.
+ * leaves off, or explore it, when its samples show the configuration faster (DESIGN 4.3-4.4).
+ *
+ * A pin on sharing chooses sharing without a rule, but where it pins sharing on the learning rules still
+ * compare checker counts with it, and every count they may adopt reads how many fit memory with sharing's
+ * peak: a pinned count that no rule can change, and `TSC_TS_AUTO=0`, read nothing.
  */
 export function sharingFitNeeded(config: RunConfig, signals: CheckSignals): boolean {
-  if (config.shareSource === Source.Pinned || config.automaticity === Automaticity.Off) return false;
+  if (config.automaticity === Automaticity.Off) return false;
+  if (config.shareSource === Source.Pinned) {
+    return (
+      config.share &&
+      config.checkersSource !== Source.Pinned &&
+      learns(config.automaticity) &&
+      config.record !== undefined
+    );
+  }
   if (sharingCandidate(signals)) return true;
   return learns(config.automaticity) && config.record !== undefined;
 }

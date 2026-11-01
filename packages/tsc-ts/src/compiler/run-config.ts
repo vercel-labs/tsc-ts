@@ -14,7 +14,14 @@
  * statistics table (`reportRunConfig`).
  */
 import { availableParallelism } from 'node:os';
-import { shapeChanged, type RecordChoice, type RecordSample, type RecordShape, type RunRecord } from './run-records.js';
+import {
+  shapeChanged,
+  type RecordChoice,
+  type RecordRejection,
+  type RecordSample,
+  type RecordShape,
+  type RunRecord,
+} from './run-records.js';
 
 /** Where a setting's value came from. */
 export enum Source {
@@ -100,6 +107,11 @@ export class RunConfig {
    * and reverts to the static one; a run reading no record leaves it for the writer.
    */
   chosen: RecordChoice | undefined = undefined;
+  /**
+   * The configuration `fastRevert` rejected in this run, which the record keeps so a later run reads only
+   * the samples taken after the rejection as evidence for it (`run-records.ts`).
+   */
+  rejected: RecordRejection | undefined = undefined;
   /** The window a sharing run reads its checkers' counters in: a tenth of the recorded check, or 300 ms. */
   shareWindowMs = shareWindow;
   /**
@@ -619,15 +631,12 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
   let shareLearned = false;
   let checkersGain: number | undefined = undefined;
   let shareGain: number | undefined = undefined;
-  let parseChosen = parsePinned ? parseDefault : chosen.parseThreads;
+  let parseChosen = parseDefault;
   let adopted = false;
   let role: 'chosen' | 'control' | 'explore' = before;
-  // The configuration `fastRevert` rejected, which the adoption below does not take again this run: its
-  // older samples can still dominate a median, and the last three runs are what the revert rule reads.
-  let rejectedCheckers: number | undefined = undefined;
-  let rejectedShare = false;
-  const rejected = (checkers: number, share: boolean): boolean =>
-    checkers === rejectedCheckers && share === rejectedShare;
+  // The configuration `fastRevert` rejected, this run or an earlier one: its older samples can still
+  // dominate a median, and the last three runs are what the revert rule reads (`samplesFor`).
+  let rejection = record.rejected;
 
   if (!exploredBefore && !controlBefore) {
     // 1. An adopted configuration stays until the static choice beats it, and a bad one reverts at once.
@@ -652,10 +661,7 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
         if (checkersLearned) checkersGain = gain;
         if (shareLearned) shareGain = gain;
       }
-      if (fellBehind) {
-        rejectedCheckers = wantCheckers;
-        rejectedShare = wantShare;
-      }
+      if (fellBehind) rejection = { checkers: wantCheckers, share: wantShare, run: record.runs };
     }
     // 2. A control run re-measures the static choice, and changes no choice.
     const learnedBefore =
@@ -675,11 +681,9 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
       // 3. A configuration the record shows faster than the static one is adopted.
       if (!sharePinned && !shareLearned) {
         const alternative = !staticShare;
-        if (
-          !rejected(checkers, alternative) &&
-          fits(checkers, alternative, decision, cpus, samples, decision.memoryBytes)
-        ) {
-          const gain = beatsBy(checkTimes(samples, checkers, alternative), checkTimes(samples, checkers, staticShare));
+        if (fits(checkers, alternative, decision, cpus, samples, decision.memoryBytes)) {
+          const own = checkTimes(samplesFor(samples, rejection, checkers, alternative), checkers, alternative);
+          const gain = beatsBy(own, checkTimes(samples, checkers, staticShare));
           if (gain !== undefined) {
             share = alternative;
             shareLearned = true;
@@ -690,13 +694,10 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
       }
       if (!checkersPinned && !checkersLearned) {
         for (const candidate of countCandidates(staticCheckers, cpus)) {
-          if (
-            candidate === checkers ||
-            rejected(candidate, share) ||
-            !fits(candidate, share, decision, cpus, samples, decision.memoryBytes)
-          )
+          if (candidate === checkers || !fits(candidate, share, decision, cpus, samples, decision.memoryBytes))
             continue;
-          const gain = beatsBy(checkTimes(samples, candidate, share), checkTimes(samples, staticCheckers, staticShare));
+          const own = checkTimes(samplesFor(samples, rejection, candidate, share), candidate, share);
+          const gain = beatsBy(own, checkTimes(samples, staticCheckers, staticShare));
           if (gain !== undefined) {
             checkers = candidate;
             checkersLearned = true;
@@ -707,11 +708,12 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
         }
       }
       // 4. Parse threads are chosen for the next run here; this run parsed with the choice its record had.
+      // The recorded count is kept only while the comparison that adopted it still shows it faster: a
+      // record can name a count without one (a first run pinned it before any record existed), and the
+      // samples of one run are no comparison, so that count is not learned here either.
       if (!parsePinned) {
-        if (learned && chosen.parseThreads !== parseDefault) {
-          const own = parseTimes(samples, chosen.parseThreads);
-          const baseline = parseTimes(samples, parseDefault);
-          if (beatsBy(baseline, own) !== undefined) parseChosen = parseDefault;
+        if (learned && chosen.parseThreads !== parseDefault && parseWins(samples, chosen.parseThreads, parseDefault)) {
+          parseChosen = chosen.parseThreads;
         } else {
           for (const candidate of parseCandidates(parseDefault, cpus)) {
             if (candidate === parseChosen) continue;
@@ -795,6 +797,22 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
     since: 0,
   };
   config.chosen = role === 'chosen' ? chosenNow : chosen;
+  config.rejected = rejection;
+}
+
+/**
+ * The samples an adoption may read for a configuration: where the record rejected it, only the runs after
+ * the rejection. The older samples are the ones `fastRevert` found it had fallen behind on, and a median
+ * over them would adopt the configuration the record just gave up again (`RecordRejection`).
+ */
+function samplesFor(
+  samples: readonly RecordSample[],
+  rejection: RecordRejection | undefined,
+  checkers: number,
+  share: boolean,
+): readonly RecordSample[] {
+  if (rejection === undefined || rejection.checkers !== checkers || rejection.share !== share) return samples;
+  return samples.filter((sample) => sample.run > rejection.run);
 }
 
 /** Whether a configuration may be chosen or tried: the count automatic selection may use, and the memory it reaches. */
@@ -877,6 +895,11 @@ function countCandidates(count: number, cpus: number): number[] {
   for (const candidate of candidates)
     if (candidate !== count && !distinct.includes(candidate)) distinct.push(candidate);
   return distinct;
+}
+
+/** Whether `threads` parsed faster than `parseDefault` by the margin over `comparisonSamples` runs a side. */
+function parseWins(samples: readonly RecordSample[], threads: number, parseDefault: number): boolean {
+  return beatsBy(parseTimes(samples, threads), parseTimes(samples, parseDefault)) !== undefined;
 }
 
 /** The parse-thread counts automatic selection may try: half the default (DESIGN 4.4). */

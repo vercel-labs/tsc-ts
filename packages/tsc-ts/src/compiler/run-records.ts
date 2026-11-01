@@ -99,6 +99,17 @@ export interface RecordChoice {
   since: number;
 }
 
+/**
+ * A configuration a run fast-reverted, and the run that did it: the samples taken before it no longer
+ * show the configuration faster, so an adoption reads only the runs after it (`fastRevert`).
+ */
+export interface RecordRejection {
+  checkers: number;
+  share: boolean;
+  /** The run that rejected it. */
+  run: number;
+}
+
 /** One record file. */
 export interface RunRecord {
   format: number;
@@ -108,6 +119,8 @@ export interface RunRecord {
   lastExplore: number;
   lastControl: number;
   chosen: RecordChoice;
+  /** The last configuration a fast revert rejected, where one did. */
+  rejected?: RecordRejection;
   samples: RecordSample[];
 }
 
@@ -267,6 +280,7 @@ function recordOf(parsed: unknown): RunRecord | undefined {
   if (r.format !== recordFormat || typeof r.runs !== 'number' || !isShape(r.shape) || !isChoice(r.chosen))
     return undefined;
   const samples = Array.isArray(r.samples) ? r.samples.filter(isSample) : [];
+  const rejected = isRejection(r.rejected) ? r.rejected : undefined;
   return {
     format: recordFormat,
     shape: r.shape,
@@ -274,6 +288,7 @@ function recordOf(parsed: unknown): RunRecord | undefined {
     lastExplore: typeof r.lastExplore === 'number' ? r.lastExplore : 0,
     lastControl: typeof r.lastControl === 'number' ? r.lastControl : 0,
     chosen: r.chosen,
+    rejected,
     samples,
   };
 }
@@ -302,6 +317,12 @@ function isChoice(value: unknown): value is RecordChoice {
     typeof c.source === 'string' &&
     isNumber(c.since)
   );
+}
+
+function isRejection(value: unknown): value is RecordRejection {
+  if (typeof value !== 'object' || value === null) return false;
+  const r = value as Partial<RecordRejection>;
+  return isNumber(r.checkers) && typeof r.share === 'boolean' && isNumber(r.run);
 }
 
 function isSample(value: unknown): value is RecordSample {
@@ -339,6 +360,7 @@ function dropOldSamples(record: RunRecord, now: number): RunRecord {
     lastExplore: record.lastExplore,
     lastControl: record.lastControl,
     chosen: record.chosen,
+    rejected: record.rejected,
     samples,
   };
 }
@@ -353,12 +375,17 @@ function dropOldSamples(record: RunRecord, now: number): RunRecord {
  * starts at this run, and one that is unchanged keeps its `since`. A run recorded with role `explore` or
  * `control` moves the schedule those roles keep (`lastExplore`, `lastControl`); so does adopting a learned
  * choice, so that its runs are re-measured one in `controlRuns` after it was adopted.
+ *
+ * `rejected` is the configuration this run's `fastRevert` discarded, which the record keeps past this run
+ * so the samples it rejected are not read as evidence for that configuration again; it survives later
+ * runs (a shape change starts over, like the samples).
  */
 export function nextRecord(
   previous: RunRecord | undefined,
   sample: Omit<RecordSample, 'run'>,
   shape: RecordShape,
   chosen: RecordChoice,
+  rejected: RecordRejection | undefined = undefined,
 ): RunRecord {
   const runs = (previous?.runs ?? 0) + 1;
   const changed = previous === undefined || shapeChanged(previous.shape, shape);
@@ -376,6 +403,7 @@ export function nextRecord(
     lastExplore: sample.role === 'explore' ? runs : (previous?.lastExplore ?? 0),
     lastControl: sample.role === 'control' || adopted ? runs : (previous?.lastControl ?? 0),
     chosen: changed || choiceChanged ? choiceOf(chosen, runs) : previous!.chosen,
+    rejected: changed ? rejected : (rejected ?? previous?.rejected),
     samples,
   };
 }
@@ -458,6 +486,7 @@ export function writeRecord(
   sample: Omit<RecordSample, 'run'>,
   shape: RecordShape,
   chosen: RecordChoice,
+  rejected: RecordRejection | undefined = undefined,
 ): RecordWrite {
   const file = recordFile(directory, key);
   try {
@@ -465,7 +494,7 @@ export function writeRecord(
   } catch (e) {
     return { reason: messageOf(e) };
   }
-  const record = nextRecord(readRecord(file, sample.at), sample, shape, chosen);
+  const record = nextRecord(readRecord(file, sample.at), sample, shape, chosen, rejected);
   const temporary = file + '.' + process.pid + '.tmp';
   try {
     writeFileSync(temporary, JSON.stringify(record) + '\n');

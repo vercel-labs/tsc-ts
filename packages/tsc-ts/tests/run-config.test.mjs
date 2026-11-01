@@ -44,6 +44,7 @@ const {
 } = await load('compiler/run-config.js');
 const { sharingFitNeeded, sharingNumbers, signalsNeeded, stopLevel } = await load('compiler/parallel-check.js');
 const { recordsAllowed } = await load('compiler/run-record-read.js');
+const { nextRecord } = await load('compiler/run-records.js');
 const { shareStatColumns, shareStatExport, shareStatSaved, shareStatTranslation, shareStatUnpack } =
   await load('compiler/shared-results.js');
 
@@ -421,6 +422,24 @@ function recordRun(record, signals = quietSignals(), decision = quietDecision(),
   return config;
 }
 
+/** The sample a run of `config` writes, as `nextRecord` takes it (the run number is added there). */
+function sampleOfRun(config, extra = {}) {
+  return {
+    at: now,
+    role: config.role,
+    checkers: config.checkers,
+    share: config.share,
+    parseThreads: config.parseThreads,
+    parseMs: 100,
+    checkMs: 100,
+    totalMs: 1000,
+    cpuMs: 900,
+    peakMB: 500,
+    load: 0.1,
+    ...extra,
+  };
+}
+
 test('a comparison needs the margin its own noise allows', () => {
   assert.equal(medianOf([]), undefined);
   assert.equal(medianOf([1, 2, 3]), 2);
@@ -641,6 +660,78 @@ test('a configuration fastRevert rejects is not adopted again from its older sam
   assert.equal(config.checkers, 16);
   assert.equal(config.checkersSource, Source.Default);
   assert.equal(config.chosen.checkers, 16);
+});
+
+test('a fast revert is kept in the record, so the next run does not re-adopt what it gave up', () => {
+  const learned = recordChoice({ checkers: 12, source: 'learned', since: 1 });
+  const samples = samplesOf([
+    ...Array.from({ length: 6 }, () => ({ checkers: 12, checkMs: 60 })),
+    ...Array.from({ length: 3 }, () => ({ checkers: 12, checkMs: 200 })),
+    ...Array.from({ length: 3 }, () => ({ checkers: 16, role: 'control', checkMs: 100 })),
+  ]);
+  const record = recordOf(samples, { chosen: learned });
+  const reverted = recordRun(record);
+  assert.equal(reverted.checkers, 16);
+  assert.deepEqual(reverted.rejected, { checkers: 12, share: false, run: record.runs });
+  // The run writes its record, and the next run reads it: the count the revert gave up is not adopted
+  // again from the six samples it won on back when it was faster.
+  const written = nextRecord(record, sampleOfRun(reverted), recordShape(), reverted.chosen, reverted.rejected);
+  assert.deepEqual(written.rejected, { checkers: 12, share: false, run: record.runs });
+  const next = recordRun(written);
+  assert.equal(next.checkers, 16);
+  assert.equal(next.checkersSource, Source.Default);
+  // Without the rejection, the same samples adopt it again: that is what the record keeps it for.
+  const forgetful = recordRun(recordOf(written.samples, { chosen: reverted.chosen }));
+  assert.equal(forgetful.checkers, 12);
+});
+
+test('a pinned sharing on learns the checker count its samples show faster', () => {
+  // TSC_TS_SHARE=1 pins sharing on; the samples show twelve checkers faster than sixteen with it.
+  const samples = samplesOf([
+    ...Array.from({ length: 3 }, () => ({ checkers: 16, share: true, checkMs: 100 })),
+    ...Array.from({ length: 3 }, () => ({ checkers: 12, share: true, checkMs: 60 })),
+  ]);
+  const record = recordOf(samples);
+  const pinned = preParseConfig({}, 16, { TSC_TS_SHARE: '1' }, record);
+  assert.equal(pinned.share, true);
+  assert.equal(pinned.shareSource, Source.Pinned);
+  // The count the run may adopt with that sharing reads how many checkers fit memory with it.
+  assert.equal(sharingFitNeeded(pinned, quietSignals()), true);
+  decideCheck(pinned, quietSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(pinned.share, true);
+  assert.equal(pinned.checkers, 12);
+  assert.equal(pinned.checkersSource, Source.Learned);
+  // A pinned count no rule may change, and a sharing pinned off, read no fit.
+  const both = preParseConfig({ checkers: 16 }, 16, { TSC_TS_SHARE: '1' }, record);
+  assert.equal(sharingFitNeeded(both, quietSignals()), false);
+  const off = preParseConfig({}, 16, { TSC_TS_SHARE: '0' }, record);
+  assert.equal(sharingFitNeeded(off, quietSignals()), false);
+});
+
+test('a count a pinned first run stored is not learned when the pin is removed', () => {
+  const parseDefault = defaultParseThreads(16);
+  const pinned = Math.max(1, Math.ceil(parseDefault / 3));
+  if (pinned >= parseDefault) return;
+  // The first run has no record to read, so it writes the parse threads its pin made it use, and the
+  // samples of that one run hold that count alone: no comparison makes it learned.
+  const first = preParseConfig({}, 16, { TSC_TS_PARSE_THREADS: String(pinned) });
+  assert.equal(first.parseThreads, pinned);
+  decideCheck(first, quietSignals(), quietDecision());
+  const written = nextRecord(undefined, sampleOfRun(first), recordShape(), {
+    checkers: first.checkers,
+    share: first.share,
+    parseThreads: first.parseThreads,
+    source: 'pinned',
+    since: 0,
+  });
+  assert.equal(written.chosen.parseThreads, pinned);
+  // With the pin gone, the run parses with the default, and the record it keeps says so.
+  const second = preParseConfig({}, 16, {}, written);
+  assert.equal(second.parseThreads, parseDefault);
+  assert.equal(second.parseSource, Source.Default);
+  const after = recordRun(written);
+  assert.equal(after.chosen.parseThreads, parseDefault);
+  assert.equal(after.chosen.source, 'default');
 });
 
 test('one run in 16 re-measures the static choice, as does the first after two weeks', () => {
