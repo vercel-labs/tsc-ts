@@ -138,7 +138,7 @@ import type { GrammarChecker } from './checker-grammar.js';
 import type { ResolvedModule } from './module-resolution-types.js';
 import type { ModuleSpecifierHost } from './module-specifiers.js';
 import type { PropertyListIndex } from './checker-members.js';
-import { shareThreads, startThreadSharing, type ThreadSharing } from './shared-results.js';
+import { startThreadSharing, type ThreadSharing } from './shared-results.js';
 
 /** What the checker needs from a program. */
 export abstract class CheckerHost {
@@ -1056,7 +1056,9 @@ export class Checker implements TypeChecking {
     mergeAmbientModulesAndAugmentations(this);
     this.modulesMerged = true;
     this.mergeDiagnostics.push(this.diagnostics.takeLog(), this.suggestionDiagnostics.takeLog());
-    if (shareThreads) startThreadSharing(this);
+    // Returns unless this thread was given sharing data (`ThreadSharingData` in its worker data): the
+    // main thread, and every thread of a run that didn't share.
+    startThreadSharing(this);
     if (this.threadSharing !== undefined) {
       this.distributedConditionals = new Map<Type, DistributedConditional>();
       this.distributedByKey = new Map<string, Type>();

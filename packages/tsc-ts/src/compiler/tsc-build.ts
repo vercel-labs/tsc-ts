@@ -67,7 +67,8 @@ import {
   SystemTimeStamps,
 } from './tsc-compile.js';
 import { sharesPublishedGraphs } from '@scriptc/threads';
-import { checkerThreads, parseThreads, shareWithCheckers, startParallelCheck } from './parallel-check.js';
+import { checkerThreads, shareWithCheckers, startParallelCheck } from './parallel-check.js';
+import { preParseConfig, reportRunConfig, type RunConfig } from './run-config.js';
 import { emitThreads } from './parallel-emit.js';
 import { LoadKind, ParseSession, clearPreparedFiles, parallelParse, reportPreparedFiles } from './parallel-parse.js';
 import { assignSymbolIdsAtCreation } from './symbol.js';
@@ -182,6 +183,8 @@ class BuildTask {
   buildKind = BuildKind.None;
   filesToDelete: string[] = [];
   configTime = 0;
+  /** The project's run configuration (run-config.ts), one per project of the build. */
+  run: RunConfig | undefined = undefined;
 
   constructor(readonly config: string) {}
 }
@@ -726,6 +729,8 @@ export class Orchestrator {
     const host = new BuildCompilerHost(sys, this.fs, this.locale);
     const configOptions = config.options;
     const checkers = threads ? checkerThreads(configOptions.checkers, configOptions.singleThreaded) : 1;
+    // One configuration per project: its parse threads, and the pins of its checker count and sharing.
+    const run = (task.run = preParseConfig(configOptions, checkers));
     if (threads && configOptions.singleThreaded !== true && parallelParse.spawn !== undefined) {
       // Threads parse and bind the program's files ahead of it (parallel-parse.ts), as for plain
       // compiles. Here also when the program is checked on this thread, with one checker or after a
@@ -735,7 +740,7 @@ export class Orchestrator {
       // and parse threads don't load them again.
       const libraryDirectory = getNormalizedAbsolutePath(sys.defaultLibraryPath, sys.currentDirectory);
       const session = new ParseSession(
-        parseThreads(checkers),
+        run.parseThreads,
         configOptions,
         sys.currentDirectory,
         task.config,
@@ -783,6 +788,9 @@ export class Orchestrator {
     times.bindTime = performance.now() - bindStart;
     const options = program.options;
     const count = mayUseThreads ? checkerThreads(options.checkers, options.singleThreaded, program) : 1;
+    // The run's configuration reports the count that checks: a checker thread run decides again once
+    // the plan is made (`startParallelCheck`, run-config.ts).
+    if (task.run !== undefined) task.run.checkers = count;
     if (count > 1 && oldSnapshot !== undefined) {
       if (isIncremental(options)) return this.recheckOnThreads(task, checked, times, oldSnapshot, count, then);
       // Build info of a project that is no longer incremental has no pending emit to give the threads,
@@ -794,10 +802,20 @@ export class Orchestrator {
     if (count > 1) {
       // Checker threads also emit the files they check; the incremental program records their
       // declaration signatures on this thread.
-      startParallelCheck(checked, count, (checkTime) => {
-        this.emitAndReport(task, checked, times, oldSnapshot, checkTime);
-        then();
-      });
+      startParallelCheck(
+        checked,
+        count,
+        (checkTime) => {
+          this.emitAndReport(task, checked, times, oldSnapshot, checkTime);
+          then();
+        },
+        true,
+        undefined,
+        true,
+        undefined,
+        undefined,
+        task.run,
+      );
       return true;
     }
     if (mayUseThreads && this.emitsOnThreads(checked, oldSnapshot))
@@ -899,6 +917,9 @@ export class Orchestrator {
       true,
       incrementalProgram.emitKindsOnCheckers(files),
       incrementalProgram.checksOnCheckers,
+      undefined,
+      undefined,
+      task.run,
     );
     return true;
   }
@@ -949,6 +970,7 @@ export class Orchestrator {
       times.totalTime = sys.sinceStart();
       const statistics = statisticsOf(incrementalProgram);
       statistics.report(sys);
+      if (options.extendedDiagnostics === true && task.run !== undefined) reportRunConfig(sys, task.run);
       task.statistics = statistics;
     }
     const status = task.status;

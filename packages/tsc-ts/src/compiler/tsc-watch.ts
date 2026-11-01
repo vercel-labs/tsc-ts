@@ -43,7 +43,8 @@ import {
 } from './tsc-cli.js';
 import { isIncremental } from './options.js';
 import { ParseSession, clearPreparedFiles, parallelParse, takePreparedFile } from './parallel-parse.js';
-import { checkerThreads, parseThreads, shareWithCheckers, startParallelCheck } from './parallel-check.js';
+import { checkerThreads, shareWithCheckers, startParallelCheck } from './parallel-check.js';
+import { preParseConfig, type RunConfig } from './run-config.js';
 import { assignSymbolIdsAtCreation, symbolIdsAtCreation } from './symbol.js';
 import { Orchestrator, StatusReporter, startWatchRebuild } from './tsc-build.js';
 import { mark } from './timeline.js';
@@ -452,6 +453,8 @@ class Watcher {
   /** Whether a rebuild is running (`poll`), and whether a check came during it. */
   private building = false;
   private checkPending = false;
+  /** The first program's run configuration, which its rebuilds use too (run-config.ts). */
+  private run: RunConfig | undefined = undefined;
 
   constructor(
     private readonly sys: System,
@@ -516,8 +519,11 @@ class Watcher {
     const config = copyCommandLine(this.config);
     const options = config.options;
     const incremental = isIncremental(options);
+    // A watch chooses its configuration once, for its first program: parse threads are fixed before
+    // the program is parsed, and its rebuilds check what changed as that program did.
+    const run = (this.run = preParseConfig(options, checkerThreads(options.checkers, options.singleThreaded)));
     const session = new ParseSession(
-      parseThreads(checkerThreads(options.checkers, options.singleThreaded)),
+      run.parseThreads,
       options,
       sys.currentDirectory,
       config.configName,
@@ -585,7 +591,8 @@ class Watcher {
         this.finishBuild(checked);
         finish();
       };
-      if (this.snapshot === undefined && threads > 1) startParallelCheck(checked, threads, report);
+      if (this.snapshot === undefined && threads > 1)
+        startParallelCheck(checked, threads, report, true, undefined, true, undefined, undefined, run);
       else report();
     });
     if (incremental && sys.fileExists(config.buildInfoFileName())) session.queueAhead();
@@ -802,7 +809,17 @@ class Watcher {
           this.report(incremental, changedFiles);
           done();
         };
-        startParallelCheck(checked, threads, finish, true, incremental.emitKindsOnCheckers(files));
+        startParallelCheck(
+          checked,
+          threads,
+          finish,
+          true,
+          incremental.emitKindsOnCheckers(files),
+          true,
+          undefined,
+          undefined,
+          this.run,
+        );
         return;
       }
     }
