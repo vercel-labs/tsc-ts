@@ -262,6 +262,7 @@ function usage(): string {
     'Usage: tsc-ts doctor [-p <tsconfig>] [--runs N] [--budget SECONDS] [--emit] [--json] [--no-save]',
     '',
     'Measures the checker count, result sharing and parse threads of a project on this machine.',
+    'Experimental: the configurations it compares and what it recommends may change.',
     '  --runs N          measured runs per configuration (default 3)',
     '  --budget SECONDS  the measured runs may take (default 120; 2 rounds always run)',
     '  --emit            emit to a temporary directory instead of --noEmit',
