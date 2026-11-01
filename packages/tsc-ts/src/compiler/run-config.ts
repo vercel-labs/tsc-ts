@@ -60,6 +60,11 @@ export class RunConfig {
   readonly checkersReasons: string[] = [];
   readonly shareReasons: string[] = [];
   readonly parseReasons: string[] = [];
+  /** Whether this run may write a run record (`run-records.ts`), and why not where it may not. */
+  records = true;
+  recordsReason: string | undefined = undefined;
+  /** What the bound program showed about the cost of checking it (`parallel-check.ts`), where computed. */
+  signals: CheckSignals | undefined = undefined;
 }
 
 /** The environment's pins, parsed once per run: `TSC_TS_AUTO`, `TSC_TS_SHARE` and `TSC_TS_PARSE_THREADS`. */
@@ -187,6 +192,13 @@ export function preParseConfig(
     config.shareSource = Source.Pinned;
     config.sharePin = 'TSC_TS_SHARE';
   }
+  if (env.TSC_TS_CACHE === '0') {
+    config.records = false;
+    config.recordsReason = 'TSC_TS_CACHE=0';
+  } else if (pins.automaticity !== Automaticity.On) {
+    config.records = false;
+    config.recordsReason = 'TSC_TS_AUTO=' + (pins.automaticity === Automaticity.Off ? '0' : 'static');
+  }
   return config;
 }
 
@@ -242,12 +254,22 @@ export interface RunConfigOutput {
   write(text: string): void;
 }
 
+/** What the section's `Records:` line says (`run-records.ts`). */
+export interface RecordsReport {
+  /** The record's path, as the section prints it (`~` for the home directory). */
+  readonly path?: string;
+  /** Why this run wrote no record. */
+  readonly off?: string;
+  /** Why the record could not be written, where writing was attempted. */
+  readonly unavailable?: string;
+}
+
 /**
  * The `--extendedDiagnostics` section, printed after the statistics table: a blank line, `Suggestions:`,
  * and one line per setting with its value, where the value came from in parentheses, and how to pin it
  * where no pin chose it. Never printed for `--diagnostics` alone (`emitStatusAndReportStatistics`).
  */
-export function reportRunConfig(out: RunConfigOutput, config: RunConfig): void {
+export function reportRunConfig(out: RunConfigOutput, config: RunConfig, records?: RecordsReport): void {
   out.write(
     '\nSuggestions:\n' +
       suggestion(
@@ -273,8 +295,17 @@ export function reportRunConfig(out: RunConfigOutput, config: RunConfig): void {
         config.parsePin,
         `TSC_TS_PARSE_THREADS=${config.parseThreads}`,
         config.parseReasons,
-      ),
+      ) +
+      recordsLine(records),
   );
+}
+
+/** The `Records:` line: the record's path, why the run kept none, or why the write failed. */
+function recordsLine(records: RecordsReport | undefined): string {
+  if (records === undefined) return '';
+  if (records.path !== undefined) return `  Records: ${records.path}\n`;
+  if (records.unavailable !== undefined) return `  Records: unavailable (${records.unavailable})\n`;
+  return `  Records: off (${records.off ?? 'disabled'})\n`;
 }
 
 /** One line of the section: the setting, its value, its source, and the pin for it where none chose it. */

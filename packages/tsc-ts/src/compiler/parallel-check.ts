@@ -70,6 +70,7 @@ import {
   libraryBoundCount,
   maxAutoCheckers,
   sharePin,
+  Source,
   tsgoCheckers,
   type RunConfig,
 } from './run-config.js';
@@ -1913,17 +1914,24 @@ export function mainThreadChecks(shared: boolean): boolean {
  * — an automatic count above tsgo's four, with no `--checkers` — and left at zero elsewhere: a pinned
  * count needs neither, and the pass over every range's libraries costs a millisecond on a large program.
  */
-function checkSignals(checked: CheckedProgram, plan: CheckPlan, costs: CheckCosts, count: number): CheckSignals {
+function checkSignals(
+  checked: CheckedProgram,
+  plan: CheckPlan,
+  costs: CheckCosts,
+  count: number,
+  config: RunConfig | undefined = undefined,
+): CheckSignals {
   const ranges = plan.ranges.length >> 1;
   const signals = new CheckSignals(count, ranges);
   const program = checked.program;
-  if (
-    checkersPolicy(process.env) !== 'auto' ||
-    program.options.checkers !== undefined ||
-    count <= tsgoCheckers ||
-    ranges === 0
-  )
-    return signals;
+  // What a rule would read, or what the run's record writes (`config.records`), is computed; a pinned
+  // count with records off pays nothing.
+  const deciding =
+    config === undefined
+      ? checkersPolicy(process.env) === 'auto' && program.options.checkers === undefined
+      : config.checkersSource === Source.Default;
+  const wanted = (deciding && count > tsgoCheckers) || (config !== undefined && config.records);
+  if (!wanted || ranges === 0) return signals;
   const files = program.getSourceFiles();
   const length = textLengths(program);
   const isChecked: boolean[] = [];
@@ -1977,6 +1985,7 @@ function checkSignals(checked: CheckedProgram, plan: CheckPlan, costs: CheckCost
   signals.redundancy = (library - unionChars) / (library + own);
   signals.declarationShare = declarationFiles / files.length;
   signals.nodeModulesShare = nodeModulesFiles / files.length;
+  if (config !== undefined) config.signals = signals;
   if (process.env.TSC_TS_CHECKERS_TRACE !== undefined)
     process.stderr.write(
       `checkers: ranges reach ${Math.round(signals.library / 1000)}K library chars and check ${Math.round(signals.own / 1000)}K on average, ${Math.round(signals.redundancy * 100)}% of it reached twice: ${libraryBoundCount(count, signals.library, signals.own)} checkers\n`,
@@ -2052,7 +2061,8 @@ export function startParallelCheck(
   const orderStart = performance.now();
   const costs = costOrder(checked);
   let plan = planSchedule(checked, count, costs, checking);
-  const signals = checkSignals(checked, plan, costs, count);
+  const signals = checkSignals(checked, plan, costs, count, config);
+  if (config !== undefined) config.signals = signals;
   const fewer =
     config === undefined
       ? libraryBoundCount(signals.count, signals.library, signals.own)
