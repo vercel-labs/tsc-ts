@@ -94,7 +94,7 @@ test('the key covers the build, the project, the options and the machine', () =>
   assert.match(text, /\noptions noEmit=1 /);
 });
 
-test('a written record holds the sample and stays with the choice its samples describe', () => {
+test('a written record follows the choice each run made, and a changed choice starts at its run', () => {
   const dir = tempDir('tsc-ts-run-records-');
   const file = recordFile(dir, 'abc');
   const first = writeRecord(dir, 'abc', sample(), shape(), chosen());
@@ -113,9 +113,44 @@ test('a written record holds the sample and stays with the choice its samples de
   assert.equal(after.samples.length, 2);
   assert.equal(after.samples[1].run, 2);
   assert.equal(after.samples[1].totalMs, 40);
-  // The second run kept the first run's record: its samples describe that choice.
-  assert.equal(after.chosen.checkers, 4);
-  assert.equal(after.chosen.since, 1);
+  // The second run chose another count: the record describes that choice from this run.
+  assert.equal(after.chosen.checkers, 8);
+  assert.equal(after.chosen.since, 2);
+
+  // A run that chose the same configuration keeps the run that chose it.
+  writeRecord(dir, 'abc', sample({ at: now + 2 }), shape(), chosen({ checkers: 8 }));
+  const kept = readRecord(file);
+  assert.equal(kept.runs, 3);
+  assert.equal(kept.chosen.checkers, 8);
+  assert.equal(kept.chosen.since, 2);
+});
+
+test('an explore or control sample moves the schedule its role keeps', () => {
+  let record;
+  record = nextRecord(record, sample({ at: now }), shape(), chosen());
+  assert.equal(record.lastExplore, 0);
+  assert.equal(record.lastControl, 0);
+  record = nextRecord(record, sample({ at: now + 1, role: 'explore', checkers: 8 }), shape(), chosen());
+  assert.equal(record.lastExplore, 2);
+  assert.equal(record.lastControl, 0);
+  record = nextRecord(record, sample({ at: now + 2, role: 'control' }), shape(), chosen());
+  assert.equal(record.lastControl, 3);
+  assert.equal(record.lastExplore, 2);
+});
+
+test('adopting a learned choice starts its control schedule', () => {
+  const learned = (extra = {}) => chosen({ checkers: 8, source: 'learned', ...extra });
+  let record = nextRecord(undefined, sample({ at: now }), shape(), chosen());
+  assert.equal(record.lastControl, 0);
+  // The run that adopted the choice is when the next control is due from.
+  record = nextRecord(record, sample({ at: now + 1 }), shape(), learned());
+  assert.equal(record.lastControl, 2);
+  // A run that keeps it leaves the schedule alone.
+  record = nextRecord(record, sample({ at: now + 2 }), shape(), learned());
+  assert.equal(record.lastControl, 2);
+  // A new adoption starts it over.
+  record = nextRecord(record, sample({ at: now + 3 }), shape(), learned({ checkers: 12 }));
+  assert.equal(record.lastControl, 4);
 });
 
 test('an unreadable or malformed record is replaced, not merged', () => {

@@ -86,6 +86,7 @@ import {
   type CheckFit,
   type RunConfig,
 } from './run-config.js';
+import type { RecordShape } from './run-records.js';
 
 // The tests of the scheduler read these here, next to the plans they choose between.
 export { autoCheckers, libraryBoundCount };
@@ -113,9 +114,9 @@ function shareStopHook(): { readonly at: number; readonly level: number } | unde
 const shareStop = shareStopHook();
 
 /**
- * How long a sharing run runs before the main thread weighs what sharing saved against what it cost
- * (`sharingNumbers`). No record is read yet, so the window is fixed; the learned window will be the
- * larger of 200 ms and a tenth of the run's recorded check time.
+ * The window a run without a configuration uses before the main thread weighs what sharing saved against
+ * what it cost (`sharingNumbers`): 300 ms. A run with one uses the larger of 200 ms and a tenth of the
+ * check time its record measured (`RunConfig.shareWindowMs`, `shareWindowOf`).
  */
 const shareWindowMs = 300;
 
@@ -2001,7 +2002,38 @@ function checkDecisionOf(config: RunConfig, signals: CheckSignals, program: Prog
     sharingCandidate(signals)
       ? memoryFit(program)
       : undefined;
-  return { possible, fit };
+  // A run whose record the learning rules read also names the shape its samples describe, the CPUs a
+  // count may use, the memory a configuration may not exceed and the time a control sample ages from.
+  const learning = config.records || config.record !== undefined;
+  return {
+    possible,
+    fit,
+    shape: learning ? recordShapeOf(program, signals) : undefined,
+    cpus: Math.min(availableParallelism(), maxAutoCheckers),
+    memoryBytes: memoryLimit(),
+    now: Math.floor(Date.now() / 1000),
+  };
+}
+
+/** The program's shape for its record (`RecordShape`), with the shares the sharing rule reads as `F`. */
+function recordShapeOf(program: Program, signals: CheckSignals): RecordShape {
+  const files = program.getSourceFiles();
+  let chars = 0;
+  let declarationChars = 0;
+  for (const file of files) {
+    chars += file.end;
+    if (file.isDeclarationFile) declarationChars += file.end;
+  }
+  return {
+    files: files.length,
+    chars,
+    declarationChars,
+    checkChars: chars - declarationChars,
+    library: Math.round(signals.library),
+    own: Math.round(signals.own),
+    redundancy: signals.redundancy,
+    fileShare: Math.max(signals.declarationShare, signals.nodeModulesShare),
+  };
 }
 
 /** What the counters of `count` checkers say at the sharing window: milliseconds saved and spent. */
@@ -2367,7 +2399,7 @@ export function startParallelCheck(
     const control = new Int32Array(sharing[0]!.control);
     const stats = new Float64Array(sharing[0]!.stats);
     const stop = shareStop;
-    const at = stop === undefined ? shareWindowMs : stop.at;
+    const at = stop !== undefined ? stop.at : config !== undefined ? config.shareWindowMs : shareWindowMs;
     shareStopTimer = setTimeout(() => {
       const numbers = sharingNumbers(stats, count);
       if (stop !== undefined) Atomics.store(control, 0, stop.level);

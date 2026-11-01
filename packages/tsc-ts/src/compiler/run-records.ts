@@ -53,6 +53,12 @@ export interface RecordShape {
   own: number;
   /** The share of declarations two ranges reach (`CheckSignals.redundancy`). */
   redundancy: number;
+  /**
+   * The share of the program's files that are declarations or under `node_modules` (the larger of
+   * `CheckSignals.declarationShare` and `CheckSignals.nodeModulesShare`), which the sharing rule reads
+   * as `F`. Records written before this field lack it, and the parse threads' choice reads it as 0.
+   */
+  fileShare?: number;
 }
 
 /** What one run measured. */
@@ -170,6 +176,18 @@ export function recordsDirectory(
 /** The path of `key`'s record in `directory`. */
 export function recordFile(directory: string, key: string): string {
   return joinPath(directory, 'runs-v1', key + '.json');
+}
+
+/** The record-related environment, read by name (a scriptc build holds `process.env` as an index signature). */
+export function recordEnvironment(): RecordEnvironment {
+  return {
+    TSC_TS_CACHE: process.env.TSC_TS_CACHE,
+    TSC_TS_CACHE_DIR: process.env.TSC_TS_CACHE_DIR,
+    XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+  };
 }
 
 /** The key of a record: the xxh3-128 hash of what identifies the build, project, options and machine. */
@@ -328,8 +346,13 @@ function dropOldSamples(record: RunRecord, now: number): RunRecord {
 /**
  * The record `previous` becomes after `sample`: the run counted, the sample appended (the oldest dropped
  * past the cap), and, where the project's shape changed by more than the limits below, the samples
- * discarded and the current choice kept. `runs` is kept through a shape change, so an exploration
- * schedule continues.
+ * discarded. `runs` is kept through a shape change, so an exploration schedule continues.
+ *
+ * `chosen` is the configuration the run chose for the next one, and the record's choice follows it: a
+ * choice that differs from the one the samples describe (another count, sharing, parse threads or source)
+ * starts at this run, and one that is unchanged keeps its `since`. A run recorded with role `explore` or
+ * `control` moves the schedule those roles keep (`lastExplore`, `lastControl`); so does adopting a learned
+ * choice, so that its runs are re-measured one in `controlRuns` after it was adopted.
  */
 export function nextRecord(
   previous: RunRecord | undefined,
@@ -342,15 +365,29 @@ export function nextRecord(
   const samples: RecordSample[] = changed ? [] : (previous?.samples ?? []).map((s) => sampleOf(s, s.run));
   samples.push(sampleOf(sample, runs));
   if (samples.length > maxSamples) samples.splice(0, samples.length - maxSamples);
+  const choiceChanged = previous !== undefined && !sameChoice(previous.chosen, chosen);
+  const adopted =
+    chosen.source === 'learned' &&
+    (changed || previous === undefined || previous.chosen.source !== 'learned' || choiceChanged);
   return {
     format: recordFormat,
     shape,
     runs,
-    lastExplore: previous?.lastExplore ?? 0,
-    lastControl: previous?.lastControl ?? 0,
-    chosen: changed ? choiceOf(chosen, runs) : previous.chosen,
+    lastExplore: sample.role === 'explore' ? runs : (previous?.lastExplore ?? 0),
+    lastControl: sample.role === 'control' || adopted ? runs : (previous?.lastControl ?? 0),
+    chosen: changed || choiceChanged ? choiceOf(chosen, runs) : previous!.chosen,
     samples,
   };
+}
+
+/** Whether two choices choose the same configuration, whatever run chose each. */
+function sameChoice(previous: RecordChoice, chosen: RecordChoice): boolean {
+  return (
+    previous.checkers === chosen.checkers &&
+    previous.share === chosen.share &&
+    previous.parseThreads === chosen.parseThreads &&
+    previous.source === chosen.source
+  );
 }
 
 /** `sample` as a record keeps it, with the run number the record gives it. */

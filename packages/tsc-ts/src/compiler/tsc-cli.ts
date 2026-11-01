@@ -36,6 +36,7 @@ import { combinePaths, getDirectoryPath, normalizePath } from './path.js';
 import { checkerThreads } from './parallel-check.js';
 import { ParseSession, parallelParse, reportPreparedFiles } from './parallel-parse.js';
 import { preParseConfig, type RunConfig } from './run-config.js';
+import { openRecord } from './run-record-read.js';
 import { showConfig, type ShowConfigInput } from './show-config.js';
 import { assignSymbolIdsAtCreation } from './symbol.js';
 import { sharesPublishedGraphs } from '@scriptc/threads';
@@ -369,8 +370,28 @@ function executeCompile(sys: System, commandLine: ParsedCommandLine): CommandLin
   // The run's configuration, made once the config's options are known: its parse threads are needed
   // before the first file is parsed.
   let run: RunConfig | undefined = undefined;
-  const runConfigOf = (projectOptions: CompilerOptions): RunConfig =>
-    (run ??= preParseConfig(projectOptions, checkerThreads(projectOptions.checkers, projectOptions.singleThreaded)));
+  const runConfigOf = (projectOptions: CompilerOptions): RunConfig => {
+    if (run === undefined) {
+      const opened = openRecord({
+        configFile: projectOptions.configFilePath ?? (configFileName === '' ? undefined : configFileName),
+        rootNames: fileNames,
+        options: projectOptions,
+      });
+      const made = preParseConfig(
+        projectOptions,
+        checkerThreads(projectOptions.checkers, projectOptions.singleThreaded),
+        process.env,
+        opened?.record,
+      );
+      if (opened !== undefined) {
+        made.recordDirectory = opened.directory;
+        made.recordKey = opened.key;
+        made.recordFile = opened.file;
+      }
+      run = made;
+    }
+    return run;
+  };
   // Where threads parse and bind the program's files ahead of it (parallel-parse.ts), they start with
   // the libraries and the root files found so far while the config's `include` patterns are matched.
   let session: ParseSession | undefined = undefined;
