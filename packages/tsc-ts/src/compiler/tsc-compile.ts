@@ -109,6 +109,12 @@ export function compile(sys: System, work: CompileWork): ExitStatus {
   let compilerProgram: CompilerProgram;
   if (work.incremental) {
     const old = oldSnapshotOf(sys, work, times);
+    // An incremental recheck on old build info checks the files a change affects, not the program:
+    // a record's samples are full checks (`run-records.ts`).
+    if (old !== undefined && work.config !== undefined) {
+      work.config.records = false;
+      work.config.recordsReason = 'incremental recheck';
+    }
     const changesStart = performance.now();
     compilerProgram = new IncrementalProgram(checked, times, old, new SystemTimeStamps(sys));
     times.changesComputeTime = performance.now() - changesStart;
@@ -641,9 +647,10 @@ export function emitStatusAndReportStatistics(
 /**
  * Writes this run's sample to its record (`run-records.ts`) and says what the section's `Records:` line
  * reports. A run keeps no record where it may not write one (watch mode, a build's concurrent projects,
- * `--singleThreaded`, Node builds, `TSC_TS_AUTO=0` or `static`, `TSC_TS_CACHE=0`), where nothing was
- * checked, and, under `--build`, for an incremental recheck (`recheckInParallel`). The write is best
- * effort: a cache directory that cannot be written reports why and the run goes on.
+ * `--singleThreaded`, Node builds, `TSC_TS_AUTO=0` or `static`, `TSC_TS_CACHE=0`), where it checked
+ * nothing, and where it rechecked the files a change affects on old build info (`recheckInParallel`, a
+ * build's projects). The write is best effort: a cache directory that cannot be written reports why and
+ * the run goes on.
  */
 export function saveRunRecord(
   sys: System,
@@ -654,6 +661,8 @@ export function saveRunRecord(
   if (!config.records) return { off: config.recordsReason ?? 'not measured' };
   if (!sharesPublishedGraphs) return { off: 'Node.js builds' };
   if (program.options.singleThreaded === true) return { off: '--singleThreaded' };
+  // A run that stopped before checking (`--noCheck`, syntax errors) has nothing to sample.
+  if (!program.checkedTheProgram) return { off: 'nothing checked' };
   const directory = recordsDirectory(recordEnvironment());
   if (directory === undefined) return { off: 'TSC_TS_CACHE=0' };
   const shape = recordShapeOf(program, config);

@@ -739,6 +739,11 @@ export class Orchestrator {
       run.records = false;
       run.recordsReason = 'concurrent projects';
     }
+    // A watcher's builds measure a change, not the project: it keeps no record (run-records.ts).
+    if (this.watching) {
+      run.records = false;
+      run.recordsReason = 'watch mode';
+    }
     if (threads && configOptions.singleThreaded !== true && parallelParse.spawn !== undefined) {
       // Threads parse and bind the program's files ahead of it (parallel-parse.ts), as for plain
       // compiles. Here also when the program is checked on this thread, with one checker or after a
@@ -799,6 +804,12 @@ export class Orchestrator {
     // The run's configuration reports the count that checks: a checker thread run decides again once
     // the plan is made (`startParallelCheck`, run-config.ts).
     if (task.run !== undefined) task.run.checkers = count;
+    // A project rebuilt on its old build info checks the files a change affects, not the project: it
+    // keeps no sample, which records only keep full checks of (`run-records.ts`).
+    if (task.run !== undefined && oldSnapshot !== undefined && isIncremental(options)) {
+      task.run.records = false;
+      task.run.recordsReason = 'incremental recheck';
+    }
     if (count > 1 && oldSnapshot !== undefined) {
       if (isIncremental(options)) return this.recheckOnThreads(task, checked, times, oldSnapshot, count, then);
       // Build info of a project that is no longer incremental has no pending emit to give the threads,
@@ -974,11 +985,13 @@ export class Orchestrator {
     task.exitStatus = exitStatusOf(result);
     if (parallelCheckTime !== undefined) times.checkTime = parallelCheckTime;
     const options = program.options;
+    // A project's sample is kept whether or not the build reports statistics, and the section reports
+    // where it went (`run-records.ts`).
+    const records = saveRunRecord(sys, incrementalProgram, task.run);
     if (options.diagnostics === true || options.extendedDiagnostics === true) {
       times.totalTime = sys.sinceStart();
       const statistics = statisticsOf(incrementalProgram);
       statistics.report(sys);
-      const records = saveRunRecord(sys, incrementalProgram, task.run);
       if (options.extendedDiagnostics === true && task.run !== undefined) reportRunConfig(sys, task.run, records);
       task.statistics = statistics;
     }

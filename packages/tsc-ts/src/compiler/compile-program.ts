@@ -376,6 +376,12 @@ export abstract class CompilerProgram {
   }
 
   /**
+   * Whether this run checked the program, which `getDiagnosticsOfProgram` sets when it checks it. A run
+   * stopped before checking, by syntax errors or `--noCheck`, keeps no record (`run-records.ts`).
+   */
+  checkedTheProgram = false;
+
+  /**
    * The time spent in declaration emit while checking, to count as emit time rather than check time, since
    * the last call. Only an incremental program emits while checking, to compute signatures.
    */
@@ -530,6 +536,8 @@ export function getDiagnosticsOfProgram(
   // Those found by checking come after the semantic diagnostics, as with a single checker.
   for (const d of program.getGlobalDiagnostics(false)) result.push(d);
   if (result.length === configCount) {
+    // With `--noCheck` the checker skips every file: the run checked nothing to sample (`run-records.ts`).
+    if (options.noCheck !== true) program.checkedTheProgram = true;
     const checkStart = performance.now();
     const semantic = program.getSemanticDiagnostics();
     // Declaration emit that computed signatures while checking counts as emit time, as in TypeScript 7.1.

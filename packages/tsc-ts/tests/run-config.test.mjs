@@ -2,7 +2,7 @@
 // once the program is bound, and the `--extendedDiagnostics` section that prints them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { join } from 'node:path';
@@ -249,6 +249,53 @@ function project() {
   return dir;
 }
 
+/** A composite project of one file, for `tsc -b`. */
+function compositeProject() {
+  const dir = tempDir('tsc-ts-run-config-composite-');
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    '{"compilerOptions":{"composite":true,"outDir":"out","declaration":true,"types":[]},"files":["a.ts"]}\n',
+  );
+  writeFileSync(join(dir, 'a.ts'), 'export const a: number = 1;\n');
+  return dir;
+}
+
+/** The records written under `cache`. */
+function writtenRecords(cache) {
+  const dir = join(cache, 'runs-v1');
+  return existsSync(dir) ? readdirSync(dir).map((name) => JSON.parse(readFileSync(join(dir, name), 'utf8'))) : [];
+}
+
+/** Runs tsc-ts in `dir` until `pattern` matches its output, then stops it; resolves with the output. */
+function runUntil(dir, args, pattern, env = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(tscTs[0], [...tscTs.slice(1), ...args], {
+      cwd: dir,
+      env: { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: typescriptLib, NO_COLOR: '1', TSC_TS_CACHE: '0', ...env },
+    });
+    let output = '';
+    let done = false;
+    const finish = (error) => {
+      if (done) return;
+      done = true;
+      child.kill();
+      if (error === undefined) resolve(output);
+      else reject(error);
+    };
+    const deadline = Date.now() + 60_000;
+    const poll = () => {
+      if (done) return;
+      if (pattern.test(output)) finish();
+      else if (Date.now() > deadline) finish(new Error(`timed out; output so far:\n${output}`));
+      else setTimeout(poll, 10);
+    };
+    child.stdout.on('data', (chunk) => (output += chunk));
+    child.stderr.on('data', (chunk) => (output += chunk));
+    child.on('exit', () => finish());
+    poll();
+  });
+}
+
 test('--extendedDiagnostics prints the section, after the statistics', { skip }, () => {
   const dir = project();
   const { output, status } = run(dir, ['-p', '.', '--extendedDiagnostics', '--checkers', '2']);
@@ -315,6 +362,109 @@ test('--build prints one section per project it builds', { skip }, () => {
 
 // A native run writes its record; the Node build keeps none (`sharesPublishedGraphs`).
 const native = tscTs.length === 1;
+
+test(
+  '--build with one builder writes a record without --diagnostics',
+  { skip: !native && 'needs a native build (TSC_TS_BIN)' },
+  () => {
+    const dir = compositeProject();
+    const cache = tempDir('tsc-ts-run-config-cache-');
+    const { output, status } = run(dir, ['-b', '--builders', '1'], {
+      TSC_TS_CACHE: '1',
+      TSC_TS_CACHE_DIR: cache,
+    });
+    assert.equal(status, 0, output);
+    const records = writtenRecords(cache);
+    assert.equal(records.length, 1, `expected one record:\n${output}`);
+    assert.equal(records[0].runs, 1);
+    assert.equal(records[0].samples.length, 1);
+    assert.equal(records[0].samples[0].role, 'chosen');
+    assert.ok(records[0].samples[0].checkMs > 0, `no check time: ${JSON.stringify(records[0].samples[0])}`);
+  },
+);
+
+test(
+  '--build keeps no record of an incremental recheck',
+  { skip: !native && 'needs a native build (TSC_TS_BIN)' },
+  () => {
+    const dir = compositeProject();
+    const cache = tempDir('tsc-ts-run-config-cache-');
+    const env = { TSC_TS_CACHE: '1', TSC_TS_CACHE_DIR: cache };
+    assert.equal(run(dir, ['-b', '--builders', '1'], env).status, 0);
+    assert.equal(writtenRecords(cache).length, 1);
+    writeFileSync(join(dir, 'a.ts'), 'export const a: number = 2;\n');
+    const { output, status } = run(dir, ['-b', '--builders', '1', '--extendedDiagnostics'], env);
+    assert.equal(status, 0, output);
+    assert.match(output, /^ {2}Records: off \(incremental recheck\)$/m);
+    const records = writtenRecords(cache);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].runs, 1, `a recheck wrote a sample:\n${JSON.stringify(records[0])}`);
+  },
+);
+
+test('--build --watch keeps no record', { skip: !native && 'needs a native build (TSC_TS_BIN)' }, async () => {
+  const dir = compositeProject();
+  const cache = tempDir('tsc-ts-run-config-cache-');
+  const output = await runUntil(
+    dir,
+    ['-b', '--watch', '--builders', '1', '--extendedDiagnostics'],
+    /Watching for file changes/,
+    {
+      TSC_TS_CACHE: '1',
+      TSC_TS_CACHE_DIR: cache,
+    },
+  );
+  assert.match(output, /^ {2}Records: off \(watch mode\)$/m);
+  assert.deepEqual(writtenRecords(cache), []);
+});
+
+test(
+  'an incremental recheck with one checker keeps no record',
+  { skip: !native && 'needs a native build (TSC_TS_BIN)' },
+  () => {
+    const dir = project();
+    const cache = tempDir('tsc-ts-run-config-cache-');
+    const env = { TSC_TS_CACHE: '1', TSC_TS_CACHE_DIR: cache };
+    const first = run(dir, ['-p', '.', '--incremental', '--checkers', '1'], env);
+    assert.equal(first.status, 0, first.output);
+    assert.equal(writtenRecords(cache).length, 1);
+    writeFileSync(join(dir, 'a.ts'), 'export const a: number = 2;\n');
+    const { output, status } = run(dir, ['-p', '.', '--incremental', '--checkers', '1', '--extendedDiagnostics'], env);
+    assert.equal(status, 0, output);
+    assert.match(output, /^ {2}Records: off \(incremental recheck\)$/m);
+    assert.equal(writtenRecords(cache)[0].runs, 1, `a recheck wrote a sample:\n${output}`);
+  },
+);
+
+test(
+  '--noCheck keeps no record, and the section says nothing was checked',
+  { skip: !native && 'needs a native build (TSC_TS_BIN)' },
+  () => {
+    const dir = project();
+    const cache = tempDir('tsc-ts-run-config-cache-');
+    const { output, status } = run(dir, ['-p', '.', '--noCheck', '--extendedDiagnostics'], {
+      TSC_TS_CACHE: '1',
+      TSC_TS_CACHE_DIR: cache,
+    });
+    assert.equal(status, 0, output);
+    assert.match(output, /^ {2}Records: off \(nothing checked\)$/m);
+    assert.deepEqual(writtenRecords(cache), []);
+  },
+);
+
+test('a run stopped by syntax errors keeps no record', { skip: !native && 'needs a native build (TSC_TS_BIN)' }, () => {
+  const dir = project();
+  writeFileSync(join(dir, 'a.ts'), 'export const a: number = ;\n');
+  const cache = tempDir('tsc-ts-run-config-cache-');
+  const { output, status } = run(dir, ['-p', '.', '--checkers', '1', '--extendedDiagnostics'], {
+    TSC_TS_CACHE: '1',
+    TSC_TS_CACHE_DIR: cache,
+  });
+  assert.notEqual(status, 0);
+  assert.match(output, /error TS/);
+  assert.match(output, /^ {2}Records: off \(nothing checked\)$/m);
+  assert.deepEqual(writtenRecords(cache), []);
+});
 
 test(
   '--singleThreaded keeps no record, and the section says why',
