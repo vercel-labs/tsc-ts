@@ -39,7 +39,8 @@
 //
 // Exits with 1 if a run differs from the reference and from the unshared run at its count, if the one-checker run
 // differs from tsgo and no --baseline is given, or if a differing line is new against --baseline. TSC_TS_SHARE_*
-// variables in the environment are removed; sharing runs set TSC_TS_SHARE=1.
+// variables in the environment are removed; sharing runs set TSC_TS_SHARE=1 and the runs they are compared with
+// set TSC_TS_SHARE=0, since the selection shares a program it pays on at an unpinned count too.
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
@@ -104,7 +105,13 @@ function argumentsOf(project, checkers, outDir) {
 
 let emits = 0;
 
-/** A run with its combined output, and the files it wrote when emitting. `checkers` is undefined for tsgo. */
+/**
+ * A run with its combined output, and the files it wrote when emitting. `checkers` is undefined for tsgo.
+ * `share` is true for a run that pins sharing on (`TSC_TS_SHARE=1`), false for one that pins it off, and
+ * undefined for one that pins nothing (tsgo). Every run a shared one is compared with pins it off: the
+ * selection shares programs it pays on at an unpinned count, so a run that pinned nothing would not be
+ * the unshared run the comparison needs.
+ */
 function runAt(path, project, checkers, share, extra = {}) {
   let outDir;
   const env = {};
@@ -113,10 +120,15 @@ function runAt(path, project, checkers, share, extra = {}) {
     mkdirSync(outDir);
   }
   // The caller's other TSC_TS_SHARE_* variables apply to the shared runs, as they do in share-exactness.mjs.
-  if (share) {
+  if (share === true) {
     env.TSC_TS_SHARE = '1';
     Object.assign(env, extra);
-  } else for (const name of Object.keys(process.env)) if (name.startsWith('TSC_TS_SHARE')) env[name] = undefined;
+  } else {
+    for (const name of Object.keys(process.env)) if (name.startsWith('TSC_TS_SHARE')) env[name] = undefined;
+    // A run a shared one is compared with pins sharing off: the selection shares a program it pays on at an
+    // unpinned count too, so a run that pinned nothing would not be the unshared run the comparison needs.
+    if (share === false) env.TSC_TS_SHARE = '0';
+  }
   const result = runBinary({ binary: path, project, args: argumentsOf(project, checkers, outDir), env, work });
   if (!emit) return { ...result, signature: result.output };
   const tree = treeFiles(outDir);
@@ -126,7 +138,7 @@ function runAt(path, project, checkers, share, extra = {}) {
 
 const check = (project, n, share = false, extra = {}) => runAt(binary, project, n, share, extra);
 const shareOff = (project, n) => runAt(binary, project, n, false);
-const reference = (project) => runAt(tsgo, project, undefined, false);
+const reference = (project) => runAt(tsgo, project, undefined, undefined);
 
 const projects = [];
 if (projectsFile !== undefined) projects.push(...loadProjects(projectsFile));

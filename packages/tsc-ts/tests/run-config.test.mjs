@@ -31,6 +31,10 @@ const {
   sharingPeakShare,
   tsgoCheckers,
 } = await load('compiler/run-config.js');
+const { sharingNumbers, signalsNeeded, stopLevel } = await load('compiler/parallel-check.js');
+const { shareStatColumns, shareStatExport, shareStatSaved, shareStatTranslation, shareStatUnpack } = await load(
+  'compiler/shared-results.js',
+);
 
 /** A `RunConfigOutput` collecting what the section writes. */
 function output() {
@@ -261,6 +265,57 @@ test('the sharing rule needs 12 checkers, 40% of the files, library-bound ranges
   const staticRun = preParseConfig({}, 16, { TSC_TS_AUTO: 'static' });
   assert.equal(decideCheck(staticRun, t3web(), { possible: true, fit: { sharing: 16 } }), 12);
   assert.equal(staticRun.share, true);
+});
+
+test('TSC_TS_AUTO=0 still collects the signals the library-bound cut reads', () => {
+  // With selection off the sharing rule is not consulted, but the cut is: an unpinned count at more
+  // than tsgo's four is still cut to three quarters where the ranges mostly resolve large libraries,
+  // and the cut reads the ranges' characters. Dropping the signals with the rule would leave the cut
+  // with zeros and run every checker.
+  const off = preParseConfig({}, 16, { TSC_TS_AUTO: '0' });
+  assert.equal(off.checkersSource, Source.Default);
+  assert.equal(signalsNeeded(off, 16), true);
+  assert.equal(signalsNeeded(off, 4), false);
+  assert.equal(decideCheck(off, signals(16, 12_145_000, 889_000)), 12);
+  // A pinned count is never cut, and reads nothing.
+  const pinned = preParseConfig({ checkers: 16 }, 16, { TSC_TS_AUTO: '0' });
+  assert.equal(signalsNeeded(pinned, 16), false);
+  // With selection on, the sharing rule reads them at 12 checkers or more, where the count is not
+  // pinned either; the cut reads them above tsgo's four.
+  const on = preParseConfig({}, 16, {});
+  assert.equal(signalsNeeded(on, 16), true);
+  const countPinned = preParseConfig({ checkers: 12 }, 12, {});
+  assert.equal(countPinned.checkersSource, Source.Pinned);
+  assert.equal(countPinned.shareSource, Source.Default);
+  assert.equal(signalsNeeded(countPinned, 12), true);
+  assert.equal(signalsNeeded(preParseConfig({ checkers: 11 }, 11, {}), 11), false);
+  // A count and sharing both pinned: no rule reads them, and the pass over the ranges is not made.
+  const both = preParseConfig({ checkers: 16 }, 16, { TSC_TS_SHARE: '1' });
+  assert.equal(signalsNeeded(both, 16), false);
+});
+
+test('the sharing window counts unpacking inside translating, not on both sides', () => {
+  // Two checkers that each exported 50 ms and translated 50 ms of records, 75 ms of that unpacking
+  // them, and each saved 150 ms of computation by translating instead. Unpacking is timed inside the
+  // translation that reads the records (`ThreadSharing.translatePosted`), so what posting cost is 200
+  // ms over the two: 300 saved for 200 spent is past the 1.5-times threshold, and sharing keeps
+  // running. Counted on both sides it would be 350 spent, and the window would stop what pays.
+  const stats = new Float64Array(shareStatColumns * 2);
+  for (let i = 0; i < 2; i++) {
+    const row = i * shareStatColumns;
+    stats[row + shareStatExport] = 50;
+    stats[row + shareStatTranslation] = 50;
+    stats[row + shareStatUnpack] = 75;
+    stats[row + shareStatSaved] = 150;
+  }
+  const numbers = sharingNumbers(stats, 2);
+  assert.equal(numbers.saved, 300);
+  assert.equal(numbers.spent, 200);
+  assert.equal(stopLevel(numbers), 0);
+  // Without the saving, what posting costs is what stops it.
+  stats[shareStatSaved] = 0;
+  stats[shareStatColumns + shareStatSaved] = 0;
+  assert.equal(stopLevel(sharingNumbers(stats, 2)), 2);
 });
 
 test('CheckSignals.fileShare is the larger of the declaration and node_modules shares', () => {

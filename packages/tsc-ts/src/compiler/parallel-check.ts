@@ -65,7 +65,6 @@ import {
   shareStatSaved,
   shareStatTranslation,
   shareStatTranslated,
-  shareStatUnpack,
   stringLogSize,
   type ThreadSharingData,
 } from './shared-results.js';
@@ -2009,14 +2008,21 @@ function checkDecisionOf(config: RunConfig, signals: CheckSignals, program: Prog
 interface SharingNumbers {
   /** What taking posted results saved, over the checkers: the computations they did not repeat. */
   readonly saved: number;
-  /** What posting cost: exporting, translating and unpacking results. */
+  /**
+   * What posting cost: exporting and translating results. Translating a result reads its records,
+   * unpacking them inside `ThreadSharing.translatePosted`'s timed translation (`StoreReader.record`),
+   * so `translationMs` already holds `unpackMs`; counting both would charge the window for it twice.
+   */
   readonly spent: number;
   readonly posted: number;
   readonly translated: number;
 }
 
-/** The counters of `count` checkers' rows of `stats` (`ThreadSharing.writeStats`), summed. */
-function sharingNumbers(stats: Float64Array, count: number): SharingNumbers {
+/**
+ * The counters of `count` checkers' rows of `stats` (`ThreadSharing.writeStats`), summed. The tests read
+ * this, next to the window it feeds.
+ */
+export function sharingNumbers(stats: Float64Array, count: number): SharingNumbers {
   let saved = 0;
   let spent = 0;
   let posted = 0;
@@ -2024,7 +2030,7 @@ function sharingNumbers(stats: Float64Array, count: number): SharingNumbers {
   for (let i = 0; i < count; i++) {
     const row = i * shareStatColumns;
     saved += stats[row + shareStatSaved]!;
-    spent += stats[row + shareStatExport]! + stats[row + shareStatTranslation]! + stats[row + shareStatUnpack]!;
+    spent += stats[row + shareStatExport]! + stats[row + shareStatTranslation]!;
     posted += stats[row + shareStatPosted]!;
     translated += stats[row + shareStatTranslated]!;
   }
@@ -2036,18 +2042,37 @@ function sharingNumbers(stats: Float64Array, count: number): SharingNumbers {
  * when the posts go untaken (under 5% of them, and at least one), else 0. Stopping takes a minute at
  * worst, when the window's numbers are still too early to tell.
  */
-function stopLevel(numbers: SharingNumbers): number {
+export function stopLevel(numbers: SharingNumbers): number {
   if (numbers.saved < 1.5 * numbers.spent) return 2;
   if (numbers.posted > 0 && numbers.translated / numbers.posted < 0.05) return 1;
   return 0;
 }
 
 /**
+ * Whether the rules of a run of `config` at `count` checkers read the check signals (`checkSignals`).
+ * Two rules read them:
+ *
+ * - the library-bound cut (`decideCheck`), wherever the count is not pinned and is above tsgo's four.
+ *   This is the decision a run made before the automatic selection, and `TSC_TS_AUTO=0` keeps it: with
+ *   selection off the count is not cut for sharing either, but dropping the signals would leave the
+ *   cut nothing to read and start checkers the cut would not;
+ * - the sharing rule, at `minSharingCheckers` or more, where neither the count nor sharing is pinned
+ *   (the cut may leave the count sharing was measured at, so the signals are read before it).
+ *
+ * A pinned count and a pinned sharing read neither, and pay nothing for the pass over the ranges.
+ */
+export function signalsNeeded(config: RunConfig, count: number): boolean {
+  const cut = config.checkersSource === Source.Default && count > tsgoCheckers;
+  if (config.automaticity === Automaticity.Off) return cut;
+  return cut || (config.shareSource === Source.Default && count >= minSharingCheckers);
+}
+
+/**
  * What `plan`, made with `count` checkers, shows about the cost of checking (`CheckSignals`): the
  * libraries a range reaches and the files it checks, the share of that a second range reaches too, and
  * the shares of declaration and node_modules files of the program. Computed where a rule may read them
- * — an automatic count above tsgo's four, with no `--checkers` — and left at zero elsewhere: a pinned
- * count needs neither, and the pass over every range's libraries costs a millisecond on a large program.
+ * (`signalsNeeded`) and left at zero elsewhere: a pinned count needs none of them, and the pass over
+ * every range's libraries costs a millisecond on a large program.
  */
 function checkSignals(
   checked: CheckedProgram,
@@ -2061,13 +2086,10 @@ function checkSignals(
   const program = checked.program;
   // What a rule would read, what the run's record writes (`config.records`), or what a doctor child
   // reports (`config.measure`), is computed; a pinned count with records off and no report pays nothing.
-  // With selection off (`TSC_TS_AUTO=0`) no rule reads them, whatever the pins leave undecided.
   const deciding =
     config === undefined
       ? checkersPolicy(process.env) === 'auto' && program.options.checkers === undefined && count > tsgoCheckers
-      : config.automaticity !== Automaticity.Off &&
-        ((config.checkersSource === Source.Default && count > tsgoCheckers) ||
-          (config.shareSource === Source.Default && count >= minSharingCheckers));
+      : signalsNeeded(config, count);
   const wanted = deciding || (config !== undefined && (config.records || config.measure));
   if (!wanted || ranges === 0) return signals;
   const files = program.getSourceFiles();

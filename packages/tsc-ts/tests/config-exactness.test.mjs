@@ -72,6 +72,22 @@ test('a shared run that prints what its count printed unshared is counted apart'
   assert.match(result.output, /4 counts differ from one checker without sharing/);
 });
 
+test('the runs a shared one is compared with pin sharing off', () => {
+  // The selection shares a program it pays on at an unpinned count, so a run that pinned nothing is not
+  // necessarily unshared. This compiler shares at any count but one unless told not to: its unshared
+  // runs print the reference, and a sharing difference is a DIFF rather than something the unshared
+  // run at the count could have printed.
+  const { dir, projects, tsgo, native } = setup(
+    '[ "$count" = 1 ] && { echo one; echo two; exit 0; }\n[ "$TSC_TS_SHARE" = 0 ] && { echo one; echo two; exit 0; }\necho four\nexit 0',
+  );
+  const result = run(dir, projects, ['--tsgo', tsgo, '--native', native]);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /DIFF/);
+  assert.doesNotMatch(result.output, /as unshared/);
+  // The unshared runs printed the reference, so no count differs.
+  assert.doesNotMatch(result.output, /counts differ/);
+});
+
 test('a shared run that prints neither fails', () => {
   const { dir, projects, tsgo, native } = setup(
     '[ "$count" = 1 ] && { echo one; echo two; exit 0; }\n[ "$TSC_TS_SHARE" = 1 ] && { echo four; exit 0; }\necho three\nexit 0',
