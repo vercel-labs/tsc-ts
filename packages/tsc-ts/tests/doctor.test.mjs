@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tempDir } from './temp.mjs';
+import { pathToFileURL } from 'node:url';
+import { compileSources, tempDir } from './temp.mjs';
 import { tscTs, tscTsMissing, typescriptLib } from './toolchain.mjs';
 
 const skip = tscTsMissing;
@@ -28,6 +29,14 @@ function project() {
     '{"compilerOptions":{"strict":true,"noEmit":true,"types":[]},"files":["a.ts"]}\n',
   );
   writeFileSync(join(dir, 'a.ts'), 'export const a: number = 1;\n');
+  return dir;
+}
+
+/** A project whose config sets `compilerOptions`, of the files `files` (name to text). */
+function configured(compilerOptions, files = { 'a.ts': 'export const a: number = 1;\n' }) {
+  const dir = tempDir('tsc-ts-doctor-project-');
+  writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions, files: Object.keys(files) }) + '\n');
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
   return dir;
 }
 
@@ -84,6 +93,49 @@ test('doctor measures a project and prints its configurations as one JSON object
   assert.equal(typeof result.recommended.share, 'boolean');
   assert.equal(typeof result.recommended.parseThreads, 'number');
   assert.equal(result.saved.reason, '--no-save');
+});
+
+test('doctor compares the diagnostics of a project whose config prints the statistics', { skip }, () => {
+  const dir = configured({ strict: true, noEmit: true, types: [], diagnostics: true, extendedDiagnostics: true });
+  const { output, status } = run(dir, ['doctor', '-p', '.', '--runs', '1', '--budget', '60', '--no-save', '--json']);
+  assert.equal(status, 0, output);
+  const result = JSON.parse(output);
+  assert.equal(result.output, 'same');
+  for (const configuration of result.configurations) assert.notEqual(configuration.output, 'differs');
+});
+
+test('doctor checks a composite project on every run', { skip }, () => {
+  const dir = configured({ strict: true, composite: true, declaration: true, outDir: 'out', types: [] });
+  const { output, status } = run(dir, ['doctor', '-p', '.', '--runs', '1', '--budget', '60', '--no-save', '--json']);
+  // A run that the compiler refuses to check exits 1, with the child's error: TS6379 here, before
+  // the run got a build info file of its own.
+  assert.equal(status, 0, output);
+  const result = JSON.parse(output);
+  assert.equal(result.output, 'same');
+  assert.ok(!existsSync(join(dir, 'tsconfig.tsbuildinfo')), 'the run wrote build info into the project');
+});
+
+test('a run takes the settings the project allows: statistics off, and no declarationDir without declarations', async () => {
+  const out = compileSources('tsc-ts-doctor-args-', ['main.ts']);
+  const { runArguments } = await import(pathToFileURL(join(out, 'drivers/doctor.js')).href);
+  const plain = { declaration: false };
+  const plainArgs = runArguments(['-p', '.'], plain, '/out', '/build.tsbuildinfo');
+  assert.ok(!plainArgs.includes('--noEmit'));
+  assert.ok(!plainArgs.includes('--declarationDir'), 'declarationDir without declaration is TS5069');
+  assert.ok(plainArgs.includes('--outDir'));
+  // The statistics carry timings, so the runs turn them off whatever the project's config says.
+  for (const name of ['--diagnostics', '--extendedDiagnostics'])
+    assert.equal(plainArgs[plainArgs.indexOf(name) + 1], 'false');
+  // Every run gets a build info file of its own: a composite project cannot turn incremental
+  // compilation off (TS6379), and a project that does not use one writes none.
+  const buildInfo = plainArgs.indexOf('--tsBuildInfoFile');
+  assert.deepEqual(plainArgs.slice(buildInfo, buildInfo + 2), ['--tsBuildInfoFile', '/build.tsbuildinfo']);
+  assert.ok(!plainArgs.includes('--incremental'));
+  // A project that declares still gets its declarations redirected to the run's directory.
+  const declared = runArguments([], { declaration: true }, '/out', '/build.tsbuildinfo');
+  assert.deepEqual(declared.slice(declared.indexOf('--declarationDir')), ['--declarationDir', '/out']);
+  // Without `--emit`, the run checks without writing anything.
+  assert.deepEqual(runArguments([], plain, undefined, '/build.tsbuildinfo').slice(-1), ['--noEmit']);
 });
 
 test('TSC_TS_DOCTOR_REPORT makes a run write what it measured', { skip }, () => {

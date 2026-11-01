@@ -1167,7 +1167,34 @@ export interface ThreadSharingData {
   readonly used: SharedArrayBuffer;
   /** For each checker, where each record of its store is in its number log, and each object's completion. */
   readonly recordTables: SharedArrayBuffer[];
+  /**
+   * One int32, read by every checker before it posts or translates a result: 0 runs, 1 stops posting, 2
+   * stops posting and translating. The main thread sets it (`startParallelCheck`'s window) when the
+   * results are not worth what they cost; every switch keeps the diagnostics the same, because a
+   * checker that does not take a posted result computes it itself.
+   */
+  readonly control: SharedArrayBuffer;
+  /**
+   * One row of `shareStatColumns` doubles per checker, for the counters the main thread reads while
+   * checking runs (`ThreadSharing.writeStats`).
+   */
+  readonly stats: SharedArrayBuffer;
 }
+
+/**
+ * The columns of a checker's row of `ThreadSharingData.stats`: the milliseconds of its outermost
+ * computations by kind (0 owned, 1 computed here for a file another checker took, 2 translated, 3
+ * other), of exporting, translating and unpacking results, the results it posted and translated, and
+ * the milliseconds it saved by translating a result instead of computing it.
+ */
+export const shareStatColumns = 10;
+export const shareStatKinds = 4;
+export const shareStatExport = 4;
+export const shareStatTranslation = 5;
+export const shareStatUnpack = 6;
+export const shareStatPosted = 7;
+export const shareStatTranslated = 8;
+export const shareStatSaved = 9;
 
 /**
  * The size of each checker's logs: numbers (int32s) and string code units (2 bytes each), 8 MB and 2 MB. Only the
@@ -1423,6 +1450,11 @@ export class ThreadSharing {
   readonly used: Int32Array;
   readonly takers: Int32Array;
   readonly forbidden: Int32Array;
+  /** The stop switch of every checker (`ThreadSharingData.control`). */
+  readonly control: Int32Array;
+  /** This checker's row of the counters the main thread reads (`ThreadSharingData.stats`). */
+  readonly stats: Float64Array;
+  readonly row: number;
   /** The number of results this checker posted. */
   posted = 0;
   translated = 0;
@@ -1435,6 +1467,33 @@ export class ThreadSharing {
   addOutermost(ms: number): void {
     this.kindMs[this.kind]! += ms;
     this.kind = 3;
+    this.writeStats();
+  }
+
+  /**
+   * Copies this checker's counters into its row of `stats`, the memory the main thread reads them from
+   * while checking runs. Called where a counter changes, a few times per result at most.
+   */
+  writeStats(): void {
+    const s = this.stats;
+    const row = this.row;
+    for (let k = 0; k < shareStatKinds; k++) s[row + k] = this.kindMs[k]!;
+    s[row + shareStatExport] = this.exportMs;
+    s[row + shareStatTranslation] = this.translationMs;
+    s[row + shareStatUnpack] = this.unpackMs;
+    s[row + shareStatPosted] = this.posted;
+    s[row + shareStatTranslated] = this.translated;
+  }
+
+  /** Adds to the milliseconds this checker saved by translating results instead of computing them. */
+  addSaved(ms: number): void {
+    const at = this.row + shareStatSaved;
+    this.stats[at] = this.stats[at]! + ms;
+  }
+
+  /** Whether the main thread stopped translating posted results (control 2): this checker computes them. */
+  stoppedTranslating(): boolean {
+    return Atomics.load(this.control, 0) === 2;
   }
 
   notShareable = 0;
@@ -1453,6 +1512,8 @@ export class ThreadSharing {
   /** Of `packFailed`, the results that didn't fit in this checker's logs. */
   logFull = 0;
   computedPrivately = 0;
+  /** Results this checker computed and kept because the main thread stopped sharing (control 1 or 2). */
+  stopped = 0;
   /** How often a posted result couldn't be taken here; and results for declarations of the checker's own files. */
   sawDoneUnusable = 0;
   owned = 0;
@@ -1560,6 +1621,9 @@ export class ThreadSharing {
     this.used = new Int32Array(data.used);
     this.takers = new Int32Array(data.takers);
     this.forbidden = new Int32Array(data.forbidden);
+    this.control = new Int32Array(data.control);
+    this.stats = new Float64Array(data.stats);
+    this.row = data.index * shareStatColumns;
     this.types = new ResultTable(data.typeTable);
     this.returns = new ResultTable(data.returnTable);
     // A posted result pays when enough checkers need it, so the threshold falls as checkers are added: 8 ms with 4
@@ -1598,7 +1662,9 @@ export class ThreadSharing {
       this.computedPrivately +
       ' (' +
       this.sawDoneUnusable +
-      ' posted but not taken), owned ' +
+      ' posted but not taken, ' +
+      this.stopped +
+      ' after the stop switch), owned ' +
       this.owned +
       '; not posted: cycles ' +
       this.notShareable +
@@ -1703,11 +1769,12 @@ export class ThreadSharing {
     const numbers = this.numberLogs[k]!;
     const strings = this.stringLogs[k]!;
     const root = numbers[offset]!;
-    const count = numbers[offset + 1]!;
+    const computeMs = numbers[offset + 1]! / 1000;
+    const count = numbers[offset + 2]!;
     const files: string[] = [];
     for (let i = 0; i < count; i++)
-      files.push(readText(strings, numbers[offset + 2 + 2 * i]!, numbers[offset + 3 + 2 * i]!));
-    return new StoredResult(root, files);
+      files.push(readText(strings, numbers[offset + 3 + 2 * i]!, numbers[offset + 4 + 2 * i]!));
+    return new StoredResult(root, files, computeMs);
   }
 
   /** The exporter of this checker's store: it exports each type once. */
@@ -1718,7 +1785,7 @@ export class ThreadSharing {
    * tables, -1 if it doesn't fit in the logs or a node or symbol in it can't be named across threads, or why it can't
    * be exported.
    */
-  post(t: Type, diagnosticFiles: readonly string[]): number | string {
+  post(t: Type, diagnosticFiles: readonly string[], computeMs: number): number | string {
     const c = this.c;
     let exporter = this.storeExporter;
     if (exporter === undefined) {
@@ -1750,8 +1817,10 @@ export class ThreadSharing {
         return -1;
       }
     }
+    // The header: the root record, how long the result took to compute (microseconds: a checker that
+    // translates it saved that much), and the number of files its diagnostics are in.
     const header = p.f.length;
-    p.f.push(root, diagnosticFiles.length);
+    p.f.push(root, Math.round(computeMs * 1000), diagnosticFiles.length);
     for (const fileName of diagnosticFiles) p.text(fileName);
     const count = exporter.records.length;
     let fits = !p.full && offset + p.f.length <= numbers.length && exporter.base + count <= recordTableSize;
@@ -1777,6 +1846,7 @@ export class ThreadSharing {
     exporter.addedProperties.length = 0;
     this.posted++;
     this.storedRecords += count;
+    this.writeStats();
     return postedState(this.data.count, me, offset + header);
   }
 
@@ -1808,12 +1878,15 @@ export class ThreadSharing {
     this.translationMs += performance.now() - start;
     if (t !== undefined) {
       this.translated++;
+      // Translating the result saved the time its producer's computation took (`post`'s header).
+      this.addSaved(posted.computeMs);
       for (const fileName of posted.files) this.forbidNamed(fileName);
       if (posted.files.length > 0) {
         files.set(key, posted.files);
         this.noteFiles(posted.files);
       }
     }
+    this.writeStats();
     return t;
   }
 }
@@ -1822,10 +1895,13 @@ export class ThreadSharing {
 export class StoredResult {
   readonly root: number;
   readonly files: string[];
+  /** How long computing the result took its producer, in milliseconds. */
+  readonly computeMs: number;
 
-  constructor(root: number, files: string[]) {
+  constructor(root: number, files: string[], computeMs: number = 0) {
     this.root = root;
     this.files = files;
+    this.computeMs = computeMs;
   }
 }
 
@@ -1871,11 +1947,17 @@ function computeAndPost(
     sharing.belowMinMs += ms;
     return t;
   }
+  // The main thread stopped sharing at its window (control 1 or 2): this result is the checker's own,
+  // and the others compute theirs, as they do when they find none posted.
+  if (Atomics.load(sharing.control, 0) !== 0) {
+    sharing.stopped++;
+    return t;
+  }
   const slot = table.slot(key);
   if (slot < 0 || table.state(slot) !== 0) return t;
   const start = performance.now();
   // Diagnostics stay with this checker; the others only learn which files they are in.
-  const state = sharing.post(t, files.get(key) ?? []);
+  const state = sharing.post(t, files.get(key) ?? [], ms);
   if (typeof state === 'string') {
     sharing.exportFailed++;
     sharing.exportFailedMs += ms;
@@ -1883,6 +1965,7 @@ function computeAndPost(
   } else if (state === -1) sharing.packFailed++;
   else table.publish(slot, state);
   sharing.exportMs += performance.now() - start;
+  sharing.writeStats();
   return t;
 }
 
@@ -1914,7 +1997,8 @@ function threadTypeOfSymbolWorker(c: Checker, symbol: Symbol): Type {
   if (id > sharing.data.symbolIds) return sharing.tracked(sharing.typeFiles, id, symbol, undefined);
   const table = sharing.types;
   if (!sharing.owns(getSourceFileOfNode(symbol.valueDeclaration!))) {
-    const slot = table.find(id);
+    // The stop switch is read before the table: a checker that stops translating computes the result itself.
+    const slot = sharing.stoppedTranslating() ? -1 : table.find(id);
     const state = slot < 0 ? 0 : table.state(slot);
     if (
       state <= -2 &&
@@ -1984,7 +2068,7 @@ function threadReturnTypeWorker(c: Checker, sig: Signature): Type {
   if (key > sharing.data.nodeIds) return sharing.tracked(sharing.returnFiles, key, undefined, sig);
   const table = sharing.returns;
   if (!sharing.owns(getSourceFileOfNode(declaration))) {
-    const slot = table.find(key);
+    const slot = sharing.stoppedTranslating() ? -1 : table.find(key);
     const state = slot < 0 ? 0 : table.state(slot);
     if (
       state <= -2 &&
@@ -2339,6 +2423,7 @@ class StoreReader {
     const start = performance.now();
     const record = unpackRecord(u);
     this.sharing.unpackMs += performance.now() - start;
+    this.sharing.writeStats();
     if (record !== undefined) this.records[index] = record;
     return record;
   }

@@ -280,16 +280,20 @@ function measure(options: DoctorOptions, work: Work): number {
   // not how busy the session made the machine (`4.1`).
   const load = loadavg()[0] / cpus;
   const projectArgs = options.project === undefined ? [] : ['-p', options.project];
+  // Only an emit run passes `--declarationDir`, so only an emit run reads the project's settings.
+  const settings: ProjectSettings = options.emit ? projectSettings(projectArgs) : { declaration: false };
   const warmUp = runChild(
     new DoctorPlan('A', 'default', 'default', undefined, undefined, undefined),
     options,
     projectArgs,
+    settings,
     load,
     work,
   );
   const first = warmUp.report;
-  // A report without a compile's numbers is a run that never checked anything (a missing config, say).
-  if (first === undefined || first.times === undefined || first.shape === undefined) {
+  // A report without a compile's numbers, or whose check took no time, is a run that never checked
+  // anything: a missing config, or options the compiler rejects before it checks (say).
+  if (first === undefined || first.times === undefined || first.shape === undefined || first.times.checkMs === 0) {
     const output = warmUp.output.trim();
     if (output !== '') writeStderr(output + '\n');
     writeStderr('doctor: the first run did not check the project (status ' + String(warmUp.status) + ')\n');
@@ -305,7 +309,8 @@ function measure(options: DoctorOptions, work: Work): number {
   while (rounds < totalRounds) {
     if (rounds >= leastRounds && elapsedSeconds(started) + lastRoundSeconds > options.budget) break;
     const roundStart = Date.now();
-    for (const plan of plans) measured.get(plan.id)!.runs.push(runChild(plan, options, projectArgs, load, work));
+    for (const plan of plans)
+      measured.get(plan.id)!.runs.push(runChild(plan, options, projectArgs, settings, load, work));
     lastRoundSeconds = (Date.now() - roundStart) / 1000;
     rounds++;
   }
@@ -348,11 +353,18 @@ function runChild(
   plan: DoctorPlan,
   options: DoctorOptions,
   projectArgs: readonly string[],
+  settings: ProjectSettings,
   load: number,
   work: Work,
 ): DoctorRun {
-  const reportFile = joinPath(work.directory, 'report-' + work.runs++ + '.json');
-  const args = [...projectArgs, '--incremental', 'false', ...(options.emit ? emitArgs(work) : ['--noEmit'])];
+  const index = work.runs++;
+  const reportFile = joinPath(work.directory, 'report-' + index + '.json');
+  const args = runArguments(
+    projectArgs,
+    settings,
+    options.emit ? emitDirectory(work) : undefined,
+    joinPath(work.directory, 'build-' + index + '.tsbuildinfo'),
+  );
   if (plan.checkers !== undefined) args.push('--checkers', String(plan.checkers));
   const command = childCommand();
   const started = performance.now();
@@ -370,11 +382,69 @@ function runChild(
   return new DoctorRun(wall, result.status, output, report, load, at);
 }
 
-/** `--emit`'s output arguments: a temporary directory the doctor run deletes afterwards. */
-function emitArgs(work: Work): string[] {
+/** `--emit`'s output directory: a temporary one the doctor run deletes afterwards. */
+function emitDirectory(work: Work): string {
   const out = joinPath(work.directory, 'emit');
   mkdirSync(out, { recursive: true });
-  return ['--outDir', out, '--declarationDir', out];
+  return out;
+}
+
+/** What a run's arguments need to know of the project's config. */
+export interface ProjectSettings {
+  /** Whether the project emits declarations: `declaration`, or `composite`, which implies it. */
+  readonly declaration: boolean;
+}
+
+/**
+ * The project's settings, as the compiler resolves them for `projectArgs` (through `extends`). Only an
+ * emit run reads them, and a config whose `--showConfig` exceeds the pipe's default 1 MB leaves them
+ * unknown rather than failing the measurement.
+ */
+function projectSettings(projectArgs: readonly string[]): ProjectSettings {
+  const command = childCommand();
+  const probe = spawnSync(command[0]!, [...command.slice(1), ...projectArgs, '--showConfig'], {
+    encoding: 'utf8',
+  });
+  if (probe.status !== 0) return { declaration: false };
+  let config: { compilerOptions?: { composite?: unknown; declaration?: unknown } } = {};
+  try {
+    const parsed: unknown = JSON.parse(probe.stdout ?? '');
+    if (typeof parsed === 'object' && parsed !== null) config = parsed as typeof config;
+  } catch {
+    return { declaration: false };
+  }
+  const options = config.compilerOptions ?? {};
+  return { declaration: options.composite === true || options.declaration === true };
+}
+
+/**
+ * One measured run's arguments: the project, then what makes the run check every file and print only
+ * its diagnostics. Every run gets a build info file of its own, which no run finds and no run writes
+ * over, so every run checks every file: a composite project may not turn incremental compilation off
+ * (`--incremental` is TS6379 for it), and a project that does not use it accepts the file and writes
+ * none. The statistics of `--diagnostics` and `--extendedDiagnostics` carry timings, so a project whose
+ * config turns them on would print different output for the same check. `emitDirectory` is where the
+ * run emits, or `undefined` for `--noEmit`.
+ */
+export function runArguments(
+  projectArgs: readonly string[],
+  settings: ProjectSettings,
+  emitDirectory: string | undefined,
+  buildInfoFile: string,
+): string[] {
+  return [
+    ...projectArgs,
+    '--diagnostics',
+    'false',
+    '--extendedDiagnostics',
+    'false',
+    '--tsBuildInfoFile',
+    buildInfoFile,
+    ...(emitDirectory === undefined
+      ? ['--noEmit']
+      : // `--declarationDir` without `declaration` or `composite` is TS5069, and the run then checks nothing.
+        ['--outDir', emitDirectory, ...(settings.declaration ? ['--declarationDir', emitDirectory] : [])]),
+  ];
 }
 
 /**

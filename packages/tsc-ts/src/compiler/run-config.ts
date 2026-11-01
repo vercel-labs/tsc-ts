@@ -56,6 +56,8 @@ export class RunConfig {
   checkersPin: string | undefined = undefined;
   sharePin: string | undefined = undefined;
   parsePin: string | undefined = undefined;
+  /** How much of the selection may run (`TSC_TS_AUTO`); `Off` leaves every value to the pins and defaults. */
+  automaticity = Automaticity.On;
   /** Whether this run reports its signals to a doctor child's report (`TSC_TS_DOCTOR_REPORT`). */
   measure = false;
   /** Why each value was chosen, for the section's `automatic:` reason on that setting's line. */
@@ -124,6 +126,11 @@ export function autoCheckers(cpus: number, fit: number): number {
 export const libraryBoundText = 6_000_000;
 export const libraryBoundShare = 5;
 
+/** Whether ranges that reach `library` characters of libraries and check `own` are library-bound. */
+export function isLibraryBound(library: number, own: number): boolean {
+  return library >= libraryBoundText && library >= libraryBoundShare * own;
+}
+
 /**
  * The number of checkers for `count` checkers whose ranges reach `library` characters of libraries
  * and check `own` characters each, on average: three quarters of them (tsgo's four at least) where
@@ -140,9 +147,40 @@ export const libraryBoundShare = 5;
  * characters per range) by 6%, Sentry (5.7M and 3.0M) and the tsc-ts sources by about 11%.
  */
 export function libraryBoundCount(count: number, library: number, own: number): number {
-  return library >= libraryBoundText && library >= libraryBoundShare * own
-    ? Math.max(tsgoCheckers, Math.ceil((count * 3) / 4))
-    : count;
+  return isLibraryBound(library, own) ? Math.max(tsgoCheckers, Math.ceil((count * 3) / 4)) : count;
+}
+
+/**
+ * The least checkers sharing can pay with: 12, from T3 Code's two projects at 16 and 4 neutral to
+ * slightly worse (1.028). c8 and c12 are unmeasured, so 12 is where the measurements begin.
+ */
+export const minSharingCheckers = 12;
+
+/**
+ * The share of a program's files that must be declaration files or come from `node_modules` (F) for
+ * sharing to pay: the files every checker resolves again. T3 Code's projects are at 0.48 and 0.66;
+ * TypeORM, VS Code and Sentry at 0.08, 0.08 and 0.26, where sharing was neutral or slower.
+ */
+export const sharingFileShare = 0.4;
+
+/**
+ * How much sharing raises the estimated peak memory, for the fit a count must pass before sharing turns
+ * on: peak RSS grew by up to 11% at 16 checkers (T3 web), and each extra checker's declarations are
+ * resolved by one more checker.
+ */
+export const sharingPeakShare = 1.12;
+
+/**
+ * Whether `signals` say that sharing pays: at least `minSharingCheckers` checkers, `sharingFileShare`
+ * of the program declarations or from node_modules, and ranges that mostly resolve the same large
+ * libraries — the work sharing removes. The memory fit (`CheckFit`) is checked by `decideCheck`.
+ */
+export function sharingCandidate(signals: CheckSignals): boolean {
+  return (
+    signals.count >= minSharingCheckers &&
+    signals.fileShare >= sharingFileShare &&
+    isLibraryBound(signals.library, signals.own)
+  );
 }
 
 /**
@@ -176,6 +214,7 @@ export function preParseConfig(
 ): RunConfig {
   const config = new RunConfig();
   const pins = pinsOf(env);
+  config.automaticity = pins.automaticity;
   config.checkers = checkers;
   if (options.checkers !== undefined) {
     config.checkersSource = Source.Pinned;
@@ -239,19 +278,82 @@ export class CheckSignals {
 }
 
 /**
- * The checker count and sharing for a bound program, from `signals`; returns the count. No rule chooses
- * yet: the count is the one the plan was made for, cut to three quarters when every range mostly
- * resolves the same large libraries and no pin gave it (`libraryBoundCount`, `tests/parallel-schedule`
- * records the measurements), and sharing is what `TSC_TS_SHARE` pins. Those are the decisions of a run
- * before this module existed.
+ * The checkers whose estimated peak memory fits a program: without sharing, and with the peak sharing
+ * adds (`sharingPeakShare`). Computed by `parallel-check.ts`, which holds the estimate.
  */
-export function decideCheck(config: RunConfig, signals: CheckSignals): number {
+export interface CheckFit {
+  /** The checkers whose estimated peak memory fits with the peak sharing adds (`sharingPeakShare`). */
+  readonly sharing: number;
+}
+
+/** What `decideCheck` needs of the run besides the signals: whether it can share, and how many checkers fit. */
+export interface CheckDecision {
+  /** Whether checking happens on checker threads that share the program (scriptc builds), more than one. */
+  readonly possible: boolean;
+  /** The memory fit, where the sharing rule needs it; `undefined` elsewhere. */
+  readonly fit: CheckFit | undefined;
+}
+
+/** The decision of a run that cannot share, made without the memory fit. */
+export const noSharing: CheckDecision = { possible: false, fit: undefined };
+
+/**
+ * The checker count and sharing for a bound program, from `signals`; returns the count.
+ *
+ * The count is the one the plan was made for, cut to three quarters where every range mostly resolves
+ * the same large libraries and no pin gave it (`libraryBoundCount`, `tests/parallel-schedule` records
+ * the measurements).
+ *
+ * Sharing is turned on by the static rule where the run may choose it and can share, the signals say it
+ * pays (`sharingCandidate`), the count it leaves is one sharing was measured at (`minSharingCheckers`),
+ * and that count fits memory with the peak sharing adds. The cut stays on: 16 checkers with sharing are
+ * within noise of the cut count with it on T3 Code's two projects (Q2: 0.99 and 1.03 of the cut count,
+ * the intervals covering 1), and the cut uses 0.4 GB to 0.9 GB less at the peak, so the count is not
+ * raised for sharing.
+ *
+ * Sharing is what `TSC_TS_SHARE` pins. The decisions are those of a run before this module existed, and
+ * what `TSC_TS_AUTO=0` keeps.
+ */
+export function decideCheck(config: RunConfig, signals: CheckSignals, decision: CheckDecision = noSharing): number {
   const count = signals.count;
-  config.checkers =
-    config.checkersSource === Source.Pinned || count <= tsgoCheckers
-      ? count
-      : libraryBoundCount(count, signals.library, signals.own);
+  const pinned = config.checkersSource === Source.Pinned;
+  const cut = pinned || count <= tsgoCheckers ? count : libraryBoundCount(count, signals.library, signals.own);
+  config.checkers = cut;
+  const fit = decision.fit;
+  if (
+    decision.possible &&
+    fit !== undefined &&
+    fit.sharing >= cut &&
+    cut >= minSharingCheckers &&
+    config.shareSource !== Source.Pinned &&
+    config.automaticity !== Automaticity.Off &&
+    sharingCandidate(signals)
+  ) {
+    config.share = true;
+    config.shareSource = Source.Static;
+    config.shareReasons.push(sharingReason(signals));
+  }
   return config.checkers;
+}
+
+/**
+ * Why sharing turned on, for the section: the share of the program that is declarations every checker
+ * resolves again, and what the ranges reach, as `66% of files in node_modules; ranges reach 12.1M
+ * library characters for 0.9M checked`.
+ */
+function sharingReason(signals: CheckSignals): string {
+  const declarations = signals.declarationShare > signals.nodeModulesShare;
+  const share = declarations ? signals.declarationShare : signals.nodeModulesShare;
+  return (
+    `${Math.round(share * 100)}% of files ` +
+    (declarations ? 'are declarations' : 'in node_modules') +
+    `; ranges reach ${millions(signals.library)}M library characters for ${millions(signals.own)}M checked`
+  );
+}
+
+/** `chars` in millions, with one decimal: `12.1M`. */
+function millions(chars: number): string {
+  return (chars / 1_000_000).toFixed(1);
 }
 
 /** Where the section writes: the system of a compile, or anything else with `write`. */
