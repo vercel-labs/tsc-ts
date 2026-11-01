@@ -54,7 +54,8 @@ import {
   type System,
   SystemFileSystem,
 } from './tsc-cli.js';
-import { reportRunConfig, Source, type RunConfig, type RecordsReport } from './run-config.js';
+import { reportRunConfig, Source, type CheckSignals, type RunConfig, type RecordsReport } from './run-config.js';
+import { doctorReportPath, setDoctorCompile, type DoctorCompile, type DoctorSignals } from './doctor-report.js';
 import {
   displayPath,
   recordKey,
@@ -636,6 +637,7 @@ export function emitStatusAndReportStatistics(
 ): ExitStatus {
   const options = program.options;
   const records = saveRunRecord(sys, program, config);
+  if (doctorReportPath() !== undefined) setDoctorCompile(doctorCompileOf(program, config));
   if (options.diagnostics === true || options.extendedDiagnostics === true) {
     program.times.totalTime = sys.sinceStart();
     statisticsOf(program).report(sys);
@@ -666,7 +668,15 @@ export function saveRunRecord(
   const directory = recordsDirectory(recordEnvironment());
   if (directory === undefined) return { off: 'TSC_TS_CACHE=0' };
   const shape = recordShapeOf(program, config);
-  const key = recordKey({
+  const key = recordKeyOf(program);
+  const written = writeRecord(directory, key, recordSampleOf(sys, program, config), shape, chosenOf(config));
+  if (written.path !== undefined) return { path: displayPath(written.path) };
+  return { unavailable: written.reason };
+}
+
+/** The key this run's record has: the build, the project, the options and the machine (`run-records.ts`). */
+function recordKeyOf(program: CompilerProgram): string {
+  return recordKey({
     version,
     executable: process.execPath,
     configFile: program.options.configFilePath,
@@ -675,9 +685,42 @@ export function saveRunRecord(
     cpus: Math.max(1, availableParallelism()),
     memoryBytes: memoryLimit(),
   });
-  const written = writeRecord(directory, key, recordSampleOf(sys, program, config), shape, chosenOf(config));
-  if (written.path !== undefined) return { path: displayPath(written.path) };
-  return { unavailable: written.reason };
+}
+
+/** What this compile measured, for a doctor child's report (`doctor-report.ts`). */
+function doctorCompileOf(program: CompilerProgram, config: RunConfig | undefined): DoctorCompile {
+  const times = program.times;
+  const signals = config?.signals;
+  return {
+    version,
+    configFile: program.options.configFilePath,
+    key: recordKeyOf(program),
+    checkers: config?.checkers ?? 1,
+    share: config?.share ?? false,
+    parseThreads: config?.parseThreads ?? 1,
+    times: {
+      parseMs: times.parseTime + times.bindTime,
+      checkMs: times.checkTime,
+      totalMs:
+        times.totalTime !== 0 ? times.totalTime : times.parseTime + times.bindTime + times.checkTime + times.emitTime,
+    },
+    shape: recordShapeOf(program, config),
+    signals: signals === undefined ? undefined : doctorSignalsOf(signals),
+  };
+}
+
+/** The bound program's signals as a doctor report keeps them. */
+function doctorSignalsOf(signals: CheckSignals): DoctorSignals {
+  return {
+    count: signals.count,
+    ranges: signals.ranges,
+    library: signals.library,
+    own: signals.own,
+    redundancy: signals.redundancy,
+    declarationShare: signals.declarationShare,
+    nodeModulesShare: signals.nodeModulesShare,
+    fileShare: signals.fileShare,
+  };
 }
 
 /** The record-related environment, read by name (a scriptc build holds `process.env` as an index signature). */
@@ -693,7 +736,7 @@ function recordEnvironment(): RecordEnvironment {
 }
 
 /** The program's size, and the library and redundancy signals where the run computed them. */
-function recordShapeOf(program: CompilerProgram, config: RunConfig): RecordShape {
+function recordShapeOf(program: CompilerProgram, config: RunConfig | undefined): RecordShape {
   let files = 0;
   let chars = 0;
   let declarationChars = 0;
@@ -702,7 +745,7 @@ function recordShapeOf(program: CompilerProgram, config: RunConfig): RecordShape
     chars += file.end;
     if (file.isDeclarationFile) declarationChars += file.end;
   }
-  const signals = config.signals;
+  const signals = config?.signals;
   return {
     files,
     chars,
