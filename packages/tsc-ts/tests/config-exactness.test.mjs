@@ -3,7 +3,7 @@
 // one-checker difference from tsgo fails only when it is new against --baseline. The compilers here are shell
 // scripts that print what the case being tested makes them print.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,11 +35,11 @@ function compiler(dir, name, body) {
   return path;
 }
 
-function run(dir, projects, extra) {
+function run(dir, projects, extra, { work = join(dir, 'work'), cwd = undefined } = {}) {
   const result = spawnSync(
     process.execPath,
-    [join(root, 'scripts/config-exactness.mjs'), ...projects, '--work', join(dir, 'work'), ...extra],
-    { encoding: 'utf8', env: { ...process.env, TSC_TS_SHARE: undefined } },
+    [join(root, 'scripts/config-exactness.mjs'), ...projects, '--work', work, ...extra],
+    { encoding: 'utf8', cwd, env: { ...process.env, TSC_TS_SHARE: undefined } },
   );
   assert.equal(result.status === null, false, result.stderr);
   return { status: result.status, output: result.stdout + result.stderr };
@@ -97,4 +97,67 @@ test('a difference from tsgo at one checker fails until --baseline knows the lin
   const grown = run(dir, projects, ['--tsgo', tsgo, '--native', native, '--baseline', empty]);
   assert.equal(grown.status, 1, grown.output);
   assert.match(grown.output, /2 differing lines are new/);
+});
+
+/** Reads --outDir and --declarationDir, which an emit run passes. */
+const directories = `out=
+declarations=
+previous=
+for argument in "$@"; do
+  [ "$previous" = "--outDir" ] && out=$argument
+  [ "$previous" = "--declarationDir" ] && declarations=$argument
+  previous=$argument
+done`;
+
+/** Writes `body`'s two files: the program's to --outDir, the declarations to --declarationDir. */
+function emitCompiler(dir, name, program, declaration) {
+  return compiler(
+    dir,
+    name,
+    directories + '\necho ' + program + ' > "$out/a.js"\necho ' + declaration + ' > "$declarations/a.d.ts"\nexit 0',
+  );
+}
+
+test("emit runs compare the declarations, wherever the config's declarationDir points", () => {
+  const dir = tempDir('tsc-ts-config-exactness-');
+  const projects = project(dir);
+  // Both write the same file of the program and declarations that differ. With a config's declarationDir taking
+  // precedence over --outDir, the declarations would go to a directory the run does not compare.
+  const tsgo = emitCompiler(dir, 'tsgo', 'same', 'one');
+  const native = emitCompiler(dir, 'native', 'same', 'two');
+  const json = join(dir, 'result.json');
+  const result = run(dir, projects, ['--tsgo', tsgo, '--native', native, '--emit', '--json', json]);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /vs tsgo DIFF 1 files/);
+  const record = JSON.parse(readFileSync(json, 'utf8')).projects[0];
+  assert.ok(
+    record.referenceLines.some((path) => path.endsWith('a.d.ts')),
+    'the declaration file is compared: ' + JSON.stringify(record.referenceLines),
+  );
+});
+
+test('an emit run whose tree is empty fails instead of passing without a comparison', () => {
+  const dir = tempDir('tsc-ts-config-exactness-');
+  const projects = project(dir);
+  // A compiler that writes nothing: two empty trees would compare equal and pass.
+  const tsgo = compiler(dir, 'tsgo', 'exit 0');
+  const native = compiler(dir, 'native', 'exit 0');
+  const result = run(dir, projects, ['--tsgo', tsgo, '--native', native, '--emit']);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /wrote no files to compare/);
+});
+
+test("a relative --work names this process's directory, not the project's", () => {
+  const dir = tempDir('tsc-ts-config-exactness-');
+  const projects = project(dir);
+  // The compilers start in the project's directory, as a real one does. A --outDir relative to the project would
+  // name a different directory than the one this process reads the tree from, and the two empty trees would pass.
+  const tsgo = emitCompiler(dir, 'tsgo', 'one', 'declaration');
+  const native = emitCompiler(dir, 'native', 'two', 'declaration');
+  const result = run(dir, projects, ['--tsgo', tsgo, '--native', native, '--emit'], {
+    work: 'emit-work',
+    cwd: dir,
+  });
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /DIFF 1 files/);
 });

@@ -27,11 +27,13 @@
 // --repeat runs each shared configuration N times (default 5), since what a checker translates depends on the
 // timing of the threads. --emit writes the program to a temporary directory with declarations and compares the
 // trees, instead of --noEmit: pass a projects file of the emit configs, since a check config can give an option
-// error once emit is on (TS5096 without rewriteRelativeImportExtensions). --only checks the projects whose name
-// contains NAME. --save keeps the outputs that
-// differ in DIR; --work writes the batches and the emitted trees into DIR, which is kept. --json writes the result
-// of every run to FILE; --baseline compares the differing lines and files with those of an earlier --json file and
-// fails when one appears that it does not have. --tsgo defaults to packages/tsgo/dist/tsgo.
+// error once emit is on (TS5096 without rewriteRelativeImportExtensions); each run's declarations go to the
+// directory it compares, whatever `declarationDir` the config sets, and an emit run that writes no file there
+// fails. --only checks the projects whose name contains NAME. --save keeps the outputs that differ in DIR; --work
+// writes the batches and the emitted trees into DIR, which is kept (a relative DIR is relative to this process's
+// directory, not the project's). --json writes the result of every run to FILE; --baseline compares the differing
+// lines and files with those of an earlier --json file and fails when one appears that it does not have. --tsgo
+// defaults to packages/tsgo/dist/tsgo.
 //
 // Exits with 1 if a run differs from the reference and from the unshared run at its count, if the one-checker run
 // differs from tsgo and no --baseline is given, or if a differing line is new against --baseline. TSC_TS_SHARE_*
@@ -77,14 +79,18 @@ const emit = args.includes('--emit');
 const saveDir = option(args, '--save', undefined);
 const jsonFile = option(args, '--json', undefined);
 const baselineFile = option(args, '--baseline', undefined);
-const work = option(args, '--work', undefined) ?? tempDir('tsc-ts-config-exactness-');
+// Absolute, since a run's compiler starts in the project's directory: a relative --outDir would name a
+// directory under the project, not the one this process reads the tree from.
+const work = resolve(option(args, '--work', undefined) ?? tempDir('tsc-ts-config-exactness-'));
 mkdirSync(work, { recursive: true });
 
 /** The arguments of a run: the program, then where an emit run writes. */
 function argumentsOf(project, checkers, outDir) {
   const out = ['-p', project.config, '--incremental', 'false'];
-  // A project's check config can set noEmit; an emit run writes anyway.
-  if (emit) out.push('--noEmit', 'false', '--outDir', outDir, '--declaration');
+  // A project's check config can set noEmit; an emit run writes anyway. Its `declarationDir` would take
+  // precedence over `--outDir` for the declarations, so they would go to a directory this run does not
+  // compare and the project's own outputs would be overwritten: the declarations go to the run's directory.
+  if (emit) out.push('--noEmit', 'false', '--outDir', outDir, '--declaration', '--declarationDir', outDir);
   else out.push('--noEmit');
   if (checkers !== undefined) out.push('--checkers', String(checkers));
   return out;
@@ -150,11 +156,15 @@ const difference = (a, b) => (emit ? differingPaths(a.tree, b.tree) : differingL
 const outputDifference = (a, b) => (emit ? differingLines(a.output, b.output) : []);
 const units = (r) => (emit ? r.tree.length + ' files' : lineCount(r.output) + ' lines');
 
+const emptyTrees = [];
 for (const project of projects) {
   if (only !== undefined && !project.name.includes(only)) continue;
   const tsgoRun = reference(project);
   const base = check(project, 1);
   runs += 2;
+  // Two empty trees compare equal: an emit run that wrote nothing to the directory compared, such as one whose
+  // declarations went elsewhere, would pass without a comparison.
+  if (emit && base.tree.length === 0) emptyTrees.push(project.name);
   const left = project.left ? ', ' + project.left + ' cases left out' : '';
   const referenceClean = base.signature === tsgoRun.signature;
   const record = {
@@ -286,6 +296,8 @@ const reported = [
 if (asUnshared.length > 0) reported.push(asUnshared.length + ' print what the unshared run at their count printed');
 if (countDifferences.length > 0)
   reported.push(countDifferences.length + ' counts differ from one checker without sharing');
+if (emptyTrees.length > 0)
+  reported.push(emptyTrees.length + ' projects wrote no files to compare (' + emptyTrees.join(', ') + ')');
 if (referenceDifferences.length > 0)
   reported.push(
     referenceDifferences.length +
@@ -321,6 +333,10 @@ if (baselineFile !== undefined) {
 
 // Without --baseline, a difference from tsgo is a difference: the projects must print what it prints. The corpus
 // has a few (the report lists them), so its runs pass the --json file of an earlier run as --baseline.
-const failed = differences.length > 0 || grew > 0 || (baselineFile === undefined && referenceDifferences.length > 0);
+const failed =
+  differences.length > 0 ||
+  grew > 0 ||
+  emptyTrees.length > 0 ||
+  (baselineFile === undefined && referenceDifferences.length > 0);
 console.log(reported.join('; '));
 process.exit(failed ? 1 : 0);
