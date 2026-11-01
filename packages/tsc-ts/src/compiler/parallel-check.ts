@@ -74,6 +74,7 @@ import {
   CheckSignals,
   checkersPolicy,
   decideCheck,
+  learns,
   libraryBoundCount,
   maxAutoCheckers,
   minSharingCheckers,
@@ -1986,22 +1987,29 @@ export function mainThreadChecks(shared: boolean): boolean {
 }
 
 /**
+ * Whether the run reads the memory fit of sharing (`checkDecisionOf`): the static rule reads it where
+ * the signals point at sharing, and a run the learning rules read may adopt sharing the static rule
+ * leaves off, or explore it, when its samples show the configuration faster (DESIGN 4.3-4.4). A pin on
+ * sharing and `TSC_TS_AUTO=0` choose sharing without any rule, and read nothing.
+ */
+export function sharingFitNeeded(config: RunConfig, signals: CheckSignals): boolean {
+  if (config.shareSource === Source.Pinned || config.automaticity === Automaticity.Off) return false;
+  if (sharingCandidate(signals)) return true;
+  return learns(config.automaticity) && config.record !== undefined;
+}
+
+/**
  * What `decideCheck` needs of the run besides its signals: whether the checker threads of a shared
- * program may share results (`startParallelCheck` makes the same test), and, where the rest of the
- * sharing rule holds, how many checkers fit memory with sharing's peak. The estimate costs a pass over
- * the program's files and its memory limit, so it is computed only where the rule reads it: a count
- * below `minSharingCheckers`, a program that is not library-bound, or a pinned run pay nothing.
+ * program may share results (`startParallelCheck` makes the same test), and, where sharing is possible
+ * and a rule that may choose it reads the estimate, how many checkers fit memory with sharing's peak
+ * (`sharingFitNeeded`). The estimate costs a pass over the program's files and its memory limit, so it
+ * is computed only where a rule reads it: a count below `minSharingCheckers`, a program that is not
+ * library-bound, or a pinned run pay nothing.
  */
 function checkDecisionOf(config: RunConfig, signals: CheckSignals, program: Program, shared: boolean): CheckDecision {
   // `mainThreadChecks` is false whenever the program is shared (`!shared`), as sharing needs.
   const possible = shared && signals.count > 1 && signals.count <= maxSharingCheckers;
-  const fit =
-    possible &&
-    config.shareSource !== Source.Pinned &&
-    config.automaticity !== Automaticity.Off &&
-    sharingCandidate(signals)
-      ? memoryFit(program)
-      : undefined;
+  const fit = possible && sharingFitNeeded(config, signals) ? memoryFit(program) : undefined;
   // A run whose record the learning rules read also names the shape its samples describe, the CPUs a
   // count may use, the memory a configuration may not exceed and the time a control sample ages from.
   const learning = config.records || config.record !== undefined;

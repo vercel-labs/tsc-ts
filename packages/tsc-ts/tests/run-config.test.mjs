@@ -42,7 +42,7 @@ const {
   tsgoCheckers,
   usableSamples,
 } = await load('compiler/run-config.js');
-const { sharingNumbers, signalsNeeded, stopLevel } = await load('compiler/parallel-check.js');
+const { sharingFitNeeded, sharingNumbers, signalsNeeded, stopLevel } = await load('compiler/parallel-check.js');
 const { recordsAllowed } = await load('compiler/run-record-read.js');
 const { shareStatColumns, shareStatExport, shareStatSaved, shareStatTranslation, shareStatUnpack } =
   await load('compiler/shared-results.js');
@@ -517,6 +517,54 @@ test("samples a doctor run measured are evidence for adoption like any other run
   assert.equal(config.role, 'chosen');
 });
 
+test('learning reads the sharing fit where the static rule turns sharing off', () => {
+  // Half the files are declarations, but the ranges are not library-bound: the static rule is off.
+  const band = quietSignals({ declarationShare: 0.5 });
+  assert.equal(sharingCandidate(band), false);
+  const learning = new RunConfig();
+  learning.record = recordOf([]);
+  assert.equal(sharingFitNeeded(learning, band), true);
+  // With nothing to learn from, or with the learning rules off, no rule reads the estimate.
+  learning.record = undefined;
+  assert.equal(sharingFitNeeded(learning, band), false);
+  learning.record = recordOf([]);
+  learning.automaticity = Automaticity.Static;
+  assert.equal(sharingFitNeeded(learning, band), false);
+  learning.automaticity = Automaticity.Off;
+  assert.equal(sharingFitNeeded(learning, band), false);
+  learning.automaticity = Automaticity.On;
+  learning.shareSource = Source.Pinned;
+  assert.equal(sharingFitNeeded(learning, band), false);
+  // The static rule's own signals read it, with or without a record.
+  const candidate = quietSignals({ declarationShare: 0.5, library: 8_000_000, own: 1_000_000 });
+  assert.equal(sharingCandidate(candidate), true);
+  assert.equal(sharingFitNeeded(new RunConfig(), candidate), true);
+});
+
+test('samples that show sharing faster adopt it where the static rule leaves it off', () => {
+  const band = quietSignals({ declarationShare: 0.5 });
+  assert.equal(sharingCandidate(band), false);
+  const record = recordOf(
+    samplesOf([
+      { checkers: 16, share: true, checkMs: 60 },
+      { checkers: 16, share: true, checkMs: 60 },
+      { checkers: 16, share: true, checkMs: 60 },
+      { checkers: 16, share: false, checkMs: 100 },
+      { checkers: 16, share: false, checkMs: 100 },
+      { checkers: 16, share: false, checkMs: 100 },
+    ]),
+  );
+  const config = recordRun(record, band, quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(config.share, true);
+  assert.equal(config.shareSource, Source.Learned);
+  assert.deepEqual(config.shareReasons, ['check 40% faster over 3 runs']);
+  assert.equal(config.chosen.share, true);
+  // The same samples adopt nothing where the program may not share: the fit is what decides it.
+  const alone = recordRun(record, band);
+  assert.equal(alone.share, false);
+  assert.equal(alone.shareSource, Source.Default);
+});
+
 test('an adopted configuration stays until the static one beats it, and reverts when it does', () => {
   const adopted = recordChoice({ checkers: 12, source: 'learned', since: 1 });
   const kept = recordRun(
@@ -575,6 +623,23 @@ test('an adopted configuration whose last samples are slower than control revert
   );
   const config = recordRun(recordOf(samples, { chosen: recordChoice({ checkers: 12, source: 'learned', since: 1 }) }));
   assert.equal(config.checkers, 16);
+  assert.equal(config.chosen.checkers, 16);
+});
+
+test('a configuration fastRevert rejects is not adopted again from its older samples', () => {
+  // Six samples from when the learned count was faster still dominate its median, while its last three
+  // runs fell behind the control samples: the medians alone would adopt it again in the same run.
+  const samples = samplesOf([
+    ...Array.from({ length: 6 }, () => ({ checkers: 12, checkMs: 60 })),
+    ...Array.from({ length: 3 }, () => ({ checkers: 12, checkMs: 200 })),
+    ...Array.from({ length: 3 }, () => ({ checkers: 16, role: 'control', checkMs: 100 })),
+    ...Array.from({ length: 3 }, () => ({ checkers: 16, checkMs: 100 })),
+  ]);
+  assert.equal(beatsBy(checkTimes(samples, 12, false), checkTimes(samples, 16, false)), 0.4);
+  assert.equal(fastRevert(usableSamples(recordOf(samples)), 12, false), true);
+  const config = recordRun(recordOf(samples, { chosen: recordChoice({ checkers: 12, source: 'learned', since: 1 }) }));
+  assert.equal(config.checkers, 16);
+  assert.equal(config.checkersSource, Source.Default);
   assert.equal(config.chosen.checkers, 16);
 });
 
@@ -658,6 +723,36 @@ test('the record chooses the parse threads it adopted, and why', () => {
   assert.equal(recordRun(worse).chosen.parseThreads, parseDefault);
 });
 
+test('a count a pin left in the record is not learned without the comparison', () => {
+  const parseDefault = defaultParseThreads(16);
+  const pinned = Math.ceil(parseDefault / 2);
+  if (pinned >= parseDefault) return;
+  // The first run had no record, so it recorded the parse threads its pin made it use, as the default
+  // source, and only that run's sample. Removing the pin does not make the count learned: the samples
+  // of one arm are no comparison.
+  const record = recordOf(samplesOf([{ parseThreads: pinned, parseMs: 80 }]), {
+    chosen: recordChoice({ parseThreads: pinned, source: 'default' }),
+  });
+  const config = preParseConfig({}, 16, {}, record);
+  assert.equal(config.parseThreads, parseDefault);
+  assert.equal(config.parseSource, Source.Default);
+  assert.deepEqual(config.parseReasons, []);
+  assert.equal(config.role, 'chosen');
+  // The comparison the samples do hold adopts it.
+  const compared = recordOf(
+    samplesOf([
+      { parseThreads: pinned, parseMs: 80 },
+      { parseThreads: pinned, parseMs: 80 },
+      { parseThreads: pinned, parseMs: 80 },
+      { parseThreads: parseDefault, parseMs: 100 },
+      { parseThreads: parseDefault, parseMs: 100 },
+      { parseThreads: parseDefault, parseMs: 100 },
+    ]),
+    { chosen: recordChoice({ parseThreads: pinned, source: 'default' }) },
+  );
+  assert.equal(preParseConfig({}, 16, {}, compared).parseThreads, pinned);
+});
+
 test('a record that leaves the parse threads open tries half of them, once in eight runs', () => {
   const parseDefault = defaultParseThreads(16);
   if (parseDefault < 2) return;
@@ -689,10 +784,14 @@ test('a record that leaves the parse threads open tries half of them, once in ei
   // A record whose checker count is still uncertain has that candidate measured first.
   const band = { shape: recordShape({ library: 4_000_000, own: 1_000_000 }) };
   assert.equal(preParseConfig({}, 16, exploring, recordOf(samples, band)).parseThreads, parseDefault);
-  // Once the candidate has its three samples, the parse threads have their turn.
+  // Once every count candidate has its three samples, the parse threads have their turn. The candidates
+  // are three quarters of the count and the machine's CPUs, which machines count differently.
+  const counts = [...new Set([Math.ceil((16 * 3) / 4), Math.min(availableParallelism(), 16)])].filter(
+    (checkers) => checkers !== 16,
+  );
   const closed = samplesOf([
     ...Array.from({ length: 8 }, () => ({ checkMs: 2500 })),
-    ...Array.from({ length: 3 }, () => ({ checkers: 12, checkMs: 2500 })),
+    ...counts.flatMap((checkers) => Array.from({ length: 3 }, () => ({ checkers, checkMs: 2500 }))),
   ]);
   const open = preParseConfig({}, 16, exploring, recordOf(closed, band));
   assert.equal(open.parseThreads, half);

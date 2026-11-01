@@ -622,6 +622,12 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
   let parseChosen = parsePinned ? parseDefault : chosen.parseThreads;
   let adopted = false;
   let role: 'chosen' | 'control' | 'explore' = before;
+  // The configuration `fastRevert` rejected, which the adoption below does not take again this run: its
+  // older samples can still dominate a median, and the last three runs are what the revert rule reads.
+  let rejectedCheckers: number | undefined = undefined;
+  let rejectedShare = false;
+  const rejected = (checkers: number, share: boolean): boolean =>
+    checkers === rejectedCheckers && share === rejectedShare;
 
   if (!exploredBefore && !controlBefore) {
     // 1. An adopted configuration stays until the static choice beats it, and a bad one reverts at once.
@@ -635,7 +641,9 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
     ) {
       const own = checkTimes(samples, wantCheckers, wantShare);
       const baseline = checkTimes(samples, staticCheckers, staticShare);
-      if (beatsBy(baseline, own) === undefined && !fastRevert(samples, wantCheckers, wantShare)) {
+      const staticBeats = beatsBy(baseline, own) !== undefined;
+      const fellBehind = !staticBeats && fastRevert(samples, wantCheckers, wantShare);
+      if (!staticBeats && !fellBehind) {
         checkers = wantCheckers;
         share = wantShare;
         checkersLearned = wantCheckers !== staticCheckers;
@@ -643,6 +651,10 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
         const gain = beatsBy(own, baseline);
         if (checkersLearned) checkersGain = gain;
         if (shareLearned) shareGain = gain;
+      }
+      if (fellBehind) {
+        rejectedCheckers = wantCheckers;
+        rejectedShare = wantShare;
       }
     }
     // 2. A control run re-measures the static choice, and changes no choice.
@@ -663,7 +675,10 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
       // 3. A configuration the record shows faster than the static one is adopted.
       if (!sharePinned && !shareLearned) {
         const alternative = !staticShare;
-        if (fits(checkers, alternative, decision, cpus, samples, decision.memoryBytes)) {
+        if (
+          !rejected(checkers, alternative) &&
+          fits(checkers, alternative, decision, cpus, samples, decision.memoryBytes)
+        ) {
           const gain = beatsBy(checkTimes(samples, checkers, alternative), checkTimes(samples, checkers, staticShare));
           if (gain !== undefined) {
             share = alternative;
@@ -675,7 +690,11 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
       }
       if (!checkersPinned && !checkersLearned) {
         for (const candidate of countCandidates(staticCheckers, cpus)) {
-          if (candidate === checkers || !fits(candidate, share, decision, cpus, samples, decision.memoryBytes))
+          if (
+            candidate === checkers ||
+            rejected(candidate, share) ||
+            !fits(candidate, share, decision, cpus, samples, decision.memoryBytes)
+          )
             continue;
           const gain = beatsBy(checkTimes(samples, candidate, share), checkTimes(samples, staticCheckers, staticShare));
           if (gain !== undefined) {
@@ -921,6 +940,10 @@ function learnedParseThreads(
   if (!Number.isInteger(threads) || threads < 1 || threads === parseDefault) return undefined;
   const samples = usableSamples(record);
   const gain = beatsBy(parseTimes(samples, threads), parseTimes(samples, parseDefault));
+  // The record's chosen count can differ from the default without having won a comparison: a run that
+  // pinned the parse threads before any record existed stores the pinned count, and the samples of that
+  // one run are no comparison. Only the three-sample comparison makes a count learned.
+  if (gain === undefined) return undefined;
   return { threads, reason: learnedReason('parse', gain, parseTimes(samples, threads).length) };
 }
 
