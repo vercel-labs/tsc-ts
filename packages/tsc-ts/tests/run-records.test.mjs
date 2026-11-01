@@ -94,7 +94,7 @@ test('the key covers the build, the project, the options and the machine', () =>
   assert.match(text, /\noptions noEmit=1 /);
 });
 
-test('a written record holds the sample and stays with the choice its samples describe', () => {
+test('a written record follows the choice each run made, and a changed choice starts at its run', () => {
   const dir = tempDir('tsc-ts-run-records-');
   const file = recordFile(dir, 'abc');
   const first = writeRecord(dir, 'abc', sample(), shape(), chosen());
@@ -113,9 +113,44 @@ test('a written record holds the sample and stays with the choice its samples de
   assert.equal(after.samples.length, 2);
   assert.equal(after.samples[1].run, 2);
   assert.equal(after.samples[1].totalMs, 40);
-  // The second run kept the first run's record: its samples describe that choice.
-  assert.equal(after.chosen.checkers, 4);
-  assert.equal(after.chosen.since, 1);
+  // The second run chose another count: the record describes that choice from this run.
+  assert.equal(after.chosen.checkers, 8);
+  assert.equal(after.chosen.since, 2);
+
+  // A run that chose the same configuration keeps the run that chose it.
+  writeRecord(dir, 'abc', sample({ at: now + 2 }), shape(), chosen({ checkers: 8 }));
+  const kept = readRecord(file);
+  assert.equal(kept.runs, 3);
+  assert.equal(kept.chosen.checkers, 8);
+  assert.equal(kept.chosen.since, 2);
+});
+
+test('an explore or control sample moves the schedule its role keeps', () => {
+  let record;
+  record = nextRecord(record, sample({ at: now }), shape(), chosen());
+  assert.equal(record.lastExplore, 0);
+  assert.equal(record.lastControl, 0);
+  record = nextRecord(record, sample({ at: now + 1, role: 'explore', checkers: 8 }), shape(), chosen());
+  assert.equal(record.lastExplore, 2);
+  assert.equal(record.lastControl, 0);
+  record = nextRecord(record, sample({ at: now + 2, role: 'control' }), shape(), chosen());
+  assert.equal(record.lastControl, 3);
+  assert.equal(record.lastExplore, 2);
+});
+
+test('adopting a learned choice starts its control schedule', () => {
+  const learned = (extra = {}) => chosen({ checkers: 8, source: 'learned', ...extra });
+  let record = nextRecord(undefined, sample({ at: now }), shape(), chosen());
+  assert.equal(record.lastControl, 0);
+  // The run that adopted the choice is when the next control is due from.
+  record = nextRecord(record, sample({ at: now + 1 }), shape(), learned());
+  assert.equal(record.lastControl, 2);
+  // A run that keeps it leaves the schedule alone.
+  record = nextRecord(record, sample({ at: now + 2 }), shape(), learned());
+  assert.equal(record.lastControl, 2);
+  // A new adoption starts it over.
+  record = nextRecord(record, sample({ at: now + 3 }), shape(), learned({ checkers: 12 }));
+  assert.equal(record.lastControl, 4);
 });
 
 test('an unreadable or malformed record is replaced, not merged', () => {
@@ -130,6 +165,28 @@ test('an unreadable or malformed record is replaced, not merged', () => {
     assert.equal(record.runs, 1);
     assert.equal(record.samples.length, 1);
   }
+});
+
+test('a record keeps the configuration a fast revert rejected', () => {
+  const dir = tempDir('tsc-ts-run-records-');
+  const file = recordFile(dir, 'abc');
+  const rejection = { checkers: 8, share: true, run: 1 };
+  writeRecord(dir, 'abc', sample(), shape(), chosen(), rejection);
+  assert.deepEqual(readRecord(file).rejected, rejection);
+  // A later run that rejects nothing keeps it, and one that rejects another configuration replaces it.
+  writeRecord(dir, 'abc', sample({ at: now + 1 }), shape(), chosen());
+  assert.deepEqual(readRecord(file).rejected, rejection);
+  const next = { checkers: 16, share: false, run: 2 };
+  writeRecord(dir, 'abc', sample({ at: now + 2 }), shape(), chosen(), next);
+  assert.deepEqual(readRecord(file).rejected, next);
+  // A project that changed past the shape limits starts over, the rejection with the samples.
+  writeRecord(dir, 'abc', sample({ at: now + 3 }), shape({ files: 200 }), chosen());
+  const changed = readRecord(file);
+  assert.equal(changed.rejected, undefined);
+  assert.equal(changed.samples.length, 1);
+  // A rejection that is not one this build writes is ignored, like a malformed sample.
+  writeFileSync(file, JSON.stringify({ ...changed, rejected: { checkers: 'x' } }));
+  assert.equal(readRecord(file).rejected, undefined);
 });
 
 test('a shape change discards the samples but keeps the run count', () => {

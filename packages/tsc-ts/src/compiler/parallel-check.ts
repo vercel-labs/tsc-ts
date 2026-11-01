@@ -74,6 +74,7 @@ import {
   CheckSignals,
   checkersPolicy,
   decideCheck,
+  learns,
   libraryBoundCount,
   maxAutoCheckers,
   minSharingCheckers,
@@ -86,6 +87,7 @@ import {
   type CheckFit,
   type RunConfig,
 } from './run-config.js';
+import type { RecordShape } from './run-records.js';
 
 // The tests of the scheduler read these here, next to the plans they choose between.
 export { autoCheckers, libraryBoundCount };
@@ -113,9 +115,9 @@ function shareStopHook(): { readonly at: number; readonly level: number } | unde
 const shareStop = shareStopHook();
 
 /**
- * How long a sharing run runs before the main thread weighs what sharing saved against what it cost
- * (`sharingNumbers`). No record is read yet, so the window is fixed; the learned window will be the
- * larger of 200 ms and a tenth of the run's recorded check time.
+ * The window a run without a configuration uses before the main thread weighs what sharing saved against
+ * what it cost (`sharingNumbers`): 300 ms. A run with one uses the larger of 200 ms and a tenth of the
+ * check time its record measured (`RunConfig.shareWindowMs`, `shareWindowOf`).
  */
 const shareWindowMs = 300;
 
@@ -1985,23 +1987,73 @@ export function mainThreadChecks(shared: boolean): boolean {
 }
 
 /**
+ * Whether the run reads the memory fit of sharing (`checkDecisionOf`): the static rule reads it where
+ * the signals point at sharing, and a run the learning rules read may adopt sharing the static rule
+ * leaves off, or explore it, when its samples show the configuration faster (DESIGN 4.3-4.4).
+ *
+ * A pin on sharing chooses sharing without a rule, but where it pins sharing on the learning rules still
+ * compare checker counts with it, and every count they may adopt reads how many fit memory with sharing's
+ * peak: a pinned count that no rule can change, and `TSC_TS_AUTO=0`, read nothing.
+ */
+export function sharingFitNeeded(config: RunConfig, signals: CheckSignals): boolean {
+  if (config.automaticity === Automaticity.Off) return false;
+  if (config.shareSource === Source.Pinned) {
+    return (
+      config.share &&
+      config.checkersSource !== Source.Pinned &&
+      learns(config.automaticity) &&
+      config.record !== undefined
+    );
+  }
+  if (sharingCandidate(signals)) return true;
+  return learns(config.automaticity) && config.record !== undefined;
+}
+
+/**
  * What `decideCheck` needs of the run besides its signals: whether the checker threads of a shared
- * program may share results (`startParallelCheck` makes the same test), and, where the rest of the
- * sharing rule holds, how many checkers fit memory with sharing's peak. The estimate costs a pass over
- * the program's files and its memory limit, so it is computed only where the rule reads it: a count
- * below `minSharingCheckers`, a program that is not library-bound, or a pinned run pay nothing.
+ * program may share results (`startParallelCheck` makes the same test), and, where sharing is possible
+ * and a rule that may choose it reads the estimate, how many checkers fit memory with sharing's peak
+ * (`sharingFitNeeded`). The estimate costs a pass over the program's files and its memory limit, so it
+ * is computed only where a rule reads it: a run without a record pays only where the static rule's
+ * signals point at sharing, and one checker, a program that is not shared, a pinned run or
+ * `TSC_TS_AUTO=0` pay nothing.
  */
 function checkDecisionOf(config: RunConfig, signals: CheckSignals, program: Program, shared: boolean): CheckDecision {
   // `mainThreadChecks` is false whenever the program is shared (`!shared`), as sharing needs.
   const possible = shared && signals.count > 1 && signals.count <= maxSharingCheckers;
-  const fit =
-    possible &&
-    config.shareSource !== Source.Pinned &&
-    config.automaticity !== Automaticity.Off &&
-    sharingCandidate(signals)
-      ? memoryFit(program)
-      : undefined;
-  return { possible, fit };
+  const fit = possible && sharingFitNeeded(config, signals) ? memoryFit(program) : undefined;
+  // A run whose record the learning rules read also names the shape its samples describe, the CPUs a
+  // count may use, the memory a configuration may not exceed and the time a control sample ages from.
+  const learning = config.records || config.record !== undefined;
+  return {
+    possible,
+    fit,
+    shape: learning ? recordShapeOf(program, signals) : undefined,
+    cpus: Math.min(availableParallelism(), maxAutoCheckers),
+    memoryBytes: memoryLimit(),
+    now: Math.floor(Date.now() / 1000),
+  };
+}
+
+/** The program's shape for its record (`RecordShape`), with the shares the sharing rule reads as `F`. */
+function recordShapeOf(program: Program, signals: CheckSignals): RecordShape {
+  const files = program.getSourceFiles();
+  let chars = 0;
+  let declarationChars = 0;
+  for (const file of files) {
+    chars += file.end;
+    if (file.isDeclarationFile) declarationChars += file.end;
+  }
+  return {
+    files: files.length,
+    chars,
+    declarationChars,
+    checkChars: chars - declarationChars,
+    library: Math.round(signals.library),
+    own: Math.round(signals.own),
+    redundancy: signals.redundancy,
+    fileShare: Math.max(signals.declarationShare, signals.nodeModulesShare),
+  };
 }
 
 /** What the counters of `count` checkers say at the sharing window: milliseconds saved and spent. */
@@ -2367,7 +2419,7 @@ export function startParallelCheck(
     const control = new Int32Array(sharing[0]!.control);
     const stats = new Float64Array(sharing[0]!.stats);
     const stop = shareStop;
-    const at = stop === undefined ? shareWindowMs : stop.at;
+    const at = stop !== undefined ? stop.at : config !== undefined ? config.shareWindowMs : shareWindowMs;
     shareStopTimer = setTimeout(() => {
       const numbers = sharingNumbers(stats, count);
       if (stop !== undefined) Atomics.store(control, 0, stop.level);

@@ -70,6 +70,7 @@ import {
 import { sharesPublishedGraphs } from '@scriptc/threads';
 import { checkerThreads, shareWithCheckers, startParallelCheck } from './parallel-check.js';
 import { preParseConfig, reportRunConfig, type RunConfig } from './run-config.js';
+import { openRecord } from './run-record-read.js';
 import { emitThreads } from './parallel-emit.js';
 import { LoadKind, ParseSession, clearPreparedFiles, parallelParse, reportPreparedFiles } from './parallel-parse.js';
 import { assignSymbolIdsAtCreation } from './symbol.js';
@@ -730,16 +731,29 @@ export class Orchestrator {
     const host = new BuildCompilerHost(sys, this.fs, this.locale);
     const configOptions = config.options;
     const checkers = threads ? checkerThreads(configOptions.checkers, configOptions.singleThreaded) : 1;
-    // One configuration per project: its parse threads, and the pins of its checker count and sharing.
-    const run = (task.run = preParseConfig(configOptions, checkers));
     // The projects of a build that builds several at once run beside each other, and each one's timings
-    // are the machine's, not its own: none keeps a record (run-records.ts).
+    // are the machine's, not its own: none keeps a record (run-records.ts). A watcher's builds measure a
+    // change, not the project: they keep none either, and read none.
     const builders = this.command.buildOptions.builders ?? (configOptions.singleThreaded === true ? 1 : 4);
+    const learning = builders === 1 && !this.watching;
+    const opened = learning
+      ? openRecord({
+          configFile: configOptions.configFilePath ?? task.config,
+          rootNames: config.fileNames,
+          options: configOptions,
+        })
+      : undefined;
+    // One configuration per project: its parse threads, and the pins of its checker count and sharing.
+    const run = (task.run = preParseConfig(configOptions, checkers, process.env, opened?.record, learning));
+    if (opened !== undefined) {
+      run.recordDirectory = opened.directory;
+      run.recordKey = opened.key;
+      run.recordFile = opened.file;
+    }
     if (builders > 1) {
       run.records = false;
       run.recordsReason = 'concurrent projects';
     }
-    // A watcher's builds measure a change, not the project: it keeps no record (run-records.ts).
     if (this.watching) {
       run.records = false;
       run.recordsReason = 'watch mode';

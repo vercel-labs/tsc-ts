@@ -58,15 +58,15 @@ import { reportRunConfig, Source, type CheckSignals, type RunConfig, type Record
 import { doctorReportPath, setDoctorCompile, type DoctorCompile, type DoctorSignals } from './doctor-report.js';
 import {
   displayPath,
+  recordEnvironment,
   recordKey,
   recordsDirectory,
   writeRecord,
   type RecordChoice,
-  type RecordEnvironment,
-  type RecordOptions,
   type RecordSample,
   type RecordShape,
 } from './run-records.js';
+import { recordOptionsOf } from './run-record-read.js';
 import { version } from './help.js';
 import { availableParallelism, loadavg } from 'node:os';
 
@@ -665,11 +665,20 @@ export function saveRunRecord(
   if (program.options.singleThreaded === true) return { off: '--singleThreaded' };
   // A run that stopped before checking (`--noCheck`, syntax errors) has nothing to sample.
   if (!program.checkedTheProgram) return { off: 'nothing checked' };
-  const directory = recordsDirectory(recordEnvironment());
+  // A run that read its record before parsing already knows the directory and key (`openRecord`); a
+  // build project that did not computes them now, from the parsed program.
+  const directory = config.recordDirectory ?? recordsDirectory(recordEnvironment());
   if (directory === undefined) return { off: 'TSC_TS_CACHE=0' };
-  const shape = recordShapeOf(program, config);
-  const key = recordKeyOf(program);
-  const written = writeRecord(directory, key, recordSampleOf(sys, program, config), shape, chosenOf(config));
+  const shape = config.shape ?? recordShapeOf(program, config);
+  const key = config.recordKey ?? recordKeyOf(program);
+  const written = writeRecord(
+    directory,
+    key,
+    recordSampleOf(sys, program, config),
+    shape,
+    chosenOf(config),
+    config.rejected,
+  );
   if (written.path !== undefined) return { path: displayPath(written.path) };
   return { unavailable: written.reason };
 }
@@ -723,18 +732,6 @@ function doctorSignalsOf(signals: CheckSignals): DoctorSignals {
   };
 }
 
-/** The record-related environment, read by name (a scriptc build holds `process.env` as an index signature). */
-function recordEnvironment(): RecordEnvironment {
-  return {
-    TSC_TS_CACHE: process.env.TSC_TS_CACHE,
-    TSC_TS_CACHE_DIR: process.env.TSC_TS_CACHE_DIR,
-    XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
-    LOCALAPPDATA: process.env.LOCALAPPDATA,
-    HOME: process.env.HOME,
-    USERPROFILE: process.env.USERPROFILE,
-  };
-}
-
 /** The program's size, and the library and redundancy signals where the run computed them. */
 function recordShapeOf(program: CompilerProgram, config: RunConfig | undefined): RecordShape {
   let files = 0;
@@ -754,6 +751,7 @@ function recordShapeOf(program: CompilerProgram, config: RunConfig | undefined):
     library: signals === undefined ? 0 : Math.round(signals.library),
     own: signals === undefined ? 0 : Math.round(signals.own),
     redundancy: signals === undefined ? 0 : signals.redundancy,
+    fileShare: signals === undefined ? 0 : Math.max(signals.declarationShare, signals.nodeModulesShare),
   };
 }
 
@@ -764,7 +762,7 @@ function recordSampleOf(sys: System, program: CompilerProgram, config: RunConfig
   const cpus = Math.max(1, availableParallelism());
   return {
     at: Math.floor(Date.now() / 1000),
-    role: 'chosen',
+    role: config.role,
     checkers: config.checkers,
     share: config.share,
     parseThreads: config.parseThreads,
@@ -777,31 +775,19 @@ function recordSampleOf(sys: System, program: CompilerProgram, config: RunConfig
   };
 }
 
-/** The configuration this run chose, as its record keeps it (the record numbers the run that chose it). */
+/**
+ * The configuration this run chose for the next one, as its record keeps it (the record numbers the run
+ * that chose it). The learning rules name it (`config.chosen`); a run without them records the choice it
+ * used, and whether a pin made it.
+ */
 function chosenOf(config: RunConfig): RecordChoice {
+  if (config.chosen !== undefined) return config.chosen;
   return {
     checkers: config.checkers,
     share: config.share,
     parseThreads: config.parseThreads,
-    source: config.checkersSource === Source.Pinned ? 'pinned' : 'default',
+    source: config.checkersSource === Source.Pinned || config.shareSource === Source.Pinned ? 'pinned' : 'default',
     since: 0,
-  };
-}
-
-/** The options the record's key covers (`run-records.ts`: those that change the work a run does). */
-function recordOptionsOf(options: CompilerOptions): RecordOptions {
-  return {
-    noEmit: options.noEmit,
-    emitDeclarationOnly: options.emitDeclarationOnly,
-    declaration: options.declaration,
-    composite: options.composite,
-    incremental: options.incremental,
-    outFile: options.outFile,
-    noEmitOnError: options.noEmitOnError,
-    skipLibCheck: options.skipLibCheck,
-    checkJs: options.checkJs,
-    isolatedDeclarations: options.isolatedDeclarations,
-    configFilePath: options.configFilePath,
   };
 }
 
