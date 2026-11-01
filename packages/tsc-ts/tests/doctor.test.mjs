@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compileSources, tempDir } from './temp.mjs';
 import { tscTs, tscTsMissing, typescriptLib } from './toolchain.mjs';
@@ -191,5 +191,103 @@ test(
     }
     // The runs cover more than the default configuration: the checker-count alternative among them.
     assert.ok(new Set(record.samples.map((sample) => sample.checkers)).size >= 1);
+  },
+);
+
+// The recommendation's own arithmetic, from runs made up here: each configuration's check time is
+// synthesized, so the cases a machine rarely produces can be measured exactly.
+
+const doctorBuild = resolve('dist/tsc-ts/src/drivers/doctor.js');
+const doctorBuildSkip = !existsSync(doctorBuild) && 'run npm run build';
+
+/** The recommendation for runs whose check times are `checkMs`, by configuration letter. */
+async function recommendFor(checkMs) {
+  const { DoctorPlan, DoctorRun, Measurements, recommend } = await import(pathToFileURL(doctorBuild).href);
+  const plans = [
+    new DoctorPlan('A', 'default', 'default, 12 checkers', undefined, undefined, undefined),
+    new DoctorPlan('B', 'share', '12 checkers, sharing on', undefined, true, undefined),
+    new DoctorPlan('C', 'checkers', '16 checkers', 16, undefined, undefined),
+    new DoctorPlan('D', 'checkers-share', '16 checkers, sharing on', 16, true, undefined),
+    new DoctorPlan('E', 'parse', 'default, 8 parse threads', undefined, undefined, 8),
+  ];
+  const measured = new Map();
+  for (const plan of plans) {
+    const measurements = new Measurements();
+    const { parseMs, checkMs: check } = checkMs[plan.id];
+    for (let run = 0; run < 3; run++) {
+      const report = {
+        status: 0,
+        cpuMs: check * 2,
+        peakMB: 100,
+        times: { parseMs, checkMs: check, totalMs: parseMs + check },
+      };
+      measurements.runs.push(new DoctorRun(check / 1000, 0, '', report, 0, Date.now()));
+    }
+    measured.set(plan.id, measurements);
+  }
+  // The project as it runs today: 12 checkers, no sharing, 15 parse threads.
+  const first = { status: 0, cpuMs: 0, peakMB: 0, checkers: 12, share: false, parseThreads: 15 };
+  return recommend(plans, measured, first);
+}
+
+const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.01, `${actual} is not ${expected}`);
+
+test(
+  'sharing that loses at the recommended count is not reported as the count`s gain',
+  { skip: doctorBuildSkip },
+  async () => {
+    // Sharing wins at the default count (900 against 1000), the higher count wins with sharing on (630
+    // against 900), and sharing is slower at that count (630 against 600 without it).
+    const recommendation = await recommendFor({
+      A: { parseMs: 100, checkMs: 1000 },
+      B: { parseMs: 100, checkMs: 900 },
+      C: { parseMs: 100, checkMs: 600 },
+      D: { parseMs: 100, checkMs: 630 },
+      E: { parseMs: 100, checkMs: 1000 },
+    });
+    assert.equal(recommendation.checkers, 16);
+    assert.equal(recommendation.share, false);
+    assert.equal(recommendation.shareCheckers, 16);
+    // Sharing's own comparison at 16 checkers: 630 against 600 is 5% slower, not the 30% the count
+    // gained with sharing on (630 against 900).
+    close(recommendation.shareEvidence.percent, -5);
+    assert.equal(recommendation.shareEvidence.beats, false);
+    // The count is recommended on its own, sharing off: 600 against 1000.
+    close(recommendation.checkersEvidence.percent, 40);
+    assert.equal(recommendation.checkersEvidence.beats, true);
+  },
+);
+
+test('sharing that still pays at the recommended count reports its gain there', { skip: doctorBuildSkip }, async () => {
+  const recommendation = await recommendFor({
+    A: { parseMs: 100, checkMs: 1000 },
+    B: { parseMs: 100, checkMs: 900 },
+    C: { parseMs: 100, checkMs: 600 },
+    D: { parseMs: 100, checkMs: 570 },
+    E: { parseMs: 100, checkMs: 1000 },
+  });
+  assert.equal(recommendation.checkers, 16);
+  assert.equal(recommendation.share, true);
+  assert.equal(recommendation.shareCheckers, 16);
+  // 570 against 600 at 16 checkers, not the 36.7% the count gained with sharing on (570 against 900).
+  close(recommendation.shareEvidence.percent, 5);
+  assert.equal(recommendation.shareEvidence.beats, true);
+});
+
+test(
+  'sharing stays on at the default count where the higher count does not pay with it',
+  { skip: doctorBuildSkip },
+  async () => {
+    const recommendation = await recommendFor({
+      A: { parseMs: 100, checkMs: 1000 },
+      B: { parseMs: 100, checkMs: 900 },
+      C: { parseMs: 100, checkMs: 700 },
+      D: { parseMs: 100, checkMs: 950 },
+      E: { parseMs: 100, checkMs: 1000 },
+    });
+    assert.equal(recommendation.checkers, 12);
+    assert.equal(recommendation.share, true);
+    assert.equal(recommendation.shareCheckers, undefined);
+    close(recommendation.shareEvidence.percent, 10);
   },
 );

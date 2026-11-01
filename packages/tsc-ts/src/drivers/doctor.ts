@@ -57,7 +57,7 @@ class DoctorOptions {
 }
 
 /** One configuration doctor measures. */
-class DoctorPlan {
+export class DoctorPlan {
   constructor(
     /** The letter the table prints (`A`, `B`, …). */
     readonly id: string,
@@ -75,7 +75,7 @@ class DoctorPlan {
 }
 
 /** One measured run of a configuration. */
-class DoctorRun {
+export class DoctorRun {
   constructor(
     /** The parent's wall clock, seconds. */
     readonly wall: number,
@@ -93,7 +93,7 @@ class DoctorRun {
 }
 
 /** All the runs of one configuration. */
-class Measurements {
+export class Measurements {
   readonly runs: DoctorRun[] = [];
 }
 
@@ -616,7 +616,7 @@ function compare(
 }
 
 /** The recommendation: each setting's value and the evidence for it. */
-function recommend(
+export function recommend(
   plans: readonly DoctorPlan[],
   measured: Map<string, Measurements>,
   first: ChildReport,
@@ -626,62 +626,81 @@ function recommend(
   const defaultCheckers = first.checkers ?? 1;
   const defaultShare = first.share === true;
   const defaultParse = first.parseThreads ?? 1;
-  const a = numbersOf('A');
 
-  // Sharing: B against A.
-  const b = planOf('share');
-  let shareEvidence = new Comparison(false, 0, 0, 'already the default', undefined);
-  if (b !== undefined) {
-    const shareAlternative = numbersOf(b.id);
-    shareEvidence = compare(shareAlternative.check, a.check, shareAlternative.cpu, a.cpu, defaultShare ? 'off' : 'on');
-  }
-  const share = shareEvidence.beats ? !defaultShare : defaultShare;
-
-  // Checkers: C against A with sharing off, D against B with sharing on.
-  const checkersPlan = planOf(share ? 'checkers-share' : 'checkers');
-  const checkersBaselinePlan = planOf(share ? 'share' : 'default');
-  let checkersEvidence = new Comparison(false, 0, 0, 'already the default', undefined);
-  if (checkersPlan !== undefined && checkersBaselinePlan !== undefined) {
-    const alternative = numbersOf(checkersPlan.id);
-    const baseline = numbersOf(checkersBaselinePlan.id);
-    checkersEvidence = compare(
-      alternative.check,
-      baseline.check,
-      alternative.cpu,
-      baseline.cpu,
-      String(checkersPlan.checkers),
+  /** The comparison of `alternative` with `baseline`, one change apart, on the phase they share. */
+  const between = (
+    alternative: DoctorPlan | undefined,
+    baseline: DoctorPlan | undefined,
+    phase: 'check' | 'parse',
+    text: string,
+  ): Comparison => {
+    if (alternative === undefined || baseline === undefined) return new Comparison(false, 0, 0, 'not measured', text);
+    const after = numbersOf(alternative.id);
+    const before = numbersOf(baseline.id);
+    return compare(
+      phase === 'check' ? after.check : after.parse,
+      phase === 'check' ? before.check : before.parse,
+      after.cpu,
+      before.cpu,
+      text,
     );
-  }
-  const checkers = checkersEvidence.beats ? (checkersPlan?.checkers ?? defaultCheckers) : defaultCheckers;
+  };
+
+  // Sharing at the default count: B against A (the setting the run does not use against the one it does).
+  const shareAtDefault = between(planOf('share'), planOf('default'), 'check', defaultShare ? 'off' : 'on');
+  let share = shareAtDefault.beats ? !defaultShare : defaultShare;
+
+  // Checkers: C against A with the default sharing, D against B with the other one.
+  const checkersPlan = planOf(share === defaultShare ? 'checkers' : 'checkers-share');
+  const checkersBaselinePlan = planOf(share === defaultShare ? 'default' : 'share');
+  let checkersEvidence = between(
+    checkersPlan,
+    checkersBaselinePlan,
+    'check',
+    String(checkersPlan?.checkers ?? defaultCheckers),
+  );
+  let checkers = checkersEvidence.beats ? (checkersPlan?.checkers ?? defaultCheckers) : defaultCheckers;
 
   // Parse threads: E against A.
   const e = planOf('parse');
-  let parseEvidence = new Comparison(false, 0, 0, 'already the default', undefined);
-  if (e !== undefined) {
-    const parseAlternative = numbersOf(e.id);
-    parseEvidence = compare(parseAlternative.parse, a.parse, parseAlternative.cpu, a.cpu, String(e.parseThreads));
-  }
+  const parseEvidence = between(e, planOf('default'), 'parse', String(e?.parseThreads ?? defaultParse));
   const parseThreads = parseEvidence.beats ? (e?.parseThreads ?? defaultParse) : defaultParse;
 
-  // The sharing percentage at the checker count doctor recommends, where it was measured.
+  // Sharing at the checker count doctor recommends. B against A measures sharing at the default count,
+  // and that gain need not hold where the count is higher: doctor measures sharing again there, D
+  // against C, and reports that comparison rather than the count's own gain as sharing's.
+  let shareEvidence = shareAtDefault;
   let shareCheckers: number | undefined = undefined;
-  if (shareEvidence.beats && checkers !== defaultCheckers) {
-    const withDefault = checkersBaselinePlan === undefined ? undefined : numbersOf(checkersBaselinePlan.id);
-    const withChosen = checkersPlan === undefined ? undefined : numbersOf(checkersPlan.id);
-    if (
-      withDefault !== undefined &&
-      withChosen !== undefined &&
-      withDefault.check !== undefined &&
-      withChosen.check !== undefined &&
-      withDefault.check.median !== 0
-    ) {
-      shareEvidence = new Comparison(
-        true,
-        (1 - withChosen.check.median / withDefault.check.median) * 100,
-        shareEvidence.cpuPercent,
-        undefined,
-        shareEvidence.alternative,
+  if (checkers !== defaultCheckers) {
+    const atCount = between(planOf('checkers-share'), planOf('checkers'), 'check', defaultShare ? 'off' : 'on');
+    const sharingThere = atCount.beats ? !defaultShare : defaultShare;
+    if (sharingThere !== share) {
+      // The higher count changes the sharing decision: the count is recommended only where it pays with
+      // the sharing that holds at it, and otherwise the default count keeps the sharing measured there.
+      const countWithSharingThere = between(
+        planOf(sharingThere === defaultShare ? 'checkers' : 'checkers-share'),
+        planOf(sharingThere === defaultShare ? 'default' : 'share'),
+        'check',
+        String(checkers),
       );
+      if (countWithSharingThere.beats) {
+        share = sharingThere;
+        checkersEvidence = countWithSharingThere;
+        shareEvidence = atCount;
+        shareCheckers = checkers;
+      } else {
+        checkers = defaultCheckers;
+        checkersEvidence = new Comparison(
+          false,
+          0,
+          0,
+          'the higher count pays only with the other sharing',
+          String(checkers),
+        );
+        share = shareAtDefault.beats ? !defaultShare : defaultShare;
+      }
+    } else if (sharingThere === !defaultShare) {
+      shareEvidence = atCount;
       shareCheckers = checkers;
     }
   }
@@ -1020,7 +1039,13 @@ function settingLine(
   else if (evidence.reason !== undefined) evidenceText = 'default (' + evidence.reason + ')';
   else
     evidenceText =
-      'default (' + (evidence.alternative ?? 'alternative') + ': within noise' + cpuComparison(evidence) + ')';
+      'default (' +
+      (evidence.alternative ?? 'alternative') +
+      // An alternative whose median is below the baseline's lost by its own margin, which is slower
+      // still; one whose median is above it is within noise of it.
+      (evidence.percent < 0 ? ': slower' : ': within noise') +
+      cpuComparison(evidence) +
+      ')';
   return '  ' + (name + ':').padEnd(16) + value.padEnd(8) + evidenceText.padEnd(48) + 'pin: ' + pin;
 }
 
