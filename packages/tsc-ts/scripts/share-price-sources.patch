@@ -400,10 +400,10 @@ index 711cf0d..3751a49 100644
      // instantiations nest three or more times.
      const circularTypeNames = getCircularTypeNames(c);
 diff --git a/compiler/parallel-check.ts b/compiler/parallel-check.ts
-index 11e171c..ea5fcdb 100644
+index a1448dc..3f2588d 100644
 --- a/compiler/parallel-check.ts
 +++ b/compiler/parallel-check.ts
-@@ -1927,6 +1927,9 @@ export function checkFromQueue(
+@@ -1877,6 +1877,9 @@ export function checkFromQueue(
      }
    }
    mark(`checked ${done.length} files, ${unitsDone.length} ranges`);

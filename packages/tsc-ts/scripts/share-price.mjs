@@ -13,8 +13,9 @@
 // candidate take. The rule posts a result only if it clears the posting threshold, the demand of another checker
 // for its key, and the export budget (`p0 + R·e ≤ κ·T`); the consumer takes it only if the records it would build
 // fit its budget (`c·B_new + w·B_seen ≤ λ·T`). A take saves the computation it replaces, which is the computation
-// and its nested computations, counted once: a take inside a take saves nothing more. The wall estimate is the
-// longest of the checkers' busy intervals minus the time the takes save there.
+// and its nested computations, counted once, less the records it builds at the consumer: a take inside a take saves
+// nothing more. The wall estimate is the longest of the checkers' busy intervals with each rule's takes, their
+// translations and its posts priced in.
 //
 // Times in the logs are `performance.now()` of the build, offset by the epoch each log records (`origin`), so
 // records of different threads can be compared.
@@ -172,7 +173,8 @@ function parseLog(file) {
       });
       continue;
     }
-    if (kind === 'w') log.intervals.push({ index: Number(f[0]), start: log.origin + Number(f[1]), end: log.origin + Number(f[2]) });
+    if (kind === 'w')
+      log.intervals.push({ index: Number(f[0]), start: log.origin + Number(f[1]), end: log.origin + Number(f[2]) });
   }
   // The computations are in the order they started: a nested one started after the one it is in.
   const stack = [];
@@ -446,17 +448,33 @@ for (const bucket of classBuckets) {
   const total = classNames.reduce((sum, name) => sum + (classes.get(bucket + ' ' + name) ?? 0), 0);
   say([bucket, ...cells, fixed(total, 1)].join(' | '));
 }
-const classTotals = classNames.map((name) => classBuckets.reduce((sum, bucket) => sum + (classes.get(bucket + ' ' + name) ?? 0), 0));
-say(['all', ...classTotals.map((value) => fixed(value, 1)), fixed(classTotals.reduce((a, b) => a + b, 0), 1)].join(' | '));
+const classTotals = classNames.map((name) =>
+  classBuckets.reduce((sum, bucket) => sum + (classes.get(bucket + ' ' + name) ?? 0), 0),
+);
+say(
+  [
+    'all',
+    ...classTotals.map((value) => fixed(value, 1)),
+    fixed(
+      classTotals.reduce((a, b) => a + b, 0),
+      1,
+    ),
+  ].join(' | '),
+);
 // Duplicates of a result seven or more checkers compute, started while another checker was already computing it,
 // and the self time of those duplicates.
-const sevenPlusTiming = ['7-9', '10-12', '13-15', '16+'].reduce((sum, bucket) => sum + (classes.get(bucket + ' timing') ?? 0), 0);
+const sevenPlusTiming = ['7-9', '10-12', '13-15', '16+'].reduce(
+  (sum, bucket) => sum + (classes.get(bucket + ' timing') ?? 0),
+  0,
+);
 say(
   `started while another checker was computing it, seven or more checkers: ` +
     `${fixed(sevenPlusTiming, 1)} ms${pctOfWall(sevenPlusTiming)}`,
 );
 say();
-say(`overlap share: ${pct(overlapMs, otherMs)} of other-file time (${fixed(overlapMs, 0)} ms of ${fixed(otherMs, 0)} ms)`);
+say(
+  `overlap share: ${pct(overlapMs, otherMs)} of other-file time (${fixed(overlapMs, 0)} ms of ${fixed(otherMs, 0)} ms)`,
+);
 
 // ---- Repeated structures
 
@@ -499,7 +517,18 @@ const operatorNames = ['conditional', 'distributed', 'indexed-access', 'keyof-ma
 if (evaluations.length > 0) {
   say();
   say(`## evaluations (uncached)`);
-  say(['operator', 'count', 'time ms', 'keys', 'key in 2+ checkers', 'time in 2+ checkers ms', 'limited', 'diagnostic'].join(' | '));
+  say(
+    [
+      'operator',
+      'count',
+      'time ms',
+      'keys',
+      'key in 2+ checkers',
+      'time in 2+ checkers ms',
+      'limited',
+      'diagnostic',
+    ].join(' | '),
+  );
   for (let operator = 0; operator < operatorNames.length; operator++) {
     const list = evaluations.filter((e) => e.operator === operator);
     if (list.length === 0) continue;
@@ -555,7 +584,13 @@ function shapeOf(key, producer) {
   }
   const bNew = measured.length > 0 ? built / measured.length : producer.exportRecords >= 0 ? producer.exportRecords : 0;
   const bSeen = measured.length > 0 ? walked / measured.length : 0;
-  return { bNew, bSeen, records: producer.exportRecords, types: seen === undefined ? 0 : seen.types, symbols: seen === undefined ? 0 : seen.symbols };
+  return {
+    bNew,
+    bSeen,
+    records: producer.exportRecords,
+    types: seen === undefined ? 0 : seen.types,
+    symbols: seen === undefined ? 0 : seen.symbols,
+  };
 }
 
 function replay({ name, cPerRecordUs, lambda, minMs, kappaValue, demand }) {
@@ -585,6 +620,9 @@ function replay({ name, cPerRecordUs, lambda, minMs, kappaValue, demand }) {
     let post = posts.get(key);
     if (post === undefined) {
       const shape = shapeOf(key, producer);
+      // `records` is `-1` when the run measured no export of this result: the export failed, or the result was
+      // neither posted nor dry-run. Such a post cannot be replayed, so the rule leaves the result unposted.
+      const measured = shape.records >= 0;
       const records = Math.max(0, shape.records);
       const cost = p0Us + records * eUs;
       const overBudget = kappaValue > 0 && us(shared) * kappaValue < cost;
@@ -593,7 +631,7 @@ function replay({ name, cPerRecordUs, lambda, minMs, kappaValue, demand }) {
         // Demand: another checker computes a result in the same declaration file, which is what a post is for.
         wanted = (logsInFile.get(producer.fileName)?.size ?? 0) > 1;
       }
-      post = { ok: !overBudget && wanted && records >= 0, records, shape };
+      post = { ok: !overBudget && wanted && measured, records, shape };
       posts.set(key, post);
       if (post.ok) {
         // `cost` is microseconds, like the per-record costs it is built from; the saved time is milliseconds.
@@ -604,14 +642,19 @@ function replay({ name, cPerRecordUs, lambda, minMs, kappaValue, demand }) {
     }
     if (!post.ok) continue;
     const shape = post.shape;
-    const lookup = p0Us + cPerRecordUs * shape.bNew + (wNs / 1000) * shape.bSeen;
-    // The consumer's budget: the records it would build must fit under λ of the producer's time.
-    if (lambda > 0 && us(lookup) > lambda * us(shared)) continue;
-    takes.get(c.log).push({ computation: c, bucket: bucketOf(byKey.get(key).length), bNew: shape.bNew });
+    // What the consumer would pay to translate the result: records built at `c` each, the others walked at `w`.
+    const translationUs = cPerRecordUs * shape.bNew + (wNs / 1000) * shape.bSeen;
+    const lookup = p0Us + translationUs;
+    // The consumer's budget: the records it would build must fit under λ of the producer's time. Both sides are
+    // microseconds: `lookup` is built from the per-microsecond costs, and the producer's time is in milliseconds.
+    if (lambda > 0 && lookup > lambda * us(shared)) continue;
+    takes.get(c.log).push({ computation: c, bucket: bucketOf(byKey.get(key).length), bNew: shape.bNew, translationUs });
   }
-  // A take saves the computation and what was computed inside it, once: a take inside a take saves nothing more.
+  // A take saves the computation and what was computed inside it, once, less the records it builds at the
+  // consumer: a take inside a take saves nothing more.
   let saved = 0;
-  // The saved time by checker-count bucket, and of it the takes that build no new record at the consumer.
+  let takeCost = 0;
+  // The net saved time by checker-count bucket, and of it the takes that build no new record at the consumer.
   const savedByBucket = new Map();
   let savedNoNew = 0;
   let takesNoNew = 0;
@@ -628,11 +671,15 @@ function replay({ name, cPerRecordUs, lambda, minMs, kappaValue, demand }) {
       }
       if (inside) continue;
       const self = c.end - c.start;
+      // The consumer pays for the records it builds instead of the computation it skips.
+      const translation = take.translationUs / 1000;
       saved += self;
+      takeCost += translation;
       addSaved(log, self);
-      savedByBucket.set(take.bucket, (savedByBucket.get(take.bucket) ?? 0) + self);
+      addCost(log, translation);
+      savedByBucket.set(take.bucket, (savedByBucket.get(take.bucket) ?? 0) + self - translation);
       if (take.bNew < 0.5) {
-        savedNoNew += self;
+        savedNoNew += self - translation;
         takesNoNew++;
       }
     }
@@ -642,6 +689,7 @@ function replay({ name, cPerRecordUs, lambda, minMs, kappaValue, demand }) {
   return {
     name,
     saved,
+    takeCost,
     postCost,
     postCount,
     takes: [...takes.values()].reduce((a, b) => a + b.length, 0),
@@ -666,7 +714,9 @@ for (const log of logs) {
 
 say();
 say(`## rules`);
-say(`costs: p0 ${p0Us} µs, e ${eUs} µs per record, c ${cUs} µs per record built, w ${wNs} ns per record walked, κ ${kappa}`);
+say(
+  `costs: p0 ${p0Us} µs, e ${eUs} µs per record, c ${cUs} µs per record built, w ${wNs} ns per record walked, κ ${kappa}`,
+);
 // No pair of a translation and the computation it came from leaves ρ undecided: the budget rule then takes the
 // cap, so the replay answers for a consumer that can afford all of a small result's translation.
 const lambda10 = percentile(rhoSmall.length > 0 ? rhoSmall : rhoAll, 10);
@@ -681,30 +731,58 @@ say(
 );
 say();
 say(
-  ['rule', 'posts', 'takes', 'saved ms', 'post ms', 'net ms', 'net of wall ms', 'net % wall', 'wall estimate ms'].join(' | '),
+  [
+    'rule',
+    'posts',
+    'takes',
+    'saved ms',
+    'take ms',
+    'post ms',
+    'net ms',
+    'net of wall ms',
+    'net % wall',
+    'wall estimate ms',
+  ].join(' | '),
 );
 const rules = [
   { name: 'today', cPerRecordUs: cUs, lambda: 0, minMs: minMsOption, kappaValue: kappa, demand: true },
   { name: 'today, no demand', cPerRecordUs: cUs, lambda: 0, minMs: minMsOption, kappaValue: kappa, demand: false },
   { name: 'with λ budget', cPerRecordUs: cUs, lambda, minMs: minMsOption, kappaValue: kappa, demand: true },
-  { name: 'after translation work, 0.5 ms floor', cPerRecordUs: 4.8, lambda, minMs: 0.5, kappaValue: kappa, demand: true },
-  { name: 'after translation work, small results', cPerRecordUs: 4.8, lambda, minMs: 0, kappaValue: kappa, demand: true },
+  {
+    name: 'after translation work, 0.5 ms floor',
+    cPerRecordUs: 4.8,
+    lambda,
+    minMs: 0.5,
+    kappaValue: kappa,
+    demand: true,
+  },
+  {
+    name: 'after translation work, small results',
+    cPerRecordUs: 4.8,
+    lambda,
+    minMs: 0,
+    kappaValue: kappa,
+    demand: true,
+  },
 ];
 const results = [];
 for (const rule of rules) {
   const result = replay(rule);
   results.push(result);
-  const net = result.saved - result.postCost;
+  const net = result.saved - result.takeCost - result.postCost;
   // Checker time saved is shared by the checkers: at c16 a millisecond of checker time is 1/16 ms of wall, the same
   // conversion the design's ceilings use.
   const ofWall = net / threads;
-  const wall = wallMs === undefined ? '' : fixed(result.wall - ofWall, 0);
+  // A rule's wall time is the longest busy interval once its takes, translations and posts are priced in, which is
+  // `result.wall`: each checker's busy time already holds the time the rule saves it and the time it costs it.
+  const wall = wallMs === undefined ? '' : fixed(result.wall, 0);
   say(
     [
       rule.name,
       result.postCount.toLocaleString(),
       result.takes.toLocaleString(),
       fixed(result.saved, 0),
+      fixed(result.takeCost, 0),
       fixed(result.postCost, 0),
       fixed(net, 0),
       fixed(ofWall, 0),
@@ -716,27 +794,29 @@ for (const rule of rules) {
 if (wallMs !== undefined) say(`(wall time of the run: ${fixed(wallMs, 0)} ms)`);
 
 // The best rule by net checker time, and where its takes are.
-const best = results.reduce((a, b) => (b.saved - b.postCost > a.saved - a.postCost ? b : a));
+const best = results.reduce((a, b) => (b.saved - b.takeCost - b.postCost > a.saved - a.takeCost - a.postCost ? b : a));
+// The best rule's saving, after the records its takes build at the consumer: the bucket figures are net of them.
+const bestNet = best.saved - best.takeCost;
 say();
 say(`## takes of the best rule (${best.name}), by how many checkers compute the key`);
 const bucketOrder = ['1', ...buckets.map(([low, high]) => (low === 16 ? '16+' : `${low}-${high}`))];
-say(['bucket', 'saved ms', 'share'].join(' | '));
+say(['bucket', 'net ms', 'share'].join(' | '));
 for (const bucket of bucketOrder) {
   const value = best.savedByBucket.get(bucket);
   if (value === undefined) continue;
-  say([bucket, fixed(value, 0), pct(value, best.saved)].join(' | '));
+  say([bucket, fixed(value, 0), pct(value, bestNet)].join(' | '));
 }
 const sevenPlus = bucketOrder
   .filter((bucket) => bucket === '16+' || Number(bucket.split('-')[0]) >= 7)
   .reduce((sum, bucket) => sum + (best.savedByBucket.get(bucket) ?? 0), 0);
 say(
   `seven or more checkers: ${fixed(sevenPlus, 0)} ms saved, ` +
-    `${pct(sevenPlus, best.saved)} of the rule's saving, ` +
+    `${pct(sevenPlus, bestNet)} of the rule's saving, ` +
     `${fixed(sevenPlus / threads, 0)} ms of wall${pctOfWall(sevenPlus / threads)}`,
 );
 say(
   `takes that build no new record at the consumer: ${best.takesNoNew.toLocaleString()} takes, ` +
-    `${fixed(best.savedNoNew, 0)} ms saved, ${pct(best.savedNoNew, best.saved)} of the rule's saving, ` +
+    `${fixed(best.savedNoNew, 0)} ms saved, ${pct(best.savedNoNew, bestNet)} of the rule's saving, ` +
     `${fixed(best.savedNoNew / threads, 0)} ms of wall${pctOfWall(best.savedNoNew / threads)}`,
 );
 
@@ -774,22 +854,24 @@ if (jsonFile !== undefined) {
           posts: r.postCount,
           takes: r.takes,
           savedMs: r.saved,
+          takeMs: r.takeCost,
           postMs: r.postCost,
-          netMs: r.saved - r.postCost,
-          netOfWallMs: (r.saved - r.postCost) / threads,
-          netShareOfWall: wallMs === undefined ? null : (r.saved - r.postCost) / threads / wallMs,
-          wallMs: r.wall - (r.saved - r.postCost) / threads,
+          netMs: r.saved - r.takeCost - r.postCost,
+          netOfWallMs: (r.saved - r.takeCost - r.postCost) / threads,
+          netShareOfWall: wallMs === undefined ? null : (r.saved - r.takeCost - r.postCost) / threads / wallMs,
+          wallMs: r.wall,
         })),
         best: {
           name: best.name,
+          netMs: bestNet,
           savedByBucket: Object.fromEntries(best.savedByBucket),
           sevenCheckersOrMoreSavedMs: sevenPlus,
-          sevenCheckersOrMoreShareOfSaving: best.saved === 0 ? 0 : sevenPlus / best.saved,
+          sevenCheckersOrMoreShareOfSaving: bestNet === 0 ? 0 : sevenPlus / bestNet,
           sevenCheckersOrMoreOfWallMs: sevenPlus / threads,
           sevenCheckersOrMoreShareOfWall: wallMs === undefined ? null : sevenPlus / threads / wallMs,
           takesThatBuildNoNewRecord: best.takesNoNew,
           savedByThoseMs: best.savedNoNew,
-          savedByThoseShareOfSaving: best.saved === 0 ? 0 : best.savedNoNew / best.saved,
+          savedByThoseShareOfSaving: bestNet === 0 ? 0 : best.savedNoNew / bestNet,
           savedByThoseShareOfWall: wallMs === undefined ? null : best.savedNoNew / threads / wallMs,
         },
       },

@@ -12,20 +12,24 @@ export function writeSharePriceSources(root, out) {
   const copy = join(out, 'src');
   rmSync(out, { recursive: true, force: true });
   cpSync(join(root, 'src'), copy, { recursive: true });
-  applyPatch(readFileSync(patchPath, 'utf8'), copy);
+  applyUnifiedDiff(readFileSync(patchPath, 'utf8'), copy);
   return relative(root, join(copy, 'main.ts'));
 }
 
 /**
  * Applies the unified diff `patch` to the files under `dir`. Each hunk is checked against the file it edits, so a
- * patch that no longer applies to the sources fails the build instead of compiling something else.
+ * patch that no longer applies to the sources fails the build instead of compiling something else. A hunk whose
+ * line numbers drifted finds its lines by their content, the way `patch` does, and a hunk whose lines are gone
+ * fails the build.
  */
-function applyPatch(patch, dir) {
+export function applyUnifiedDiff(patch, dir) {
   for (const section of patch.split(/^(?=diff --git )/m)) {
     if (section === '') continue;
     const target = /^\+\+\+ b\/(.+)$/m.exec(section);
-    if (target === null) throw new Error(`share-price-sources.patch: a section names no file: ${section.split('\n')[0]}`);
-    const file = join(dir, target[1]);
+    if (target === null)
+      throw new Error(`share-price-sources.patch: a section names no file: ${section.split('\n')[0]}`);
+    const name = target[1];
+    const file = join(dir, name);
     const lines = section.split('\n');
     if (lines[lines.length - 1] === '') lines.pop();
     const original = readFileSync(file, 'utf8').split('\n');
@@ -35,24 +39,56 @@ function applyPatch(patch, dir) {
     while (index < lines.length && !lines[index].startsWith('@@ ')) index++;
     while (index < lines.length) {
       const header = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(lines[index]);
-      if (header === null) throw new Error(`${target[1]}: expected a hunk at "${lines[index]}"`);
-      const start = Number(header[1]) - 1;
-      if (start < at) throw new Error(`${target[1]}: the hunk at "${lines[index]}" comes before the one before it`);
-      while (at < start) updated.push(original[at++]);
+      if (header === null) throw new Error(`${name}: expected a hunk at "${lines[index]}"`);
+      const declared = Number(header[1]) - 1;
+      const body = [];
       for (index++; index < lines.length && !lines[index].startsWith('@@ '); index++) {
         const line = lines[index];
         if (line.startsWith('\\')) continue;
-        const text = line.slice(1);
-        if (line.startsWith(' ') || line.startsWith('-')) {
-          if (original[at] !== text)
-            throw new Error(`${target[1]} line ${at + 1}: the patch expects "${text}"`);
-          if (line.startsWith(' ')) updated.push(original[at]);
+        if (line.startsWith(' ') || line.startsWith('-'))
+          body.push({ added: false, kept: line[0] === ' ', text: line.slice(1) });
+        else if (line.startsWith('+')) body.push({ added: true, kept: false, text: line.slice(1) });
+        else throw new Error(`${name}: cannot read the patch line "${line}"`);
+      }
+      // The hunk's own lines: the ones it keeps and the ones it removes, which must match the file where it goes.
+      const expected = body.filter((line) => !line.added).map((line) => line.text);
+      const found = locate(original, expected, declared, at);
+      if (found < 0)
+        throw new Error(
+          `${name}: the hunk at "${header[0]}" does not apply: no ${expected.length} lines there read "${expected[0] ?? ''}"`,
+        );
+      while (at < found) updated.push(original[at++]);
+      for (const line of body) {
+        if (line.added) updated.push(line.text);
+        else {
+          if (original[at] !== line.text) throw new Error(`${name} line ${at + 1}: the patch expects "${line.text}"`);
+          if (line.kept) updated.push(original[at]);
           at++;
-        } else if (line.startsWith('+')) updated.push(text);
-        else throw new Error(`${target[1]}: cannot read the patch line "${line}"`);
+        }
       }
     }
     while (at < original.length) updated.push(original[at++]);
     writeFileSync(file, updated.join('\n'));
   }
+}
+
+/**
+ * Where the hunk's `expected` lines go in `lines`: its declared line `start` when they are there, otherwise the
+ * one place they read the same, nearest to where the patch says they are. -1 when no place matches.
+ */
+function locate(lines, expected, start, after) {
+  if (start >= after && matchesAt(lines, expected, start)) return start;
+  let best = -1;
+  for (let i = Math.max(0, after); i + expected.length <= lines.length; i++) {
+    if (!matchesAt(lines, expected, i)) continue;
+    if (best < 0 || Math.abs(i - start) < Math.abs(best - start)) best = i;
+  }
+  return best;
+}
+
+/** Whether `expected` reads the same as `lines` from `at`. */
+function matchesAt(lines, expected, at) {
+  if (at < 0 || at + expected.length > lines.length) return false;
+  for (let i = 0; i < expected.length; i++) if (lines[at + i] !== expected[i]) return false;
+  return true;
 }
