@@ -26,7 +26,9 @@ import {
 } from './incremental.js';
 import {
   checkerThreads,
+  memoryLimit,
   parallelCheck,
+  residentMB,
   shareWithCheckers,
   startParallelCheck,
   traceSingleChecker,
@@ -52,7 +54,20 @@ import {
   type System,
   SystemFileSystem,
 } from './tsc-cli.js';
-import { reportRunConfig, type RunConfig } from './run-config.js';
+import { reportRunConfig, Source, type RunConfig, type RecordsReport } from './run-config.js';
+import {
+  displayPath,
+  recordKey,
+  recordsDirectory,
+  writeRecord,
+  type RecordChoice,
+  type RecordEnvironment,
+  type RecordOptions,
+  type RecordSample,
+  type RecordShape,
+} from './run-records.js';
+import { version } from './help.js';
+import { availableParallelism, loadavg } from 'node:os';
 
 type CompileWork = Extract<CommandLineResult, { kind: 'compile' }>;
 
@@ -389,6 +404,11 @@ export function compileInParallel(
     if (sharesPublishedGraphs) shareWithCheckers(checked);
     checking = program.getSyntacticDiagnostics().length === 0 && program.getProgramDiagnostics().length === 0;
   }
+  if (!checking && work.config !== undefined) {
+    // The threads only emit: nothing is checked, so there is no sample to keep.
+    work.config.records = false;
+    work.config.recordsReason = 'nothing checked';
+  }
   const finish = (checkTime: number): void => {
     // An incremental program here has no build info (`compileThreads`).
     let compilerProgram: CompilerProgram;
@@ -472,6 +492,12 @@ function recheckInParallel(
   done: (status: ExitStatus) => void,
 ): void {
   const program = work.program;
+  // An incremental recheck measures a part of the program, which a record's samples are not comparable
+  // with full checks (`run-records.ts`).
+  if (work.config !== undefined) {
+    work.config.records = false;
+    work.config.recordsReason = 'incremental recheck';
+  }
   const old = oldSnapshotOf(sys, work, times);
   // The program is shared before its checker does more than merge the globals; the incremental program
   // compares the references of its files with the old state on as many threads as check.
@@ -603,12 +629,128 @@ export function emitStatusAndReportStatistics(
   config: RunConfig | undefined = undefined,
 ): ExitStatus {
   const options = program.options;
+  const records = saveRunRecord(sys, program, config);
   if (options.diagnostics === true || options.extendedDiagnostics === true) {
     program.times.totalTime = sys.sinceStart();
     statisticsOf(program).report(sys);
-    if (options.extendedDiagnostics === true && config !== undefined) reportRunConfig(sys, config);
+    if (options.extendedDiagnostics === true && config !== undefined) reportRunConfig(sys, config, records);
   }
   return exitStatusOf(result);
+}
+
+/**
+ * Writes this run's sample to its record (`run-records.ts`) and says what the section's `Records:` line
+ * reports. A run keeps no record where it may not write one (watch mode, a build's concurrent projects,
+ * `--singleThreaded`, Node builds, `TSC_TS_AUTO=0` or `static`, `TSC_TS_CACHE=0`), where nothing was
+ * checked, and, under `--build`, for an incremental recheck (`recheckInParallel`). The write is best
+ * effort: a cache directory that cannot be written reports why and the run goes on.
+ */
+export function saveRunRecord(
+  sys: System,
+  program: CompilerProgram,
+  config: RunConfig | undefined,
+): RecordsReport | undefined {
+  if (config === undefined) return undefined;
+  if (!config.records) return { off: config.recordsReason ?? 'not measured' };
+  if (!sharesPublishedGraphs) return { off: 'Node.js builds' };
+  if (program.options.singleThreaded === true) return { off: '--singleThreaded' };
+  const directory = recordsDirectory(recordEnvironment());
+  if (directory === undefined) return { off: 'TSC_TS_CACHE=0' };
+  const shape = recordShapeOf(program, config);
+  const key = recordKey({
+    version,
+    executable: process.execPath,
+    configFile: program.options.configFilePath,
+    rootNames: program.program.commandLine.fileNames,
+    options: recordOptionsOf(program.options),
+    cpus: Math.max(1, availableParallelism()),
+    memoryBytes: memoryLimit(),
+  });
+  const written = writeRecord(directory, key, recordSampleOf(sys, program, config), shape, chosenOf(config));
+  if (written.path !== undefined) return { path: displayPath(written.path) };
+  return { unavailable: written.reason };
+}
+
+/** The record-related environment, read by name (a scriptc build holds `process.env` as an index signature). */
+function recordEnvironment(): RecordEnvironment {
+  return {
+    TSC_TS_CACHE: process.env.TSC_TS_CACHE,
+    TSC_TS_CACHE_DIR: process.env.TSC_TS_CACHE_DIR,
+    XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+  };
+}
+
+/** The program's size, and the library and redundancy signals where the run computed them. */
+function recordShapeOf(program: CompilerProgram, config: RunConfig): RecordShape {
+  let files = 0;
+  let chars = 0;
+  let declarationChars = 0;
+  for (const file of program.program.getSourceFiles()) {
+    files++;
+    chars += file.end;
+    if (file.isDeclarationFile) declarationChars += file.end;
+  }
+  const signals = config.signals;
+  return {
+    files,
+    chars,
+    declarationChars,
+    checkChars: chars - declarationChars,
+    library: signals === undefined ? 0 : Math.round(signals.library),
+    own: signals === undefined ? 0 : Math.round(signals.own),
+    redundancy: signals === undefined ? 0 : signals.redundancy,
+  };
+}
+
+/** What this run measured, for its record (`RecordSample`, without the number the record gives it). */
+function recordSampleOf(sys: System, program: CompilerProgram, config: RunConfig): Omit<RecordSample, 'run'> {
+  const times = program.times;
+  const usage = process.cpuUsage();
+  const cpus = Math.max(1, availableParallelism());
+  return {
+    at: Math.floor(Date.now() / 1000),
+    role: 'chosen',
+    checkers: config.checkers,
+    share: config.share,
+    parseThreads: config.parseThreads,
+    parseMs: Math.round(times.parseTime + times.bindTime),
+    checkMs: Math.round(times.checkTime),
+    totalMs: Math.round(sys.sinceStart()),
+    cpuMs: Math.round((usage.user + usage.system) / 1000),
+    peakMB: residentMB()[1] ?? 0,
+    load: Math.round((loadavg()[0]! / cpus) * 100) / 100,
+  };
+}
+
+/** The configuration this run chose, as its record keeps it (the record numbers the run that chose it). */
+function chosenOf(config: RunConfig): RecordChoice {
+  return {
+    checkers: config.checkers,
+    share: config.share,
+    parseThreads: config.parseThreads,
+    source: config.checkersSource === Source.Pinned ? 'pinned' : 'default',
+    since: 0,
+  };
+}
+
+/** The options the record's key covers (`run-records.ts`: those that change the work a run does). */
+function recordOptionsOf(options: CompilerOptions): RecordOptions {
+  return {
+    noEmit: options.noEmit,
+    emitDeclarationOnly: options.emitDeclarationOnly,
+    declaration: options.declaration,
+    composite: options.composite,
+    incremental: options.incremental,
+    outFile: options.outFile,
+    noEmitOnError: options.noEmitOnError,
+    skipLibCheck: options.skipLibCheck,
+    checkJs: options.checkJs,
+    isolatedDeclarations: options.isolatedDeclarations,
+    configFilePath: options.configFilePath,
+  };
 }
 
 export function exitStatusOf(result: CompileResult): ExitStatus {

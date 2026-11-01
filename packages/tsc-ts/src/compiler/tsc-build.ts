@@ -62,6 +62,7 @@ import {
   exitStatusOf,
   rechecksOnThreads,
   reportEmitAndErrors,
+  saveRunRecord,
   Statistics,
   statisticsOf,
   SystemTimeStamps,
@@ -731,6 +732,13 @@ export class Orchestrator {
     const checkers = threads ? checkerThreads(configOptions.checkers, configOptions.singleThreaded) : 1;
     // One configuration per project: its parse threads, and the pins of its checker count and sharing.
     const run = (task.run = preParseConfig(configOptions, checkers));
+    // The projects of a build that builds several at once run beside each other, and each one's timings
+    // are the machine's, not its own: none keeps a record (run-records.ts).
+    const builders = this.command.buildOptions.builders ?? (configOptions.singleThreaded === true ? 1 : 4);
+    if (builders > 1) {
+      run.records = false;
+      run.recordsReason = 'concurrent projects';
+    }
     if (threads && configOptions.singleThreaded !== true && parallelParse.spawn !== undefined) {
       // Threads parse and bind the program's files ahead of it (parallel-parse.ts), as for plain
       // compiles. Here also when the program is checked on this thread, with one checker or after a
@@ -970,7 +978,8 @@ export class Orchestrator {
       times.totalTime = sys.sinceStart();
       const statistics = statisticsOf(incrementalProgram);
       statistics.report(sys);
-      if (options.extendedDiagnostics === true && task.run !== undefined) reportRunConfig(sys, task.run);
+      const records = saveRunRecord(sys, incrementalProgram, task.run);
+      if (options.extendedDiagnostics === true && task.run !== undefined) reportRunConfig(sys, task.run, records);
       task.statistics = statistics;
     }
     const status = task.status;

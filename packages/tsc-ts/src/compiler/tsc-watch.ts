@@ -522,6 +522,10 @@ class Watcher {
     // A watch chooses its configuration once, for its first program: parse threads are fixed before
     // the program is parsed, and its rebuilds check what changed as that program did.
     const run = (this.run = preParseConfig(options, checkerThreads(options.checkers, options.singleThreaded)));
+    // A watcher's rebuilds measure a change, not the project: it reads records for its first program only
+    // and keeps none (run-records.ts).
+    run.records = false;
+    run.recordsReason = 'watch mode';
     const session = new ParseSession(
       run.parseThreads,
       options,

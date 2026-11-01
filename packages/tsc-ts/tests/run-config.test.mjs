@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -205,6 +205,25 @@ test('the section prints a source that chose a value with its reason', () => {
   assert.match(out3.text, /^ {2}Parse threads: 8 \(exploring\); pin with TSC_TS_PARSE_THREADS=8$/m);
 });
 
+test('the section names the record, or says why the run kept none', () => {
+  const config = new RunConfig();
+  const named = output();
+  reportRunConfig(named, config, { path: '~/.cache/tsc-ts/runs-v1/3f9a.json' });
+  assert.match(named.text, /^ {2}Records: ~\/\.cache\/tsc-ts\/runs-v1\/3f9a\.json$/m);
+
+  const off = output();
+  reportRunConfig(off, config, { off: 'watch mode' });
+  assert.match(off.text, /^ {2}Records: off \(watch mode\)$/m);
+
+  const unavailable = output();
+  reportRunConfig(unavailable, config, { unavailable: 'EACCES: permission denied' });
+  assert.match(unavailable.text, /^ {2}Records: unavailable \(EACCES: permission denied\)$/m);
+
+  const none = output();
+  reportRunConfig(none, config);
+  assert.doesNotMatch(none.text, /Records:/);
+});
+
 // ---- the command line
 
 const skip = tscTsMissing;
@@ -213,7 +232,7 @@ const skip = tscTsMissing;
 function run(dir, args, env = {}) {
   const result = spawnSync(tscTs[0], [...tscTs.slice(1), ...args], {
     cwd: dir,
-    env: { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: typescriptLib, NO_COLOR: '1', ...env },
+    env: { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: typescriptLib, NO_COLOR: '1', TSC_TS_CACHE: '0', ...env },
     encoding: 'utf8',
   });
   return { output: result.stdout + result.stderr, status: result.status };
@@ -243,8 +262,9 @@ test('--extendedDiagnostics prints the section, after the statistics', { skip },
   assert.equal(lines[at + 1], '  Checkers: 2 (pinned: --checkers)');
   assert.equal(lines[at + 2], '  Sharing: off (default); pin with TSC_TS_SHARE=0');
   assert.match(lines[at + 3], /^ {2}Parse threads: \d+ \(default\); pin with TSC_TS_PARSE_THREADS=\d+$/);
-  // Nothing after the three lines.
-  assert.deepEqual(lines.slice(at + 4), ['']);
+  assert.equal(lines[at + 4], '  Records: off (TSC_TS_CACHE=0)');
+  // Nothing after the four lines.
+  assert.deepEqual(lines.slice(at + 5), ['']);
 });
 
 test('--extendedDiagnostics reports the pins of sharing and the parse threads', { skip }, () => {
@@ -288,4 +308,59 @@ test('--build prints one section per project it builds', { skip }, () => {
   const rebuilt = run(dir, ['-b', '--extendedDiagnostics', '--force']);
   const sections = rebuilt.output.split('Suggestions:').length - 1;
   assert.equal(sections, 2, `expected one section per project in:\n${rebuilt.output}`);
+  // A build of several projects at once keeps no record, and each project's section says so.
+  const records = rebuilt.output.split('\n').filter((line) => line.startsWith('  Records: '));
+  assert.deepEqual(records, ['  Records: off (concurrent projects)', '  Records: off (concurrent projects)']);
 });
+
+// A native run writes its record; the Node build keeps none (`sharesPublishedGraphs`).
+const native = tscTs.length === 1;
+
+test(
+  '--singleThreaded keeps no record, and the section says why',
+  { skip: !native && 'needs a native build (TSC_TS_BIN)' },
+  () => {
+    const dir = project();
+    const cache = tempDir('tsc-ts-run-config-cache-');
+    const { output, status } = run(dir, ['-p', '.', '--extendedDiagnostics', '--singleThreaded'], {
+      TSC_TS_CACHE: '1',
+      TSC_TS_CACHE_DIR: cache,
+    });
+    assert.equal(status, 0);
+    assert.match(output, /^ {2}Records: off \(--singleThreaded\)$/m);
+    assert.equal(existsSync(cache) ? readdirSync(cache).length : 0, 0, `a record was written:\n${output}`);
+  },
+);
+
+test(
+  'a native run writes its record and the section names it',
+  { skip: !native && 'needs a native build (TSC_TS_BIN)' },
+  () => {
+    const dir = project();
+    const cache = tempDir('tsc-ts-run-config-cache-');
+    const { output, status } = run(dir, ['-p', '.', '--extendedDiagnostics'], {
+      TSC_TS_CACHE: '1',
+      TSC_TS_CACHE_DIR: cache,
+    });
+    assert.equal(status, 0);
+    const line = output.split('\n').find((text) => text.startsWith('  Records: '));
+    assert.ok(line !== undefined, `no Records line in:\n${output}`);
+    const path = line.slice('  Records: '.length);
+    assert.ok(!path.startsWith('~'), `the section abbreviated a path outside the home directory: ${path}`);
+    assert.ok(existsSync(path), `no record at ${path}`);
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    assert.equal(record.format, 1);
+    assert.equal(record.runs, 1);
+    assert.equal(record.samples.length, 1);
+    assert.equal(record.samples[0].run, 1);
+    assert.equal(record.samples[0].role, 'chosen');
+    assert.equal(record.samples[0].checkers, record.chosen.checkers);
+    assert.equal(record.chosen.since, 1);
+    assert.ok(record.samples[0].totalMs > 0);
+    assert.ok(record.samples[0].peakMB > 0);
+    // The program's files: the project's, and the default libraries it loads.
+    assert.ok(record.shape.files > 1);
+    assert.ok(record.shape.chars > 0);
+    assert.ok(record.shape.declarationChars > 0);
+  },
+);
