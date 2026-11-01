@@ -2003,8 +2003,9 @@ export function sharingFitNeeded(config: RunConfig, signals: CheckSignals): bool
  * program may share results (`startParallelCheck` makes the same test), and, where sharing is possible
  * and a rule that may choose it reads the estimate, how many checkers fit memory with sharing's peak
  * (`sharingFitNeeded`). The estimate costs a pass over the program's files and its memory limit, so it
- * is computed only where a rule reads it: a count below `minSharingCheckers`, a program that is not
- * library-bound, or a pinned run pay nothing.
+ * is computed only where a rule reads it: a run without a record pays only where the static rule's
+ * signals point at sharing, and one checker, a program that is not shared, a pinned run or
+ * `TSC_TS_AUTO=0` pay nothing.
  */
 function checkDecisionOf(config: RunConfig, signals: CheckSignals, program: Program, shared: boolean): CheckDecision {
   // `mainThreadChecks` is false whenever the program is shared (`!shared`), as sharing needs.
