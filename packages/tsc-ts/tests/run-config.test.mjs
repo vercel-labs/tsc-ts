@@ -32,9 +32,8 @@ const {
   tsgoCheckers,
 } = await load('compiler/run-config.js');
 const { sharingNumbers, signalsNeeded, stopLevel } = await load('compiler/parallel-check.js');
-const { shareStatColumns, shareStatExport, shareStatSaved, shareStatTranslation, shareStatUnpack } = await load(
-  'compiler/shared-results.js',
-);
+const { shareStatColumns, shareStatExport, shareStatSaved, shareStatTranslation, shareStatUnpack } =
+  await load('compiler/shared-results.js');
 
 /** A `RunConfigOutput` collecting what the section writes. */
 function output() {
