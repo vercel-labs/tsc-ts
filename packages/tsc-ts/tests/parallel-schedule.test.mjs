@@ -271,6 +271,19 @@ test('auto starts a checker per CPU, at least four, fewer only when memory does 
   assert.equal(autoCheckers(8, checkersFittingMemory(2003 * MiB, 22113123, 8 * GiB)), 6);
   assert.equal(autoCheckers(8, checkersFittingMemory(2003 * MiB, 22113123, 6 * GiB)), 4);
   assert.equal(autoCheckers(16, checkersFittingMemory(1600 * MiB, 30414210, 16 * GiB)), 16);
+  // Sharing's extra peak (sharingPeakShare, 1.12) costs checkers where memory is tight: T3 Code's web
+  // project fits 16 at 32 GiB either way, and fewer with sharing's peak at 12 GiB.
+  assert.ok(checkersFittingMemory(1600 * MiB, 30414210, 32 * GiB, 1.12) >= 16);
+  assert.ok(checkersFittingMemory(1600 * MiB, 30414210, 32 * GiB) >= 16);
+  assert.ok(
+    checkersFittingMemory(1600 * MiB, 30414210, 12 * GiB, 1.12) < checkersFittingMemory(1600 * MiB, 30414210, 12 * GiB),
+  );
+  // A peak share of 1 is the fit without sharing, which the automatic count uses.
+  assert.equal(
+    checkersFittingMemory(2003 * MiB, 22113123, 8 * GiB, 1),
+    checkersFittingMemory(2003 * MiB, 22113123, 8 * GiB),
+  );
+  assert.equal(checkersFittingMemory(2003 * MiB, 22113123, 8 * GiB, 1.12) < 6, true);
 });
 
 function groupProject() {

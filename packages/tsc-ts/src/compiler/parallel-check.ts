@@ -59,19 +59,32 @@ import {
   numberLogSize,
   recordTableSize,
   resultTableSize,
+  shareStatColumns,
+  shareStatExport,
+  shareStatPosted,
+  shareStatSaved,
+  shareStatTranslation,
+  shareStatTranslated,
+  shareStatUnpack,
   stringLogSize,
   type ThreadSharingData,
 } from './shared-results.js';
 import {
   autoCheckers,
+  Automaticity,
   CheckSignals,
   checkersPolicy,
   decideCheck,
   libraryBoundCount,
   maxAutoCheckers,
+  minSharingCheckers,
   sharePin,
+  sharingCandidate,
+  sharingPeakShare,
   Source,
   tsgoCheckers,
+  type CheckDecision,
+  type CheckFit,
   type RunConfig,
 } from './run-config.js';
 
@@ -83,6 +96,29 @@ export { autoCheckers, libraryBoundCount };
  * translate against): `1` shares, `0` does not, and unset shares nothing (`sharePin`).
  */
 const shareThreads = sharePin(process.env);
+
+/**
+ * TSC_TS_SHARE_STOP_AT_MS: `t` or `t:level` stops a sharing run's sharing `t` milliseconds in, whatever
+ * the run's numbers say, to check the switch: `2` (the default) stops posting and translating, `1`
+ * stops posting. Testing only.
+ */
+function shareStopHook(): { readonly at: number; readonly level: number } | undefined {
+  const value = process.env.TSC_TS_SHARE_STOP_AT_MS;
+  if (value === undefined || value === '') return undefined;
+  const colon = value.indexOf(':');
+  const at = Number(colon < 0 ? value : value.substring(0, colon));
+  if (!Number.isFinite(at) || at < 0) return undefined;
+  return { at, level: colon >= 0 && value.substring(colon + 1) === '1' ? 1 : 2 };
+}
+
+const shareStop = shareStopHook();
+
+/**
+ * How long a sharing run runs before the main thread weighs what sharing saved against what it cost
+ * (`sharingNumbers`). No record is read yet, so the window is fixed; the learned window will be the
+ * larger of 200 ms and a tenth of the run's recorded check time.
+ */
+const shareWindowMs = 300;
 
 /** With TSC_TS_CHECKERS_TRACE: the process's resident and peak resident set in MB (Linux), else 0. */
 export function residentMB(): number[] {
@@ -555,9 +591,14 @@ const lastResortShare = 0.95;
  * bytes, for a program of `programBytes` (`firstCheckerShare`, `checkerBytesPerDeclarationChar`);
  * at least 1.
  */
-export function checkersFittingMemory(programBytes: number, declarationChars: number, memory: number): number {
-  const peak = programBytes * (1 + firstCheckerShare);
-  const perChecker = Math.max(1, declarationChars * checkerBytesPerDeclarationChar);
+export function checkersFittingMemory(
+  programBytes: number,
+  declarationChars: number,
+  memory: number,
+  peakShare: number = 1,
+): number {
+  const peak = programBytes * (1 + firstCheckerShare) * peakShare;
+  const perChecker = Math.max(1, declarationChars * checkerBytesPerDeclarationChar * peakShare);
   return Math.max(1, 1 + Math.floor((memoryShare * memory - peak) / perChecker));
 }
 
@@ -652,6 +693,27 @@ export function textLengths(program: Program): number[] {
  * or an estimate from its text where that is unknown.
  */
 export function memoryCheckers(program: Program): number {
+  const estimate = memoryEstimate(program);
+  const fit = checkersFittingMemory(estimate.programBytes, estimate.declarationChars, estimate.memory);
+  if (process.env.TSC_TS_CHECKERS_TRACE !== undefined)
+    process.stderr.write(
+      `checkers: ${estimate.chars} source chars (${estimate.declarationChars} in declaration files), program ${Math.round(estimate.programBytes / 1048576)}MB${estimate.resident > 0 ? '' : ' (estimated)'}, memory ${Math.round(estimate.memory / 1048576)}MB fits ${fit} checkers\n`,
+    );
+  return fit;
+}
+
+/** What the memory fit reads of a program: its text, the declarations in it, and this process's memory. */
+interface MemoryEstimate {
+  readonly chars: number;
+  readonly declarationChars: number;
+  readonly programBytes: number;
+  /** Whether `programBytes` is the resident set (`0` where it is an estimate from the text). */
+  readonly resident: number;
+  readonly memory: number;
+}
+
+/** The memory estimate of `program`, of its text (`textLengths`, computed once) and this process's memory. */
+function memoryEstimate(program: Program): MemoryEstimate {
   let chars = 0;
   let declarationChars = 0;
   const files = program.getSourceFiles();
@@ -661,14 +723,24 @@ export function memoryCheckers(program: Program): number {
     if (files[i]!.isDeclarationFile) declarationChars += length[i]!;
   }
   const resident = residentBytes();
-  const programBytes = resident > 0 ? resident : chars * programBytesPerChar;
-  const memory = memoryLimit();
-  const fit = checkersFittingMemory(programBytes, declarationChars, memory);
-  if (process.env.TSC_TS_CHECKERS_TRACE !== undefined)
-    process.stderr.write(
-      `checkers: ${chars} source chars (${declarationChars} in declaration files), program ${Math.round(programBytes / 1048576)}MB${resident > 0 ? '' : ' (estimated)'}, memory ${Math.round(memory / 1048576)}MB fits ${fit} checkers\n`,
-    );
-  return fit;
+  return {
+    chars,
+    declarationChars,
+    programBytes: resident > 0 ? resident : chars * programBytesPerChar,
+    resident,
+    memory: memoryLimit(),
+  };
+}
+
+/**
+ * The checkers whose estimated peak memory fits `program` (`checkersFittingMemory`), without sharing and
+ * with the peak sharing adds (`sharingPeakShare`), which the sharing rule requires of the count it keeps.
+ */
+export function memoryFit(program: Program): CheckFit {
+  const estimate = memoryEstimate(program);
+  return {
+    sharing: checkersFittingMemory(estimate.programBytes, estimate.declarationChars, estimate.memory, sharingPeakShare),
+  };
 }
 
 /**
@@ -1662,6 +1734,10 @@ function threadSharingOf(
     stringLogs.push(new SharedArrayBuffer(2 * stringLogSize));
   }
   const used = new SharedArrayBuffer(8 * count);
+  // The stop switch (0 runs, 1 stops posting, 2 stops posting and translating) and the counters the
+  // main thread reads at its window, a row per checker.
+  const control = new SharedArrayBuffer(4);
+  const stats = new SharedArrayBuffer(8 * shareStatColumns * count);
   const data: ThreadSharingData[] = [];
   for (let i = 0; i < count; i++)
     data.push({
@@ -1678,6 +1754,8 @@ function threadSharingOf(
       recordTables,
       stringLogs,
       used,
+      control,
+      stats,
     });
   return data;
 }
@@ -1908,6 +1986,63 @@ export function mainThreadChecks(shared: boolean): boolean {
 }
 
 /**
+ * What `decideCheck` needs of the run besides its signals: whether the checker threads of a shared
+ * program may share results (`startParallelCheck` makes the same test), and, where the rest of the
+ * sharing rule holds, how many checkers fit memory with sharing's peak. The estimate costs a pass over
+ * the program's files and its memory limit, so it is computed only where the rule reads it: a count
+ * below `minSharingCheckers`, a program that is not library-bound, or a pinned run pay nothing.
+ */
+function checkDecisionOf(config: RunConfig, signals: CheckSignals, program: Program, shared: boolean): CheckDecision {
+  // `mainThreadChecks` is false whenever the program is shared (`!shared`), as sharing needs.
+  const possible = shared && signals.count > 1 && signals.count <= maxSharingCheckers;
+  const fit =
+    possible &&
+    config.shareSource !== Source.Pinned &&
+    config.automaticity !== Automaticity.Off &&
+    sharingCandidate(signals)
+      ? memoryFit(program)
+      : undefined;
+  return { possible, fit };
+}
+
+/** What the counters of `count` checkers say at the sharing window: milliseconds saved and spent. */
+interface SharingNumbers {
+  /** What taking posted results saved, over the checkers: the computations they did not repeat. */
+  readonly saved: number;
+  /** What posting cost: exporting, translating and unpacking results. */
+  readonly spent: number;
+  readonly posted: number;
+  readonly translated: number;
+}
+
+/** The counters of `count` checkers' rows of `stats` (`ThreadSharing.writeStats`), summed. */
+function sharingNumbers(stats: Float64Array, count: number): SharingNumbers {
+  let saved = 0;
+  let spent = 0;
+  let posted = 0;
+  let translated = 0;
+  for (let i = 0; i < count; i++) {
+    const row = i * shareStatColumns;
+    saved += stats[row + shareStatSaved]!;
+    spent += stats[row + shareStatExport]! + stats[row + shareStatTranslation]! + stats[row + shareStatUnpack]!;
+    posted += stats[row + shareStatPosted]!;
+    translated += stats[row + shareStatTranslated]!;
+  }
+  return { saved, spent, posted, translated };
+}
+
+/**
+ * The control a sharing run's numbers ask for: 2 when it saved less than 1.5 times what it spent, 1
+ * when the posts go untaken (under 5% of them, and at least one), else 0. Stopping takes a minute at
+ * worst, when the window's numbers are still too early to tell.
+ */
+function stopLevel(numbers: SharingNumbers): number {
+  if (numbers.saved < 1.5 * numbers.spent) return 2;
+  if (numbers.posted > 0 && numbers.translated / numbers.posted < 0.05) return 1;
+  return 0;
+}
+
+/**
  * What `plan`, made with `count` checkers, shows about the cost of checking (`CheckSignals`): the
  * libraries a range reaches and the files it checks, the share of that a second range reaches too, and
  * the shares of declaration and node_modules files of the program. Computed where a rule may read them
@@ -1924,13 +2059,16 @@ function checkSignals(
   const ranges = plan.ranges.length >> 1;
   const signals = new CheckSignals(count, ranges);
   const program = checked.program;
-  // What a rule would read, or what the run's record writes (`config.records`), is computed; a pinned
-  // count with records off pays nothing.
+  // What a rule would read, what the run's record writes (`config.records`), or what a doctor child
+  // reports (`config.measure`), is computed; a pinned count with records off and no report pays nothing.
+  // With selection off (`TSC_TS_AUTO=0`) no rule reads them, whatever the pins leave undecided.
   const deciding =
     config === undefined
-      ? checkersPolicy(process.env) === 'auto' && program.options.checkers === undefined
-      : config.checkersSource === Source.Default;
-  const wanted = (deciding && count > tsgoCheckers) || (config !== undefined && config.records);
+      ? checkersPolicy(process.env) === 'auto' && program.options.checkers === undefined && count > tsgoCheckers
+      : config.automaticity !== Automaticity.Off &&
+        ((config.checkersSource === Source.Default && count > tsgoCheckers) ||
+          (config.shareSource === Source.Default && count >= minSharingCheckers));
+  const wanted = deciding || (config !== undefined && (config.records || config.measure));
   if (!wanted || ranges === 0) return signals;
   const files = program.getSourceFiles();
   const length = textLengths(program);
@@ -2066,7 +2204,7 @@ export function startParallelCheck(
   const fewer =
     config === undefined
       ? libraryBoundCount(signals.count, signals.library, signals.own)
-      : decideCheck(config, signals);
+      : decideCheck(config, signals, checkDecisionOf(config, signals, program, shared));
   if (fewer < count) {
     count = fewer;
     plan = planSchedule(checked, count, costs, checking);
@@ -2108,7 +2246,13 @@ export function startParallelCheck(
   const firstThread = mainChecks ? 1 : 0;
   let remaining = count - firstThread;
   let ownDone = false;
+  /** The sharing window's timer, where the threads share results; cleared when they are done. */
+  let shareStopTimer: ReturnType<typeof setTimeout> | undefined = undefined;
   const finish = (): void => {
+    if (shareStopTimer !== undefined) {
+      clearTimeout(shareStopTimer);
+      shareStopTimer = undefined;
+    }
     if (emitsTo !== undefined || declarationsTo !== undefined) {
       mark('emitted on checker threads');
       done(performance.now() - start);
@@ -2194,6 +2338,36 @@ export function startParallelCheck(
     sharesResults && shared && !mainChecks && count > 1 && count <= maxSharingCheckers
       ? threadSharingOf(count, order, units, files.length)
       : undefined;
+  if (sharing !== undefined) {
+    // The main thread is idle while the checkers run, so a timer reads their counters at the window and
+    // stops what does not pay (control 1 or 2); every checker computes what it does not take, so the
+    // diagnostics stay the same.
+    const control = new Int32Array(sharing[0]!.control);
+    const stats = new Float64Array(sharing[0]!.stats);
+    const stop = shareStop;
+    const at = stop === undefined ? shareWindowMs : stop.at;
+    shareStopTimer = setTimeout(() => {
+      const numbers = sharingNumbers(stats, count);
+      if (stop !== undefined) Atomics.store(control, 0, stop.level);
+      else {
+        const level = stopLevel(numbers);
+        if (level === 0) return;
+        Atomics.store(control, 0, level);
+      }
+      // The section says what the window saw, instead of the rule that turned sharing on.
+      if (config !== undefined) {
+        config.shareSource = Source.Measured;
+        config.shareReasons.length = 0;
+        config.shareReasons.push(
+          `stopped after ${at} ms: ${Math.round(numbers.saved)} ms saved for ${Math.round(numbers.spent)} ms spent`,
+        );
+      }
+      if (trace)
+        process.stderr.write(
+          `checkers: stopped sharing after ${at} ms: ${Math.round(numbers.saved)} ms saved for ${Math.round(numbers.spent)} ms spent, ${numbers.translated}/${numbers.posted} posted results taken\n`,
+        );
+    }, at);
+  }
   const sharingStarted: boolean[] = [];
   for (let i = 0; i < count; i++) sharingStarted.push(false);
   const startSharingOf = (i: number): ThreadSharingData => {

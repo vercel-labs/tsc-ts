@@ -99,6 +99,48 @@ test('a difference from tsgo at one checker fails until --baseline knows the lin
   assert.match(grown.output, /2 differing lines are new/);
 });
 
+test('a sharing run stopped at a hook prints what the reference printed', () => {
+  const { dir, projects, tsgo, native } = setup('echo one\necho two\nexit 0');
+  const result = run(dir, projects, [
+    '--tsgo',
+    tsgo,
+    '--native',
+    native,
+    '--checkers',
+    '4',
+    '--repeat',
+    '1',
+    '--stop',
+    '0:1,50',
+  ]);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /^ {2}c4 stop 0:1 same$/m);
+  assert.match(result.output, /^ {2}c4 stop 50 same$/m);
+});
+
+test('a stopped run that prints something else fails, and the hook reaches only sharing runs', () => {
+  const { dir, projects, tsgo, native } = setup(
+    // The hook's runs print a line the reference does not; the unshared runs (which the hook must not
+    // reach) print what the reference prints.
+    '[ "$count" = 1 ] && { echo one; echo two; exit 0; }\n[ -n "$TSC_TS_SHARE_STOP_AT_MS" ] && echo stopped\necho one\necho two\nexit 0',
+  );
+  const result = run(dir, projects, [
+    '--tsgo',
+    tsgo,
+    '--native',
+    native,
+    '--checkers',
+    '4',
+    '--repeat',
+    '1',
+    '--stop',
+    '0',
+  ]);
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /^ {2}c4 stop 0 1 of 1 DIFF$/m);
+  assert.match(result.output, /1 differ/);
+});
+
 /** Reads --outDir and --declarationDir, which an emit run passes. */
 const directories = `out=
 declarations=

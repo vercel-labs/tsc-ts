@@ -15,8 +15,8 @@
 //
 // Usage: node scripts/config-exactness.mjs --native BINARY [--tsgo PATH] [--projects FILE] [--corpus]
 //                                         [--checkers 4,8,12,16] [--repeat 5] [--batch N] [--options A,B]
-//                                         [--only NAME] [--emit] [--save DIR] [--work DIR] [--json FILE]
-//                                         [--baseline FILE]
+//                                         [--stop 0,50,500] [--only NAME] [--emit] [--save DIR] [--work DIR]
+//                                         [--json FILE] [--baseline FILE]
 //
 // --projects names a file with one project per line: a name, a directory and its tsconfig file (relative to the
 // directory), separated by spaces; lines starting with # are skipped. --corpus adds TypeScript's test cases,
@@ -29,7 +29,9 @@
 // trees, instead of --noEmit: pass a projects file of the emit configs, since a check config can give an option
 // error once emit is on (TS5096 without rewriteRelativeImportExtensions); each run's declarations go to the
 // directory it compares, whatever `declarationDir` the config sets, and an emit run that writes no file there
-// fails. --only checks the projects whose name contains NAME. --save keeps the outputs that differ in DIR; --work
+// fails. --stop runs each of the sharing values with `TSC_TS_SHARE_STOP_AT_MS=t[:level]` at the highest count,
+// since the switch is one axis of the selection (the in-run stop, at times t, posting only at level 1).
+// --only checks the projects whose name contains NAME. --save keeps the outputs that differ in DIR; --work
 // writes the batches and the emitted trees into DIR, which is kept (a relative DIR is relative to this process's
 // directory, not the project's). --json writes the result of every run to FILE; --baseline compares the differing
 // lines and files with those of an earlier --json file and fails when one appears that it does not have. --tsgo
@@ -74,6 +76,10 @@ const batch = Number(option(args, '--batch', '400'));
 const extraOptions = option(args, '--options', '')
   .split(',')
   .filter((name) => name !== '');
+// The stop switch's values: `TSC_TS_SHARE_STOP_AT_MS` at each, at the highest checker count.
+const stopValues = option(args, '--stop', '')
+  .split(',')
+  .filter((value) => value !== '');
 const only = option(args, '--only', undefined);
 const emit = args.includes('--emit');
 const saveDir = option(args, '--save', undefined);
@@ -99,7 +105,7 @@ function argumentsOf(project, checkers, outDir) {
 let emits = 0;
 
 /** A run with its combined output, and the files it wrote when emitting. `checkers` is undefined for tsgo. */
-function runAt(path, project, checkers, share) {
+function runAt(path, project, checkers, share, extra = {}) {
   let outDir;
   const env = {};
   if (emit) {
@@ -107,8 +113,10 @@ function runAt(path, project, checkers, share) {
     mkdirSync(outDir);
   }
   // The caller's other TSC_TS_SHARE_* variables apply to the shared runs, as they do in share-exactness.mjs.
-  if (share) env.TSC_TS_SHARE = '1';
-  else for (const name of Object.keys(process.env)) if (name.startsWith('TSC_TS_SHARE')) env[name] = undefined;
+  if (share) {
+    env.TSC_TS_SHARE = '1';
+    Object.assign(env, extra);
+  } else for (const name of Object.keys(process.env)) if (name.startsWith('TSC_TS_SHARE')) env[name] = undefined;
   const result = runBinary({ binary: path, project, args: argumentsOf(project, checkers, outDir), env, work });
   if (!emit) return { ...result, signature: result.output };
   const tree = treeFiles(outDir);
@@ -116,7 +124,7 @@ function runAt(path, project, checkers, share) {
   return { ...result, tree, signature: result.output + '\0' + JSON.stringify(tree) };
 }
 
-const check = (project, n, share = false) => runAt(binary, project, n, share);
+const check = (project, n, share = false, extra = {}) => runAt(binary, project, n, share, extra);
 const shareOff = (project, n) => runAt(binary, project, n, false);
 const reference = (project) => runAt(tsgo, project, undefined, false);
 
@@ -272,6 +280,56 @@ for (const project of projects) {
     const shown = differing > 0 ? differing + ' of ' + repeat + ' DIFF' : verdicts[0];
     console.log('  c' + n + ' on  ' + shown + ' ×' + repeat + ' ' + median.toFixed(2) + ' s');
   }
+  // The stop switch, one value at a time at the highest count: the diagnostics must not depend on when
+  // sharing stops, or on which of posting and translating it stops.
+  if (stopValues.length > 0 && counts.length > 0) {
+    const n = Math.max(...counts);
+    const plain = unshared.get(n);
+    for (const stop of stopValues) {
+      const verdicts = [];
+      for (let i = 0; i < repeat; i++) {
+        const stopped = check(project, n, true, { TSC_TS_SHARE_STOP_AT_MS: stop });
+        runs++;
+        const same = stopped.signature === base.signature;
+        const asPlain = stopped.signature === plain.signature;
+        const verdict = same ? 'same' : asPlain ? 'as unshared' : 'DIFF ' + quantity(base, stopped);
+        verdicts.push(verdict);
+        record.runs.push({
+          checkers: n,
+          share: true,
+          stop,
+          verdict,
+          changed: changed(base, stopped),
+          seconds: stopped.seconds,
+          rss: stopped.rss,
+          lines: verdict.startsWith('DIFF') ? difference(base, stopped).slice(0, 20) : [],
+        });
+        if (!same && asPlain) {
+          asUnshared.push({
+            project: project.name,
+            checkers: n,
+            stop,
+            lines: difference(base, stopped),
+            output: outputDifference(base, stopped),
+          });
+        } else if (!same) {
+          differences.push({
+            project: project.name,
+            checkers: n,
+            share: true,
+            stop,
+            lines: difference(base, stopped),
+            output: outputDifference(base, stopped),
+          });
+          saveOutput(saveDir, project.name + '-c1', base.output);
+          saveOutput(saveDir, project.name + '-c' + n + '-stop-' + stop.replace(':', '-') + '-' + i, stopped.output);
+        }
+      }
+      const differing = verdicts.filter((v) => v.startsWith('DIFF')).length;
+      const shown = differing > 0 ? differing + ' of ' + repeat + ' DIFF' : verdicts[0];
+      console.log('  c' + n + ' stop ' + stop + ' ' + shown);
+    }
+  }
 }
 
 const summary = {
@@ -279,6 +337,7 @@ const summary = {
   tsgo,
   emit,
   checkers: counts,
+  stop: stopValues,
   repeat,
   projects: records,
   differences,
