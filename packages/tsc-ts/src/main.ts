@@ -2,7 +2,9 @@
 import { dirname } from 'node:path';
 import { Worker, isMainThread, workerData } from 'node:worker_threads';
 import { runServer } from './api/server.js';
+import { exitWithDoctorReport } from './compiler/doctor-report.js';
 import { runThread, startThreads, type ThreadData, type ThreadDrivers } from './compiler/thread-entry.js';
+import { runDoctor } from './drivers/doctor.js';
 import { mark, markMemory, timeline } from './compiler/timeline.js';
 import {
   outputWriterOfThread,
@@ -39,13 +41,19 @@ else {
     const hr = process.hrtime();
     mark(`main clock ${hr[0]} ${hr[1]}`);
   }
-  if (args[0] !== '--api') startThreads(spawnThread, drivers, args);
-  const status = args[0] === '--api' ? runServer(args.slice(1), defaultLibraryPath) : runTsc(args, defaultLibraryPath);
+  const doctor = args[0] === 'doctor';
+  if (!doctor && args[0] !== '--api') startThreads(spawnThread, drivers, args);
+  const status = doctor
+    ? runDoctor(args.slice(1))
+    : args[0] === '--api'
+      ? runServer(args.slice(1), defaultLibraryPath)
+      : runTsc(args, defaultLibraryPath);
   // Watch mode and `--checkers` keep running until their callbacks exit.
   if (status !== watching) {
     markMemory();
     mark('exit');
-    process.exit(status);
+    // A doctor child's report, written only for the runs doctor starts (`doctor-report.ts`).
+    exitWithDoctorReport(status);
   }
 }
 

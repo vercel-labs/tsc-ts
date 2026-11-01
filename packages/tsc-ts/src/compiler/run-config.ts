@@ -56,6 +56,8 @@ export class RunConfig {
   checkersPin: string | undefined = undefined;
   sharePin: string | undefined = undefined;
   parsePin: string | undefined = undefined;
+  /** Whether this run reports its signals to a doctor child's report (`TSC_TS_DOCTOR_REPORT`). */
+  measure = false;
   /** Why each value was chosen, for the section's `automatic:` reason on that setting's line. */
   readonly checkersReasons: string[] = [];
   readonly shareReasons: string[] = [];
@@ -199,6 +201,9 @@ export function preParseConfig(
     config.records = false;
     config.recordsReason = 'TSC_TS_AUTO=' + (pins.automaticity === Automaticity.Off ? '0' : 'static');
   }
+  // A doctor child reports the signals even though it keeps no record (`doctor-report.ts`).
+  const report = env.TSC_TS_DOCTOR_REPORT;
+  config.measure = report !== undefined && report !== '';
   return config;
 }
 

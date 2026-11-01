@@ -1,4 +1,5 @@
 // The tsc command line on the disk, for `tsc-ts` and the cli driver.
+import { exitWithDoctorReport } from '../compiler/doctor-report.js';
 import { mark, markMemory } from '../compiler/timeline.js';
 import { spawn, spawnSync } from 'node:child_process';
 import {
@@ -332,7 +333,7 @@ function runCommandLineResult(sys: System, result: CommandLineResult): number {
         compileWithEmitThreads(sys, result, emitThreads, (status) => {
           markMemory();
           mark('exit');
-          process.exit(status);
+          exitWithDoctorReport(status);
         })
       )
         return watching;
@@ -341,7 +342,7 @@ function runCommandLineResult(sys: System, result: CommandLineResult): number {
         compileWithDeclarationThread(sys, result, (status) => {
           markMemory();
           mark('exit');
-          process.exit(status);
+          exitWithDoctorReport(status);
         })
       )
         return watching;
@@ -351,7 +352,7 @@ function runCommandLineResult(sys: System, result: CommandLineResult): number {
     compileInParallel(sys, result, threads, (status) => {
       markMemory();
       mark('exit');
-      process.exit(status);
+      exitWithDoctorReport(status);
     });
     return watching;
   }
@@ -362,7 +363,7 @@ function runCommandLineResult(sys: System, result: CommandLineResult): number {
       if (status !== watching) {
         markMemory();
         mark('exit');
-        process.exit(status);
+        exitWithDoctorReport(status);
       }
     });
     return watching;

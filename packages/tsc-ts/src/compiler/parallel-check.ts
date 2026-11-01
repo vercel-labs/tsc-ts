@@ -1924,13 +1924,13 @@ function checkSignals(
   const ranges = plan.ranges.length >> 1;
   const signals = new CheckSignals(count, ranges);
   const program = checked.program;
-  // What a rule would read, or what the run's record writes (`config.records`), is computed; a pinned
-  // count with records off pays nothing.
+  // What a rule would read, what the run's record writes (`config.records`), or what a doctor child
+  // reports (`config.measure`), is computed; a pinned count with records off and no report pays nothing.
   const deciding =
     config === undefined
       ? checkersPolicy(process.env) === 'auto' && program.options.checkers === undefined
       : config.checkersSource === Source.Default;
-  const wanted = (deciding && count > tsgoCheckers) || (config !== undefined && config.records);
+  const wanted = (deciding && count > tsgoCheckers) || (config !== undefined && (config.records || config.measure));
   if (!wanted || ranges === 0) return signals;
   const files = program.getSourceFiles();
   const length = textLengths(program);
