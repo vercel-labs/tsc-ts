@@ -81,13 +81,21 @@ function forEachCgroupDirectory(
     const path = line.substring(second + 1);
     if (controller === '') {
       if (controllers !== '') continue;
-      for (let directory = path; ; directory = directory.substring(0, directory.lastIndexOf('/'))) {
-        visit(root + (directory === '/' ? '' : directory));
-        if (directory === '/' || directory === '' || directory.lastIndexOf('/') < 0) break;
-      }
+      forEachAncestor(path, (directory) => visit(root + directory));
     } else if (controllers.split(',').indexOf(controller) >= 0) {
-      visit(root + '/' + controller + (path === '/' ? '' : path));
+      forEachAncestor(path, (directory) => visit(root + '/' + controller + directory));
     }
+  }
+}
+
+/**
+ * Calls `visit` with `path` and each of its ancestors, deepest first ("/a/b/c", "/a/b", "/a", ""): a
+ * cgroup's limits apply to every process below it, in cgroup v1 as in v2.
+ */
+function forEachAncestor(path: string, visit: (directory: string) => void): void {
+  for (let directory = path; ; directory = directory.substring(0, directory.lastIndexOf('/'))) {
+    visit(directory === '/' ? '' : directory);
+    if (directory === '' || directory.lastIndexOf('/') < 0) break;
   }
 }
 

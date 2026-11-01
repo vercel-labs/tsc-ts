@@ -142,6 +142,23 @@ test('a cgroup v1 CPU quota comes from the cpu controller mount', () => {
     'cpu/docker/abc/cpu.cfs_period_us': '100000',
   });
   assert.equal(cgroupCpuQuota('4:cpu,cpuacct:/docker/abc\n', none), 0);
+  // A quota a parent cgroup sets counts as well: the kernel applies it to every process below it, and
+  // a nested container's own cgroup may hold no quota at all.
+  const nested = cgroupTree({
+    'cpu/docker/abc/cpu.cfs_quota_us': '150000',
+    'cpu/docker/abc/cpu.cfs_period_us': '100000',
+    'cpu/docker/abc/child/cpu.cfs_quota_us': '-1',
+    'cpu/docker/abc/child/cpu.cfs_period_us': '100000',
+  });
+  assert.equal(cgroupCpuQuota('4:cpu,cpuacct:/docker/abc/child\n', nested), 1);
+  // The narrowest quota of the cgroup and its ancestors is the one that counts.
+  const both = cgroupTree({
+    'cpu/docker/cpu.cfs_quota_us': '800000',
+    'cpu/docker/cpu.cfs_period_us': '100000',
+    'cpu/docker/abc/cpu.cfs_quota_us': '200000',
+    'cpu/docker/abc/cpu.cfs_period_us': '100000',
+  });
+  assert.equal(cgroupCpuQuota('4:cpu,cpuacct:/docker/abc\n', both), 2);
 });
 
 test('the memory limit is the smallest of the cgroup and its ancestors', () => {
@@ -153,6 +170,12 @@ test('the memory limit is the smallest of the cgroup and its ancestors', () => {
   assert.equal(cgroupMemoryLimit('0::/apps/web\n', v2), 6000000000);
   const v1 = cgroupTree({ 'memory/docker/abc/memory.limit_in_bytes': '4294967296' });
   assert.equal(cgroupMemoryLimit('4:memory:/docker/abc\n', v1), 4294967296);
+  // v1 reads the ancestors too: a limit further up holds a process whose own cgroup sets none.
+  const v1nested = cgroupTree({
+    'memory/docker/abc/memory.limit_in_bytes': '2147483648',
+    'memory/docker/abc/child/memory.limit_in_bytes': '9223372036854771712',
+  });
+  assert.equal(cgroupMemoryLimit('4:memory:/docker/abc/child\n', v1nested), 2147483648);
   const unlimited = cgroupTree({ 'memory.max': 'max', 'memory.high': 'max' });
   assert.equal(cgroupMemoryLimit('0::/\n', unlimited), 0);
 });
