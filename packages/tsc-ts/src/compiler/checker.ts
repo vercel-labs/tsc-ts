@@ -717,7 +717,7 @@ export class Checker implements TypeChecking {
   deferDiagnostic(node: Node, report: () => void): void {
     this.deferredDiagnostics.push(report);
     if (this.deferredDiagnosticFiles !== undefined)
-      this.deferredDiagnosticFiles.push(getSourceFileOfNode(node).fileName);
+      this.deferredDiagnosticFiles.push(this.fileIndex.get(getSourceFileOfNode(node)) ?? -1);
   }
 
   /**
@@ -843,7 +843,7 @@ export class Checker implements TypeChecking {
   /** The access flags of the key `getIndexedAccessTypeEx` keeps each indexed access type by. */
   indexedAccessKeyFlags: Map<Type, number> | undefined = undefined;
   /** Where results are shared between checker threads (shared-results.ts): the file of each diagnostic deferred. */
-  deferredDiagnosticFiles: string[] | undefined = undefined;
+  deferredDiagnosticFiles: number[] | undefined = undefined;
 
   constructor(host: CheckerHost) {
     this.host = host;

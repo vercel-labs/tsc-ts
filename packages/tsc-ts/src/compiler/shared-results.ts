@@ -1,5 +1,5 @@
-// Results one checker thread computed, as portable records other checker threads translate into their own types
-// (TSC_TS_SHARE=1).
+// Results one checker thread computed, as records in its number log that other checker threads translate into their
+// own types (TSC_TS_SHARE=1).
 //
 // A checker exports the result of a declaration-level computation (the value type of a variable or property, or the
 // return type of a declared signature) as records: each type the result reaches through its identity (constituents,
@@ -74,6 +74,7 @@ import { findResolutionCycleStartIndex, TypeSystemPropertyName } from './checker
 import { typeToString } from './type-printer.js';
 import { getTypeOfSymbol } from './checker-symbol-types.js';
 import { getReturnTypeOfSignature } from './checker-signatures.js';
+import { LinkTable } from './link-tables.js';
 
 // Functions, classes, enums and modules have anonymous types that are cheap to create; their members are not. (A
 // function: a top-level constant computed from an enum member of a module in an import cycle doesn't compile natively.)
@@ -82,9 +83,9 @@ function sharedValueFlags(): SymbolFlags {
 }
 
 const enum RecordKind {
-  /** A type the checker creates when it starts: `num` is its position in `initialTypes`. */
+  /** A type the checker creates when it starts: its position in `initialTypes`. */
   Initial,
-  /** A regular literal type: `flags`, `text` or `num`. */
+  /** A regular literal type: its flags, then its value as a double or its text. */
   Literal,
   /** The fresh type of the literal type `refs[0]`. */
   FreshLiteral,
@@ -102,24 +103,24 @@ const enum RecordKind {
   NodeType,
   /** A reference to the generic type `refs[0]` with the type arguments `refs[1..]`. */
   Reference,
-  /** The tuple target with the element flags `nums`, labeled by `nodes`, readonly when `num` is 1. */
+  /** The tuple target: readonly, then the element flags and label nodes. */
   TupleTarget,
   /**
-   * The instantiation of the anonymous, mapped or deferred reference type `refs[0]` with the `num` outer type arguments
-   * after it, then the return types its signatures had resolved (built after it).
+   * The instantiation of the anonymous, mapped or deferred reference type `refs[0]` with the outer type arguments
+   * after it, then the return types its signatures had resolved (built after it); the node declares it.
    */
   Instantiation,
-  /** A union of `refs`, with the origin `num` (a record index, or -1). */
+  /** A union of `refs` with the origin record, or -1. */
   Union,
   /** An intersection of `refs`. */
   Intersection,
-  /** `keyof refs[0]` with the index flags `num`. */
+  /** `keyof refs[0]` with the index flags. */
   Index,
-  /** `refs[0][refs[1]]` with the access flags `num`. */
+  /** `refs[0][refs[1]]` with the access flags. */
   IndexedAccess,
-  /** The instantiation of the conditional type of `node` with outer type arguments `refs`, for constraints when `num` is 1. */
+  /** The instantiation of the conditional type of `node` with outer type arguments `refs`, for constraints when the tag is 1. */
   Conditional,
-  /** A template literal type of `texts` and `refs`. */
+  /** A template literal type of its texts and `refs`. */
   Template,
   /** The string mapping `symbol` of `refs[0]`. */
   StringMapping,
@@ -129,102 +130,134 @@ const enum RecordKind {
   NoInfer,
   /**
    * The member for the constituent `refs[last]` of the distribution of the conditional type of `node` instantiated
-   * with outer type arguments `refs[0..last)`, for constraints when `num` is 1.
+   * with outer type arguments `refs[0..last)`, for constraints when the tag is 1.
    */
   DistributedConditional,
   /**
    * An anonymous object type of the object literal `symbol` with members resolved when it was created (an object
-   * literal type, or its regular, widened or spread form), with the object flags `flags`. Its members come with the
-   * `CompleteObject` record that follows them.
+   * literal type, or its regular, widened or spread form): its object flags, then the record of its members.
    */
   AnonymousObject,
-  /** The members of the `AnonymousObject` record `num`: the properties `refs` and the index infos `indexInfos`. */
+  /** The members of the `AnonymousObject` record whose index is written first: the properties `refs` and index infos. */
   CompleteObject,
   /**
-   * A property symbol a checker created (`text` its name, `flags` its symbol flags, `num` its check flags): its
-   * declarations `nodes`, value declaration `node`, type `refs[0]`, name type `refs[1]` (or -1), the symbol it was
-   * made from `refs[2]` (a property record, or -1 for `symbol`, a symbol of the program) and its parent `aliasSymbol`.
+   * A property symbol a checker created: its symbol flags, check flags and name, its declarations, its type
+   * `refs[0]`, name type `refs[1]` (or -1), the symbol it was made from `refs[2]` (a property record, or -1 for the
+   * symbol of the program written with it) and its parent (its alias).
    */
   Property,
 }
 
-/** An index signature of an `AnonymousObject` record. */
-export class PortableIndexInfo {
-  readonly keyType: number;
-  readonly valueType: number;
-  readonly isReadonly: boolean;
-  readonly declaration: Node | undefined;
-  readonly components: readonly Node[];
-
-  constructor(
-    keyType: number,
-    valueType: number,
-    isReadonly: boolean,
-    declaration: Node | undefined,
-    components: readonly Node[],
-  ) {
-    this.keyType = keyType;
-    this.valueType = valueType;
-    this.isReadonly = isReadonly;
-    this.declaration = declaration;
-    this.components = components;
-  }
+/**
+ * The bits of a record's header: its kind in the low five, and the fields that follow. A record is its refs (the
+ * count in the header, or a count word before them when it is `RefEscape`), then its alias when it has one (its symbol
+ * and its refs), then its symbol, its node, and the fields its kind has.
+ */
+const enum RecordHeader {
+  KindMask = 0x1f,
+  HasAlias = 1 << 5,
+  NamingShift = 6,
+  NamingMask = 3 << NamingShift,
+  HasNode = 1 << 8,
+  /** The record's value declaration is its first declaration, so it is not written again (`Property`). */
+  ValueIsFirst = 1 << 9,
+  /** The alias symbol is written as the id of a symbol it merged, not as the symbol of a node. */
+  AliasMerged = 1 << 10,
+  /** The record is the constituent of a distribution's origin, not a type of its own (`Union`, `Intersection`). */
+  Constituent = 1 << 11,
+  /** The ref count from which the count has a word of its own. */
+  RefEscape = 0xffff,
 }
 
-export class PortableRecord {
-  readonly kind: RecordKind;
-  readonly flags: number;
-  readonly num: number;
-  readonly text: string;
-  symbol: Symbol | undefined;
-  readonly node: Node | undefined;
-  readonly refs: readonly number[];
-  nums: readonly number[];
-  nodes: readonly (Node | undefined)[];
-  texts: readonly string[];
-  /** For a symbol a checker merged: the id of a symbol it merged, which keys every checker's merged symbol. */
-  mergedId: number;
-  /** The alias: its symbol and the records of its type arguments. */
-  aliasSymbol: Symbol | undefined;
-  aliasMergedId: number;
-  aliasRefs: readonly number[];
-  indexInfos: readonly PortableIndexInfo[];
-  /** The producer's type id, which keys the consumer's translations of the producer's types. */
-  readonly id: number;
-
-  constructor(
-    kind: RecordKind,
-    id: number,
-    flags: number,
-    num: number,
-    text: string,
-    symbol: Symbol | undefined,
-    node: Node | undefined,
-    refs: readonly number[],
-  ) {
-    this.kind = kind;
-    this.id = id;
-    this.flags = flags;
-    this.num = num;
-    this.text = text;
-    this.symbol = symbol;
-    this.node = node;
-    this.refs = refs;
-    this.nums = noNumbers;
-    this.nodes = noNodes;
-    this.texts = noTexts;
-    this.mergedId = -1;
-    this.aliasSymbol = undefined;
-    this.aliasMergedId = -1;
-    this.aliasRefs = noNumbers;
-    this.indexInfos = noIndexInfos;
-  }
+/** How a record names a symbol. */
+const enum SymbolNaming {
+  None,
+  /** The symbol of the node written with it. */
+  Node,
+  /** The export symbol of the symbol of the node written with it. */
+  Export,
+  /** A symbol the producer merged, by the id of a symbol it merged. */
+  Merged,
 }
 
-const noNumbers: readonly number[] = [];
-const noNodes: readonly (Node | undefined)[] = [];
-const noTexts: readonly string[] = [];
-const noIndexInfos: readonly PortableIndexInfo[] = [];
+const noRefs: readonly number[] = [];
+
+/**
+ * Writes records into a checker's store: int32 words at a cursor, strings into its string log, and each record's
+ * offset in its record table. The cursor is the writer's alone until it publishes a result.
+ */
+export class StoreWriter {
+  readonly numbers: Int32Array;
+  readonly strings: Uint16Array;
+  readonly table: Int32Array;
+  readonly fileIndex: Map<SourceFile, number>;
+  /** The cursor in the number log, and in the string log. */
+  at = 0;
+  unitAt = 0;
+  /** Set when a record or a field didn't fit the store's configured capacity. */
+  full = false;
+
+  constructor(numbers: Int32Array, strings: Uint16Array, table: Int32Array, fileIndex: Map<SourceFile, number>) {
+    this.numbers = numbers;
+    this.strings = strings;
+    this.table = table;
+    this.fileIndex = fileIndex;
+  }
+
+  /** Returns to the cursors `at` and `unitAt`. */
+  reset(at: number, unitAt: number): void {
+    this.at = at;
+    this.unitAt = unitAt;
+    this.full = false;
+  }
+
+  /** Starts record `index` at the cursor: its header, and its offset in the record table. */
+  beginRecord(index: number, header: number): void {
+    if (index < this.table.length) this.table[index] = this.at + 1;
+    else this.full = true;
+    this.word(header);
+  }
+
+  word(value: number): void {
+    if (this.at < this.numbers.length) this.numbers[this.at] = value;
+    else this.full = true;
+    this.at++;
+  }
+
+  /** A double as the two int32 halves of its bits. */
+  double(value: number): void {
+    const words = doubleWords();
+    words.f[0] = value;
+    this.word(words.i[0]!);
+    this.word(words.i[1]!);
+  }
+
+  /** A string as its offset and length in the string log. */
+  text(value: string): void {
+    const length = value.length;
+    if (this.unitAt + length <= this.strings.length) {
+      this.word(this.unitAt);
+      this.word(length);
+      for (let j = 0; j < length; j++) this.strings[this.unitAt++] = value.charCodeAt(j);
+      return;
+    }
+    this.full = true;
+    this.word(0);
+    this.word(0);
+  }
+
+  /** A node as its file, range and id, or -1 for none. The file must be one `fileIndex` has. */
+  node(node: Node | undefined): void {
+    if (node === undefined) {
+      this.word(-1);
+      return;
+    }
+    this.word(this.fileIndex.get(getSourceFileOfNode(node))!);
+    this.word(node.pos);
+    this.word(node.end);
+    this.word(node.id);
+  }
+}
 
 /** The types every checker creates when it starts, in the same order; marker types are left out. */
 export function initialTypes(c: Checker): Type[] {
@@ -293,115 +326,77 @@ export class MergedOrigins {
   size = -1;
 }
 
+/** An index signature of an `AnonymousObject` record, waiting for the words of its `CompleteObject`. */
+class IndexInfoWords {
+  readonly keyType: number;
+  readonly valueType: number;
+  readonly isReadonly: boolean;
+  readonly declaration: Node | undefined;
+  readonly components: readonly Node[];
+
+  constructor(
+    keyType: number,
+    valueType: number,
+    isReadonly: boolean,
+    declaration: Node | undefined,
+    components: readonly Node[],
+  ) {
+    this.keyType = keyType;
+    this.valueType = valueType;
+    this.isReadonly = isReadonly;
+    this.declaration = declaration;
+    this.components = components;
+  }
+}
+
 /** Writes a result as records; `failure` names the first part that has no record kind. */
 export class Exporter {
   readonly c: Checker;
-  records: PortableRecord[] = [];
-  readonly indexes = new Map<Type, number>();
+  readonly writer: StoreWriter;
   /**
-   * The index of `records[0]`. A checker's exporter keeps the indexes of the types it exported before
-   * (`ThreadSharing.post`): their records are in its store already, and a result's records are only the new ones.
+   * The index of the first record of the export in progress. A checker's exporter keeps the records of the types it
+   * exported before (`ThreadSharing.post`): its store has them already, and a result's records are only the new ones.
    */
   base = 0;
+  /** The number of records the export in progress wrote. */
+  count = 0;
+  /** The record of each type, by type id, and of each property symbol, by symbol id. */
+  readonly indexes = new Map<number, number>();
+  readonly properties = new Map<number, number>();
   /** The types and properties the export in progress gave indexes, which a failed export forgets again. */
-  readonly addedTypes: Type[] = [];
-  readonly addedProperties: Symbol[] = [];
+  readonly addedTypes: number[] = [];
+  readonly addedProperties: number[] = [];
   /**
    * The most records the export in progress may add (`ThreadSharing.post` prices it with `kappa`); past it the export
    * fails and the result is not posted.
    */
   limit = Number.POSITIVE_INFINITY;
-
-  /** Appends `record`; its index, or -1 if the result is over its export budget. */
-  push(record: PortableRecord): number {
-    const index = this.base + this.records.length;
-    if (index >= this.limit) return this.fail(budgetFailure);
-    this.records.push(record);
-    return index;
-  }
-  readonly initial: Map<Type, number>;
+  readonly initial: Map<number, number>;
   failure: string | undefined = undefined;
 
   /** The ids above which nodes and symbols are the checker thread's own (lazily parsed JSDoc), or Infinity. */
   nodeLimit = Infinity;
   symbolLimit = Infinity;
 
-  constructor(c: Checker, initial: Map<Type, number>) {
-    this.c = c;
-    this.initial = initial;
-  }
-
-  /** Whether `node` is one every checker shares; fails if not. */
-  sharedNode(node: Node | undefined): boolean {
-    if (node === undefined || node.id <= this.nodeLimit) return true;
-    this.fail('node of the thread');
-    return false;
-  }
-
   /** The ids of the symbols each merged symbol merged (`getMergedSymbol`), built on first use. */
   mergedOrigins: Map<Symbol, number> | undefined = undefined;
   /** Where the checker keeps `mergedOrigins` between exports. */
   originsCache: MergedOrigins | undefined = undefined;
 
-  /**
-   * Sets the symbol of `record`: a symbol of the program, which every checker shares, or a symbol the checker merged,
-   * by the id of a symbol it merged. Other symbols are the checker's own.
-   */
-  symbolOf(record: PortableRecord, symbol: Symbol, alias: boolean): boolean {
-    let mergedId = -1;
-    let shared: Symbol | undefined = symbol;
-    if ((symbol.flags & SymbolFlags.Transient) === 0 && getSymbolId(symbol) > this.symbolLimit) {
-      this.fail('symbol of the thread');
-      return false;
-    }
-    if ((symbol.flags & SymbolFlags.Transient) !== 0) {
-      let origins = this.mergedOrigins;
-      if (origins === undefined) {
-        const cache = this.originsCache;
-        if (cache !== undefined && cache.size === this.c.mergedSymbols.size) origins = cache.origins;
-        else {
-          origins = new Map<Symbol, number>();
-          for (const [id, target] of this.c.mergedSymbols) if (!origins.has(target)) origins.set(target, id);
-          if (cache !== undefined) {
-            cache.origins = origins;
-            cache.size = this.c.mergedSymbols.size;
-          }
-        }
-        this.mergedOrigins = origins;
-      }
-      const origin = origins.get(symbol);
-      if (origin === undefined) {
-        this.fail('checker symbol ' + symbol.name);
-        return false;
-      }
-      mergedId = origin;
-      shared = undefined;
-    }
-    if (alias) {
-      record.aliasSymbol = shared;
-      record.aliasMergedId = mergedId;
-    } else {
-      record.symbol = shared;
-      record.mergedId = mergedId;
-    }
-    return true;
-  }
+  /** How the record in progress names its symbol and its alias, and the node it carries. */
+  private naming = SymbolNaming.None;
+  private namingMerged = -1;
+  private namingNode: Node | undefined = undefined;
+  private aliasNaming = SymbolNaming.None;
+  private aliasMerged = -1;
+  private aliasNode: Node | undefined = undefined;
+  private aliasRefs: readonly number[] = noRefs;
+  private node: Node | undefined = undefined;
 
-  /** `new PortableRecord` with the symbol `symbol` (see `symbolOf`); undefined if it is the checker's own. */
-  withSymbol(
-    kind: RecordKind,
-    t: Type,
-    symbol: Symbol,
-    num: number,
-    refs: readonly number[],
-  ): PortableRecord | undefined {
-    const record = new PortableRecord(kind, t.id, 0, num, '', undefined, undefined, refs);
-    return this.symbolOf(record, symbol, false) ? record : undefined;
-  }
-
-  addWithSymbol(kind: RecordKind, t: Type, symbol: Symbol, num: number, refs: readonly number[]): number {
-    const record = this.withSymbol(kind, t, symbol, num, refs);
-    return record === undefined ? -1 : this.add(t, record);
+  constructor(c: Checker, initial: Map<number, number>, writer: StoreWriter) {
+    this.c = c;
+    this.initial = initial;
+    this.writer = writer;
   }
 
   fail(reason: string): number {
@@ -409,17 +404,182 @@ export class Exporter {
     return -1;
   }
 
-  add(t: Type, record: PortableRecord): number {
-    if (!this.sharedNode(record.node)) return -1;
-    for (const node of record.nodes) if (!this.sharedNode(node)) return -1;
-    for (const info of record.indexInfos) {
-      if (!this.sharedNode(info.declaration)) return -1;
-      for (const node of info.components) if (!this.sharedNode(node)) return -1;
+  /** Whether `node` is one every checker shares, and can name; fails if not. */
+  sharedNode(node: Node | undefined): boolean {
+    if (node === undefined) return true;
+    if (node.id > this.nodeLimit) {
+      this.fail('node of the thread');
+      return false;
     }
-    const index = this.push(record);
-    if (index < 0) return index;
-    this.indexes.set(t, index);
-    this.addedTypes.push(t);
+    if (!this.writer.fileIndex.has(getSourceFileOfNode(node))) {
+      this.fail('node outside the program');
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * The index of the next record of the store, or -1 if the result is over its export budget; the store's table must
+   * have room for it.
+   */
+  nextIndex(): number {
+    const index = this.base + this.count;
+    if (index >= this.limit) return this.fail(budgetFailure);
+    this.count++;
+    if (index >= this.writer.table.length) this.writer.full = true;
+    return index;
+  }
+
+  /** Records the type `t` at `index`. */
+  private memo(t: Type, index: number): void {
+    // A consumer's memo is by record index, so a type has one record: VERIFY runs check that it does.
+    if (shareVerifyValue !== undefined && this.indexes.has(t.id))
+      process.stderr.write('share-verify: type ' + t.id + ' has a record already\n');
+    this.indexes.set(t.id, index);
+    this.addedTypes.push(t.id);
+  }
+
+  /**
+   * Sets how the record in progress names `symbol`: a symbol of the program by the node it is the symbol of, or a
+   * symbol the checker merged by the id of a symbol it merged. Fails for a symbol of the thread.
+   */
+  nameSymbol(symbol: Symbol | undefined, alias: boolean): boolean {
+    let naming = SymbolNaming.None;
+    let merged = -1;
+    let node: Node | undefined = undefined;
+    if (symbol !== undefined) {
+      if ((symbol.flags & SymbolFlags.Transient) === 0) {
+        if (getSymbolId(symbol) > this.symbolLimit) {
+          this.fail('symbol of the thread');
+          return false;
+        }
+        const declaration = symbol.declaration;
+        if (declaration === undefined) {
+          this.fail('symbol without a declaration');
+          return false;
+        }
+        const local = getSymbol(declaration);
+        if (local === symbol) naming = SymbolNaming.Node;
+        else if (local !== undefined && local.exportSymbol === symbol) naming = SymbolNaming.Export;
+        else {
+          this.fail('symbol not named by its declaration');
+          return false;
+        }
+        node = declaration;
+      } else {
+        let origins = this.mergedOrigins;
+        if (origins === undefined) origins = this.buildOrigins();
+        const origin = origins.get(symbol);
+        if (origin === undefined) {
+          this.fail('checker symbol ' + symbol.name);
+          return false;
+        }
+        naming = SymbolNaming.Merged;
+        merged = origin;
+      }
+    }
+    if (alias) {
+      this.aliasNaming = naming;
+      this.aliasMerged = merged;
+      this.aliasNode = node;
+      // The alias's type arguments are recorded after it is named (`aliasBits`). A record that names an alias which
+      // has none, such as a property naming its parent, keeps none of the last alias's.
+      this.aliasRefs = noRefs;
+    } else {
+      this.naming = naming;
+      this.namingMerged = merged;
+      this.namingNode = node;
+    }
+    return true;
+  }
+
+  /** The ids of the symbols each merged symbol merged, from the checker's `mergedSymbols`. */
+  private buildOrigins(): Map<Symbol, number> {
+    const cache = this.originsCache;
+    let origins: Map<Symbol, number>;
+    if (cache !== undefined && cache.size === this.c.mergedSymbols.size) origins = cache.origins;
+    else {
+      origins = new Map<Symbol, number>();
+      for (const [id, target] of this.c.mergedSymbols) if (!origins.has(target)) origins.set(target, id);
+      if (cache !== undefined) {
+        cache.origins = origins;
+        cache.size = this.c.mergedSymbols.size;
+      }
+    }
+    this.mergedOrigins = origins;
+    return origins;
+  }
+
+  /**
+   * Names the alias of the record in progress, after its type arguments are exported, and returns the header bits that
+   * name it; -1 if it can't be named.
+   */
+  private aliasBits(alias: TypeAlias | undefined, refs: readonly number[]): number {
+    if (alias === undefined) return 0;
+    if (!this.nameSymbol(alias.symbol, true)) return -1;
+    this.aliasRefs = refs;
+    return RecordHeader.HasAlias | (this.aliasNaming === SymbolNaming.Merged ? RecordHeader.AliasMerged : 0);
+  }
+
+  /**
+   * Starts the record at `index`: its header, its refs, its alias, its symbol and its node, all decided by `bits` and
+   * the fields set just before. A kind's own fields follow.
+   */
+  begin(kind: RecordKind, index: number, refs: readonly number[], bits: number): void {
+    const w = this.writer;
+    const n = refs.length;
+    w.beginRecord(index, kind | bits | (n < RecordHeader.RefEscape ? n << 16 : RecordHeader.RefEscape << 16));
+    if (n >= RecordHeader.RefEscape) w.word(n);
+    for (let i = 0; i < n; i++) w.word(refs[i]!);
+    if ((bits & RecordHeader.HasAlias) !== 0) {
+      if ((bits & RecordHeader.AliasMerged) !== 0) w.word(this.aliasMerged);
+      else {
+        w.word(this.aliasNaming === SymbolNaming.Export ? 1 : 0);
+        w.node(this.aliasNode);
+      }
+      const aliasRefs = this.aliasRefs;
+      w.word(aliasRefs.length);
+      for (let i = 0; i < aliasRefs.length; i++) w.word(aliasRefs[i]!);
+    }
+    const naming = bits & RecordHeader.NamingMask;
+    if (naming === SymbolNaming.Merged << RecordHeader.NamingShift) w.word(this.namingMerged);
+    else if (naming !== 0) w.node(this.namingNode);
+    if ((bits & RecordHeader.HasNode) !== 0) w.node(this.node);
+  }
+
+  /** The record of `t` of `kind`, with `refs` and no fields of its own; its index. */
+  private plain(kind: RecordKind, t: Type, refs: readonly number[]): number {
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(kind, index, refs, 0);
+    return index;
+  }
+
+  /** The record of the initial type `t`, which is `num`th in `initialTypes`. */
+  private initialType(t: Type, num: number): number {
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(RecordKind.Initial, index, noRefs, 0);
+    this.writer.word(num);
+    return index;
+  }
+
+  /** The record of the type `t` of `kind` named by `symbol`, with `refs`; its index. */
+  private symbolType(kind: RecordKind, t: Type, symbol: Symbol, refs: readonly number[]): number {
+    if (!this.nameSymbol(symbol, false)) return -1;
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(kind, index, refs, this.naming << RecordHeader.NamingShift);
+    return index;
+  }
+
+  /** The record of the type `t` of the type node `node`; its index. */
+  private nodeType(t: Type, node: Node): number {
+    if (!this.sharedNode(node)) return -1;
+    this.node = node;
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(RecordKind.NodeType, index, noRefs, RecordHeader.HasNode);
     return index;
   }
 
@@ -432,157 +592,171 @@ export class Exporter {
     return refs;
   }
 
-  aliasOf(record: PortableRecord, alias: TypeAlias | undefined): PortableRecord {
-    if (alias === undefined) return record;
-    const refs = this.types(alias.typeArguments);
-    this.symbolOf(record, alias.symbol, true);
-    record.aliasRefs = refs;
-    return record;
-  }
-
   type(t: Type): number {
     if (this.failure !== undefined) return -1;
-    const known = this.indexes.get(t);
+    const known = this.indexes.get(t.id);
     if (known !== undefined) return known;
-    const initial = this.initial.get(t);
-    if (initial !== undefined)
-      return this.add(t, new PortableRecord(RecordKind.Initial, t.id, 0, initial, '', undefined, undefined, noNumbers));
+    const initial = this.initial.get(t.id);
+    if (initial !== undefined) return this.initialType(t, initial);
     const c = this.c;
     const flags = t.flags;
     if ((flags & TypeFlags.Literal) !== 0 && (flags & TypeFlags.Boolean) === 0) return this.literal(t as LiteralType);
     if ((flags & TypeFlags.UniqueESSymbol) !== 0) {
       if (c.uniqueESSymbolTypes.get(t.symbol!) !== t) return this.fail('unique symbol');
-      return this.addWithSymbol(RecordKind.UniqueSymbol, t, t.symbol!, 0, noNumbers);
+      return this.symbolType(RecordKind.UniqueSymbol, t, t.symbol!, noRefs);
     }
     if ((flags & TypeFlags.TypeParameter) !== 0) {
       const symbol = t.symbol;
       if (symbol === undefined) return this.fail('type parameter without a symbol');
       const declared = getDeclaredTypeOfSymbol(c, symbol);
-      if (declared === t) return this.addWithSymbol(RecordKind.Declared, t, symbol, 0, noNumbers);
+      if (declared === t) return this.symbolType(RecordKind.Declared, t, symbol, noRefs);
       if ((declared.objectFlags & ObjectFlags.ClassOrInterface) !== 0 && (declared as InterfaceType).thisType === t)
-        return this.addWithSymbol(RecordKind.ThisType, t, symbol, 0, noNumbers);
+        return this.symbolType(RecordKind.ThisType, t, symbol, noRefs);
       return this.fail('fresh type parameter');
     }
     if (t.symbol !== undefined && (flags & (TypeFlags.Union | TypeFlags.Enum)) !== 0) {
       // An enum type: the declared type of its symbol.
       if (getDeclaredTypeOfSymbol(c, t.symbol) !== t) return this.fail('enum type');
-      return this.addWithSymbol(RecordKind.Declared, t, t.symbol, 0, noNumbers);
+      return this.symbolType(RecordKind.Declared, t, t.symbol, noRefs);
     }
     if ((flags & TypeFlags.Union) !== 0) return this.union(t as UnionType);
-    if ((flags & TypeFlags.Intersection) !== 0) {
-      const refs = this.types((t as UnionOrIntersectionType).types);
-      if (this.failure !== undefined) return -1;
-      const record = new PortableRecord(
-        RecordKind.Intersection,
-        t.id,
-        t.objectFlags,
-        0,
-        '',
-        undefined,
-        undefined,
-        refs,
-      );
-      return this.add(t, this.aliasOf(record, t.alias));
-    }
+    if ((flags & TypeFlags.Intersection) !== 0) return this.intersection(t as UnionOrIntersectionType);
     if ((flags & TypeFlags.Object) !== 0) return this.object(t as ObjectType);
     if ((flags & TypeFlags.Index) !== 0) {
       const target = this.type((t as IndexType).target);
       if (this.failure !== undefined) return -1;
-      return this.add(
-        t,
-        new PortableRecord(RecordKind.Index, t.id, 0, (t as IndexType).indexFlags, '', undefined, undefined, [target]),
-      );
+      const index = this.nextIndex();
+      this.memo(t, index);
+      this.begin(RecordKind.Index, index, [target], 0);
+      this.writer.word((t as IndexType).indexFlags);
+      return index;
     }
     if ((flags & TypeFlags.IndexedAccess) !== 0) {
       const access = t as IndexedAccessType;
       const refs = this.types([access.objectType, access.indexType]);
       if (this.failure !== undefined) return -1;
-      const record = new PortableRecord(
-        RecordKind.IndexedAccess,
-        t.id,
-        0,
-        this.c.indexedAccessKeyFlags!.get(t) ?? access.accessFlags,
-        '',
-        undefined,
-        undefined,
-        refs,
-      );
-      return this.add(t, this.aliasOf(record, t.alias));
+      const alias = t.alias;
+      const aliasRefs = alias === undefined ? noRefs : this.types(alias.typeArguments);
+      if (this.failure !== undefined) return -1;
+      const bits = this.aliasBits(alias, aliasRefs);
+      if (bits < 0) return -1;
+      const index = this.nextIndex();
+      this.memo(t, index);
+      this.begin(RecordKind.IndexedAccess, index, refs, bits);
+      this.writer.word(this.c.indexedAccessKeyFlags!.get(t) ?? access.accessFlags);
+      return index;
     }
     if ((flags & TypeFlags.Conditional) !== 0) return this.conditional(t as ConditionalType);
     if ((flags & TypeFlags.TemplateLiteral) !== 0) {
       const template = t as TemplateLiteralType;
       const refs = this.types(template.types);
       if (this.failure !== undefined) return -1;
-      const record = new PortableRecord(RecordKind.Template, t.id, 0, 0, '', undefined, undefined, refs);
-      record.texts = template.texts.slice();
-      return this.add(t, record);
+      const index = this.nextIndex();
+      this.memo(t, index);
+      this.begin(RecordKind.Template, index, refs, 0);
+      const texts = template.texts;
+      this.writer.word(texts.length);
+      for (let i = 0; i < texts.length; i++) this.writer.text(texts[i]!);
+      return index;
     }
     if ((flags & TypeFlags.StringMapping) !== 0) {
       const target = this.type((t as StringMappingType).target);
       if (this.failure !== undefined) return -1;
-      return this.addWithSymbol(RecordKind.StringMapping, t, t.symbol!, 0, [target]);
+      return this.symbolType(RecordKind.StringMapping, t, t.symbol!, [target]);
     }
     if ((flags & TypeFlags.Substitution) !== 0) {
       const substitution = t as SubstitutionType;
       if (isNoInferType(c, t)) {
         const base = this.type(substitution.baseType);
         if (this.failure !== undefined) return -1;
-        return this.add(t, new PortableRecord(RecordKind.NoInfer, t.id, 0, 0, '', undefined, undefined, [base]));
+        return this.plain(RecordKind.NoInfer, t, [base]);
       }
       const refs = this.types([substitution.baseType, substitution.constraint]);
       if (this.failure !== undefined) return -1;
-      return this.add(t, new PortableRecord(RecordKind.Substitution, t.id, 0, 0, '', undefined, undefined, refs));
+      return this.plain(RecordKind.Substitution, t, refs);
     }
     return this.fail('type flags ' + flags);
   }
 
-  literal(t: LiteralType): number {
+  private literal(t: LiteralType): number {
     const regular = t.regularType;
     if (regular !== t) {
       if (regular.freshType !== t) return this.fail('literal');
       const index = this.type(regular);
       if (this.failure !== undefined) return -1;
-      return this.add(t, new PortableRecord(RecordKind.FreshLiteral, t.id, 0, 0, '', undefined, undefined, [index]));
+      return this.plain(RecordKind.FreshLiteral, t, [index]);
     }
     if (t.symbol !== undefined) {
       if (getDeclaredTypeOfSymbol(this.c, t.symbol) !== t) return this.fail('enum literal');
-      return this.addWithSymbol(RecordKind.EnumLiteral, t, t.symbol, 0, noNumbers);
+      return this.symbolType(RecordKind.EnumLiteral, t, t.symbol, noRefs);
     }
-    return this.add(
-      t,
-      new PortableRecord(
-        RecordKind.Literal,
-        t.id,
-        t.flags,
-        t.numberValue,
-        t.stringValue,
-        undefined,
-        undefined,
-        noNumbers,
-      ),
-    );
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(RecordKind.Literal, index, noRefs, 0);
+    const w = this.writer;
+    w.word(t.flags);
+    if ((t.flags & TypeFlags.NumberLiteral) !== 0) w.double(t.numberValue);
+    else w.text(t.stringValue);
+    return index;
   }
 
-  union(t: UnionType): number {
+  /** The record of the constituents of a union's or intersection's origin, which is not a type: it has no alias. */
+  private originRecord(kind: RecordKind, flags: number, refs: readonly number[]): number {
+    const index = this.nextIndex();
+    this.begin(kind, index, refs, RecordHeader.Constituent);
+    this.writer.word(flags);
+    // A union's origin field is -1 here, as it is for a union with no origin: the constituents are refs, and the
+    // reader scans the field for records this record depends on.
+    if (kind === RecordKind.Union) this.writer.word(-1);
+    return index;
+  }
+
+  private union(t: UnionType): number {
     const refs = this.types(t.types);
+    if (this.failure !== undefined) return -1;
     let origin = -1;
-    if (t.origin !== undefined) {
-      const o = t.origin;
+    const o = t.origin;
+    if (o !== undefined) {
       if ((o.flags & TypeFlags.UnionOrIntersection) !== 0) {
         // Origins are not interned: a union key spells their constituents.
         const parts = this.types((o as UnionOrIntersectionType).types);
         if (this.failure !== undefined) return -1;
         const kind = (o.flags & TypeFlags.Union) !== 0 ? RecordKind.Union : RecordKind.Intersection;
-        origin = this.push(new PortableRecord(kind, -1, o.objectFlags, -2, '', undefined, undefined, parts));
-      } else origin = this.type(o);
+        origin = this.originRecord(kind, o.objectFlags, parts);
+      } else {
+        origin = this.type(o);
+        if (this.failure !== undefined) return -1;
+      }
     }
+    const alias = t.alias;
+    const aliasRefs = alias === undefined ? noRefs : this.types(alias.typeArguments);
     if (this.failure !== undefined) return -1;
-    const record = new PortableRecord(RecordKind.Union, t.id, t.objectFlags, origin, '', undefined, undefined, refs);
-    return this.add(t, this.aliasOf(record, t.alias));
+    const bits = this.aliasBits(alias, aliasRefs);
+    if (bits < 0) return -1;
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(RecordKind.Union, index, refs, bits);
+    this.writer.word(t.objectFlags);
+    this.writer.word(origin);
+    return index;
   }
 
-  object(t: ObjectType): number {
+  private intersection(t: UnionOrIntersectionType): number {
+    const refs = this.types(t.types);
+    if (this.failure !== undefined) return -1;
+    const alias = t.alias;
+    const aliasRefs = alias === undefined ? noRefs : this.types(alias.typeArguments);
+    if (this.failure !== undefined) return -1;
+    const bits = this.aliasBits(alias, aliasRefs);
+    if (bits < 0) return -1;
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(RecordKind.Intersection, index, refs, bits);
+    this.writer.word(t.objectFlags);
+    return index;
+  }
+
+  private object(t: ObjectType): number {
     const c = this.c;
     const objectFlags = t.objectFlags;
     const symbol = t.symbol;
@@ -593,15 +767,15 @@ export class Exporter {
       if (target === t) {
         if ((objectFlags & ObjectFlags.Tuple) !== 0) return this.tupleTarget(t as TupleType);
         if (symbol === undefined || getDeclaredTypeOfSymbol(c, symbol) !== t) return this.fail('generic target');
-        return this.addWithSymbol(RecordKind.Declared, t, symbol, 0, noNumbers);
+        return this.symbolType(RecordKind.Declared, t, symbol, noRefs);
       }
       const refs = [this.type(target), ...this.types(reference.resolvedTypeArguments ?? [])];
       if (this.failure !== undefined) return -1;
-      return this.add(t, new PortableRecord(RecordKind.Reference, t.id, 0, 0, '', undefined, undefined, refs));
+      return this.plain(RecordKind.Reference, t, refs);
     }
     if ((objectFlags & ObjectFlags.ClassOrInterface) !== 0) {
       if (symbol === undefined || getDeclaredTypeOfSymbol(c, symbol) !== t) return this.fail('declared type');
-      return this.addWithSymbol(RecordKind.Declared, t, symbol, 0, noNumbers);
+      return this.symbolType(RecordKind.Declared, t, symbol, noRefs);
     }
     if ((objectFlags & (ObjectFlags.ReverseMapped | ObjectFlags.EvolvingArray)) !== 0) return this.fail('object kind');
     if ((objectFlags & ObjectFlags.Instantiated) !== 0) return this.instantiation(t);
@@ -609,10 +783,9 @@ export class Exporter {
       return this.fail('object without a declaration, object flags ' + objectFlags);
     // The anonymous type of a function, class, enum or module; a variable's own type is what is being shared.
     if ((symbol.flags & sharedValueFlags()) === 0 && c.symbolTypes.get(getSymbolId(symbol)) === t)
-      return this.addWithSymbol(RecordKind.SymbolType, t, symbol, 0, noNumbers);
+      return this.symbolType(RecordKind.SymbolType, t, symbol, noRefs);
     const declaration = (objectFlags & ObjectFlags.Mapped) !== 0 ? (t as MappedType).declaration : symbol.declaration;
-    if (declaration !== undefined && c.resolvedTypes.get(declaration.id) === t)
-      return this.add(t, new PortableRecord(RecordKind.NodeType, t.id, 0, 0, '', undefined, declaration, noNumbers));
+    if (declaration !== undefined && c.resolvedTypes.get(declaration.id) === t) return this.nodeType(t, declaration);
     if (
       (symbol.flags & SymbolFlags.ObjectLiteral) !== 0 &&
       (objectFlags & (ObjectFlags.Anonymous | ObjectFlags.MembersResolved)) ===
@@ -632,55 +805,58 @@ export class Exporter {
   }
 
   /** An object literal type, or one made from one, with its properties and index infos. */
-  anonymousObject(t: ObjectType): number {
+  private anonymousObject(t: ObjectType): number {
     const c = this.c;
     if ((t.objectFlags & ObjectFlags.SideState) !== 0 || c.patternForType.has(t))
       return this.fail('object literal state');
     const resolved = t as StructuredType;
     if (resolved.callSignatures.length !== 0 || resolved.constructSignatures.length !== 0)
       return this.fail('object literal signatures');
-    const shell = new PortableRecord(
-      RecordKind.AnonymousObject,
-      t.id,
-      t.objectFlags & ~lazyObjectFlags(),
-      0,
-      '',
-      undefined,
-      undefined,
-      noNumbers,
-    );
-    if (!this.symbolOf(shell, t.symbol!, false)) return -1;
-    const index = this.add(t, shell);
+    const shell = this.nextIndex();
+    this.memo(t, shell);
     const members: number[] = [];
     for (const prop of resolved.properties) {
       members.push(this.property(prop));
       if (this.failure !== undefined) return -1;
     }
-    const infos: PortableIndexInfo[] = [];
+    const infos: IndexInfoWords[] = [];
     for (const info of resolved.indexInfos) {
       const key = this.type(info.keyType);
       const value = this.type(info.valueType);
       if (this.failure !== undefined) return -1;
-      infos.push(new PortableIndexInfo(key, value, info.isReadonly, info.declaration, info.components.slice()));
+      if (!this.sharedNode(info.declaration)) return -1;
+      for (const node of info.components) if (!this.sharedNode(node)) return -1;
+      infos.push(new IndexInfoWords(key, value, info.isReadonly, info.declaration, info.components));
     }
-    const complete = new PortableRecord(RecordKind.CompleteObject, -1, 0, index, '', undefined, undefined, members);
-    complete.indexInfos = infos;
-    this.push(complete);
-    return index;
+    const complete = this.nextIndex();
+    if (!this.nameSymbol(t.symbol!, false)) return -1;
+    this.begin(RecordKind.AnonymousObject, shell, noRefs, this.naming << RecordHeader.NamingShift);
+    const w = this.writer;
+    w.word(t.objectFlags & ~lazyObjectFlags());
+    w.word(complete);
+    this.begin(RecordKind.CompleteObject, complete, members, 0);
+    w.word(shell);
+    w.word(infos.length);
+    for (const info of infos) {
+      w.word(info.keyType);
+      w.word(info.valueType);
+      w.word(info.isReadonly ? 1 : 0);
+      w.node(info.declaration);
+      w.word(info.components.length);
+      for (const node of info.components) w.node(node);
+    }
+    return shell;
   }
 
-  /** The records of property symbols, by symbol. */
-  readonly properties = new Map<Symbol, number>();
-
   /** A property symbol of an object literal type: a checker's own, made from one of the program or from another. */
-  property(prop: Symbol): number {
-    const known = this.properties.get(prop);
+  private property(prop: Symbol): number {
+    const id = getSymbolId(prop);
+    const known = this.properties.get(id);
     if (known !== undefined) return known;
     const c = this.c;
     if ((prop.flags & SymbolFlags.Transient) === 0) return this.fail('property of the program');
     if ((prop.checkFlags & ~(CheckFlags.Readonly | CheckFlags.Late)) !== 0)
       return this.fail('property check flags ' + prop.checkFlags);
-    const id = getSymbolId(prop);
     const t = c.symbolTypes.get(id);
     if (t === undefined) return this.fail('property without a type');
     const type = this.type(t);
@@ -696,51 +872,51 @@ export class Exporter {
         if (this.failure !== undefined) return -1;
       } else program = source;
     }
-    const record = new PortableRecord(
-      RecordKind.Property,
-      -1,
-      prop.flags,
-      prop.checkFlags,
-      prop.name,
-      program,
-      prop.valueDeclaration,
-      [type, name, target],
-    );
-    record.nodes = getDeclarations(prop).slice();
-    if (prop.parent !== undefined && !this.symbolOf(record, prop.parent, true)) return -1;
-    if (program !== undefined && getSymbolId(program) > this.symbolLimit) return this.fail('symbol of the thread');
+    const declarations = getDeclarations(prop);
     if (!this.sharedNode(prop.valueDeclaration)) return -1;
-    for (const node of record.nodes) if (!this.sharedNode(node)) return -1;
-    const index = this.push(record);
-    this.properties.set(prop, index);
-    this.addedProperties.push(prop);
+    for (const node of declarations) if (!this.sharedNode(node)) return -1;
+    const index = this.nextIndex();
+    this.properties.set(id, index);
+    this.addedProperties.push(id);
+    if (!this.nameSymbol(program, false)) return -1;
+    const value = prop.valueDeclaration;
+    const valueIsFirst = value !== undefined && declarations.length !== 0 && declarations[0] === value;
+    this.node = value;
+    let bits =
+      (this.naming << RecordHeader.NamingShift) |
+      (valueIsFirst ? RecordHeader.ValueIsFirst : value !== undefined ? RecordHeader.HasNode : 0);
+    if (prop.parent !== undefined) {
+      if (!this.nameSymbol(prop.parent, true)) return -1;
+      bits |= RecordHeader.HasAlias | (this.aliasMerged >= 0 ? RecordHeader.AliasMerged : 0);
+    }
+    this.begin(RecordKind.Property, index, [type, name, target], bits);
+    const w = this.writer;
+    w.word(prop.flags);
+    w.word(prop.checkFlags);
+    w.text(prop.name);
+    w.word(declarations.length);
+    for (const node of declarations) w.node(node);
     return index;
   }
 
-  tupleTarget(t: TupleType): number {
-    const record = new PortableRecord(
-      RecordKind.TupleTarget,
-      t.id,
-      0,
-      t.readonly ? 1 : 0,
-      '',
-      undefined,
-      undefined,
-      noNumbers,
-    );
-    const nums: number[] = [];
-    const nodes: (Node | undefined)[] = [];
-    for (const info of t.elementInfos) {
-      nums.push(info.flags);
-      nodes.push(info.labeledDeclaration);
+  private tupleTarget(t: TupleType): number {
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(RecordKind.TupleTarget, index, noRefs, 0);
+    const w = this.writer;
+    w.word(t.readonly ? 1 : 0);
+    const infos = t.elementInfos;
+    w.word(infos.length);
+    for (const info of infos) {
+      if (!this.sharedNode(info.labeledDeclaration)) return -1;
+      w.word(info.flags);
+      w.node(info.labeledDeclaration);
     }
-    record.nums = nums;
-    record.nodes = nodes;
-    return this.add(t, record);
+    return index;
   }
 
   /** An instantiated anonymous or mapped type, or a deferred type reference: its target and outer type arguments. */
-  instantiation(t: ObjectType): number {
+  private instantiation(t: ObjectType): number {
     const c = this.c;
     const objectFlags = t.objectFlags;
     if ((objectFlags & ObjectFlags.SingleSignatureType) !== 0) return this.fail('single signature type');
@@ -756,7 +932,7 @@ export class Exporter {
       target = t.target as ObjectType;
     }
     if (declaration !== undefined && t.mapper === undefined && c.resolvedTypes.get(declaration.id) === t)
-      return this.add(t, new PortableRecord(RecordKind.NodeType, t.id, 0, 0, '', undefined, declaration, noNumbers));
+      return this.nodeType(t, declaration);
     if (declaration === undefined || target === undefined || t.mapper === undefined)
       return this.fail('instantiation, declaration ' + (declaration?.kind ?? -1) + ' target ' + (target !== undefined));
     const typeParameters = c.nodeLinks(declaration).outerTypeParameters;
@@ -768,10 +944,24 @@ export class Exporter {
       return this.fail('instantiation not found');
     const refs = [this.type(target), ...this.types(args)];
     if (this.failure !== undefined) return -1;
-    const record = new PortableRecord(RecordKind.Instantiation, t.id, 0, args.length, '', undefined, declaration, refs);
-    const index = this.add(t, this.aliasOf(record, t.alias));
+    // The alias and its type arguments are exported before the record, as the record names them: a consumer builds
+    // records in index order, and would find them unbuilt after it.
+    const alias = t.alias;
+    const aliasRefs = alias === undefined ? noRefs : this.types(alias.typeArguments);
+    if (this.failure !== undefined) return -1;
+    if (!this.sharedNode(declaration)) return -1;
+    // The record is written after the return types of its signatures, which are built right after it: its index is
+    // lower than theirs.
+    const index = this.nextIndex();
+    this.memo(t, index);
     // Only for an export that hasn't failed (its alias may have): optionalType would forget that failure.
-    if (index >= 0 && this.failure === undefined) this.resolvedReturnTypes(t, refs);
+    if (this.failure === undefined) this.resolvedReturnTypes(t, refs);
+    if (this.failure !== undefined) return -1;
+    const bits = this.aliasBits(alias, aliasRefs);
+    if (bits < 0) return -1;
+    this.node = declaration;
+    this.begin(RecordKind.Instantiation, index, refs, bits | RecordHeader.HasNode);
+    this.writer.word(args.length);
     return index;
   }
 
@@ -781,7 +971,7 @@ export class Exporter {
    * inference stops at references whose type ids grow along its stack (`isDeeplyNestedType`), so a consumer that
    * created them later, when it resolved them, could stop an inference this checker made.
    */
-  resolvedReturnTypes(t: ObjectType, refs: number[]): void {
+  private resolvedReturnTypes(t: ObjectType, refs: number[]): void {
     if ((t.objectFlags & ObjectFlags.MembersResolved) === 0) return;
     for (const signatures of [t.callSignatures, t.constructSignatures])
       for (const signature of signatures) {
@@ -798,7 +988,10 @@ export class Exporter {
    */
   optionalType(t: Type): number {
     if (this.failure !== undefined) return -1;
-    const records = this.records.length;
+    const w = this.writer;
+    const at = w.at;
+    const unitAt = w.unitAt;
+    const count = this.count;
     const types = this.addedTypes.length;
     const properties = this.addedProperties.length;
     const index = this.type(t);
@@ -807,16 +1000,23 @@ export class Exporter {
     for (let i = properties; i < this.addedProperties.length; i++) this.properties.delete(this.addedProperties[i]!);
     this.addedTypes.length = types;
     this.addedProperties.length = properties;
-    this.records.length = records;
+    this.count = count;
+    w.at = at;
+    w.unitAt = unitAt;
+    // A store that ran out stays out: the export can't be posted.
     this.failure = undefined;
     return -1;
   }
 
-  conditional(t: ConditionalType): number {
+  /**
+   * The record of the conditional type `t`: the conditional type of a type node, or the instantiation of one with
+   * outer type arguments; -1 if it can't be exported.
+   */
+  private conditional(t: ConditionalType): number {
     const root = t.root;
     if (t.mapper === undefined) {
       if (this.c.resolvedTypes.get(root.node.id) !== t) return this.fail('conditional type');
-      return this.add(t, new PortableRecord(RecordKind.NodeType, t.id, 0, 0, '', undefined, root.node, noNumbers));
+      return this.nodeType(t, root.node);
     }
     const args: Type[] = [];
     for (const tp of root.outerTypeParameters) args.push(getMappedType(tp, t.mapper));
@@ -828,38 +1028,50 @@ export class Exporter {
       if (keyed !== undefined) {
         const refs = this.types(keyed.typeArguments);
         if (this.failure !== undefined) return -1;
-        const record = new PortableRecord(
-          RecordKind.Conditional,
-          t.id,
-          0,
-          keyed.tag,
-          '',
-          undefined,
-          keyed.root.node,
-          refs,
-        );
-        return this.add(t, this.aliasOf(record, keyed.alias));
+        const alias = keyed.alias;
+        const aliasRefs = alias === undefined ? noRefs : this.types(alias.typeArguments);
+        if (this.failure !== undefined) return -1;
+        const bits = this.aliasBits(alias, aliasRefs);
+        if (bits < 0) return -1;
+        if (!this.sharedNode(keyed.root.node)) return -1;
+        this.node = keyed.root.node;
+        const index = this.nextIndex();
+        this.memo(t, index);
+        this.begin(RecordKind.Conditional, index, refs, bits | RecordHeader.HasNode);
+        this.writer.word(keyed.tag);
+        return index;
       }
       const distributed = this.c.distributedConditionals?.get(t);
       if (distributed === undefined) return this.fail('conditional instantiation not found');
       const refs = this.types([...distributed.typeArguments, distributed.constituent]);
       if (this.failure !== undefined) return -1;
-      const record = new PortableRecord(
-        RecordKind.DistributedConditional,
-        t.id,
-        0,
-        distributed.tag,
-        '',
-        undefined,
-        root.node,
-        refs,
-      );
-      return this.add(t, this.aliasOf(record, distributed.alias));
+      const alias = distributed.alias;
+      const aliasRefs = alias === undefined ? noRefs : this.types(alias.typeArguments);
+      if (this.failure !== undefined) return -1;
+      const bits = this.aliasBits(alias, aliasRefs);
+      if (bits < 0) return -1;
+      if (!this.sharedNode(root.node)) return -1;
+      this.node = root.node;
+      const index = this.nextIndex();
+      this.memo(t, index);
+      this.begin(RecordKind.DistributedConditional, index, refs, bits | RecordHeader.HasNode);
+      this.writer.word(distributed.tag);
+      return index;
     }
     const refs = this.types(args);
     if (this.failure !== undefined) return -1;
-    const record = new PortableRecord(RecordKind.Conditional, t.id, 0, tag, '', undefined, root.node, refs);
-    return this.add(t, this.aliasOf(record, t.alias));
+    const alias = t.alias;
+    const aliasRefs = alias === undefined ? noRefs : this.types(alias.typeArguments);
+    if (this.failure !== undefined) return -1;
+    const bits = this.aliasBits(alias, aliasRefs);
+    if (bits < 0) return -1;
+    if (!this.sharedNode(root.node)) return -1;
+    this.node = root.node;
+    const index = this.nextIndex();
+    this.memo(t, index);
+    this.begin(RecordKind.Conditional, index, refs, bits | RecordHeader.HasNode);
+    this.writer.word(tag);
+    return index;
   }
 }
 
@@ -876,66 +1088,149 @@ function lazyObjectFlags(): ObjectFlags {
 }
 
 /** Translates records into a checker's own types; one translation per producer type. */
+const noTypes: Type[] = [];
+
+/** A type alias whose symbol and type arguments are read: its declared type first, as instantiating it does. */
+function typeAliasOf(c: Checker, symbol: Symbol, refs: Type[]): TypeAlias {
+  // An instantiation of an alias follows its declared type, which records the alias's type parameters.
+  getDeclaredTypeOfSymbol(c, symbol);
+  return new TypeAlias(symbol, refs);
+}
+
+/** Translates the records of another checker's store into this checker's types, reading them where they are. */
 export class Translator {
   readonly c: Checker;
-  readonly translated = new Map<number, Type>();
+  readonly store: StoreReader;
   readonly initial: Type[];
   /** Set when a record has no counterpart here; the translation is then abandoned. */
   failed = false;
 
-  constructor(c: Checker) {
+  constructor(c: Checker, store: StoreReader) {
     this.c = c;
+    this.store = store;
     this.initial = initialTypes(c);
   }
 
-  /** A property symbol made as the producer made it. */
-  property(r: PortableRecord, types: Type[], symbols: (Symbol | undefined)[]): Symbol {
+  /**
+   * The symbol of `node`, named by `how`: the symbol of the node itself, or its export symbol. The record names
+   * symbols of the program this way, and a consumer that hasn't the symbol fails the translation.
+   */
+  private namedSymbol(node: Node, how: number): Symbol | undefined {
+    const local = getSymbol(node);
+    return how === SymbolNaming.Export ? local?.exportSymbol : local;
+  }
+
+  /** Abandons the record being read: the translation fails, and a later one starts afresh. */
+  private abandon(): undefined {
+    this.failed = true;
+    return undefined;
+  }
+
+  /** A property symbol made as the producer made it; undefined if its record can't be read here. */
+  property(index: number): Symbol | undefined {
     const c = this.c;
-    const prop = c.newSymbolWithCheckFlags(r.flags & ~SymbolFlags.Transient, r.text, r.num);
-    setDeclarations(prop, r.nodes as Node[]);
-    prop.valueDeclaration = r.node;
-    if (r.aliasSymbol !== undefined || r.aliasMergedId >= 0)
-      prop.parent = r.aliasMergedId >= 0 ? c.mergedSymbols.get(r.aliasMergedId)! : r.aliasSymbol;
+    const store = this.store;
+    const reader = store.reader;
+    if (!reader.begin(index)) return this.abandon();
+    const f = reader.numbers;
+    const type = store.types.get(f[reader.refAt]!);
+    if (type === undefined) return this.abandon();
+    const nameAt = f[reader.refAt + 1]!;
+    const targetAt = f[reader.refAt + 2]!;
+    let parent: Symbol | undefined = undefined;
+    if (reader.aliasNaming >= 0) {
+      if (reader.aliasNaming === SymbolNaming.Merged) parent = c.mergedSymbols.get(reader.aliasMergedId);
+      else {
+        const node = reader.readNode(reader.aliasNodeStart);
+        if (node === undefined) return this.abandon();
+        parent = this.namedSymbol(node, reader.aliasNaming);
+      }
+      if (parent === undefined) return this.abandon();
+    }
+    let source: Symbol | undefined = undefined;
+    if (reader.symbolNaming === SymbolNaming.Merged) source = c.mergedSymbols.get(reader.symbolMergedId);
+    else if (reader.symbolNaming !== SymbolNaming.None) {
+      const node = reader.readNode(reader.symbolNodeStart);
+      if (node === undefined) return this.abandon();
+      source = this.namedSymbol(node, reader.symbolNaming);
+    }
+    if (reader.symbolNaming !== SymbolNaming.None && source === undefined) return this.abandon();
+    let value: Node | undefined = undefined;
+    if (reader.nodeStart >= 0) {
+      value = reader.readNode(reader.nodeStart);
+      if (value === undefined) return this.abandon();
+    }
+    let p = reader.fields;
+    const flags = f[p++]!;
+    const checkFlags = f[p++]!;
+    const text = reader.textAt(p);
+    p += 2;
+    const count = f[p++]!;
+    const declarations: Node[] = [];
+    for (let i = 0; i < count; i++) {
+      const node = reader.readNode(p);
+      p += reader.nodeWords(p);
+      if (node === undefined) return this.abandon();
+      declarations.push(node);
+    }
+    if ((reader.header & RecordHeader.ValueIsFirst) !== 0) value = declarations[0];
+    const prop = c.newSymbolWithCheckFlags(flags & ~SymbolFlags.Transient, text, checkFlags);
+    setDeclarations(prop, declarations);
+    prop.valueDeclaration = value;
+    if (parent !== undefined) prop.parent = parent;
     const id = getSymbolId(prop);
-    c.symbolTypes.set(id, types[r.refs[0]!]!);
-    if (r.refs[1]! >= 0) c.symbolNameTypes.set(id, types[r.refs[1]!]!);
-    const target = r.refs[2]! >= 0 ? symbols[r.refs[2]!] : r.symbol;
+    c.symbolTypes.set(id, type);
+    if (nameAt >= 0) {
+      const nameType = store.types.get(nameAt);
+      if (nameType === undefined) return this.abandon();
+      c.symbolNameTypes.set(id, nameType);
+    }
+    const target = targetAt >= 0 ? store.symbols.get(targetAt) : source;
     if (target !== undefined) c.symbolTargets.set(id, target);
     return prop;
   }
 
-  /** Sets the members of the `AnonymousObject` record a `CompleteObject` record completes. */
-  complete(r: PortableRecord, types: Type[], symbols: (Symbol | undefined)[]): void {
+  /** Sets the members of the `AnonymousObject` record a `CompleteObject` record completes; false if it can't read it. */
+  complete(index: number): boolean {
     const c = this.c;
-    const t = types[r.num]!;
-    if ((t.objectFlags & ObjectFlags.MembersResolved) !== 0) return;
+    const store = this.store;
+    const reader = store.reader;
+    if (!reader.begin(index)) return false;
+    const f = reader.numbers;
+    const refAt = reader.refAt;
+    let p = reader.fields;
+    const shell = store.types.get(f[p++]!);
+    if (shell === undefined) return false;
+    if ((shell.objectFlags & ObjectFlags.MembersResolved) !== 0) return true;
     const members = new Map<string, Symbol>();
-    for (const i of r.refs) {
-      const prop = symbols[i]!;
+    for (let i = 0; i < reader.refCount; i++) {
+      const prop = store.symbols.get(f[refAt + i]!);
+      if (prop === undefined) return false;
       members.set(prop.name, prop);
     }
-    const infos = r.indexInfos.map(
-      (info) =>
-        new IndexInfo(
-          types[info.keyType]!,
-          types[info.valueType]!,
-          info.isReadonly,
-          info.declaration,
-          info.components as Node[],
-        ),
-    );
-    setStructuredTypeMembers(c, t, members, [], [], infos);
-    keepPropertiesOnly(c, t as StructuredType, members, scannedLiteralPropertiesLimit);
-  }
-
-  record(r: PortableRecord, types: Type[]): Type {
-    if (r.id >= 0) {
-      const known = this.translated.get(r.id);
-      if (known !== undefined) return known;
+    const count = f[p++]!;
+    const infos: IndexInfo[] = [];
+    for (let i = 0; i < count; i++) {
+      const keyType = store.types.get(f[p]!);
+      const valueType = store.types.get(f[p + 1]!);
+      const isReadonly = f[p + 2]! === 1;
+      p += 3;
+      const declaration = reader.readNode(p);
+      p += reader.nodeWords(p);
+      const components: Node[] = [];
+      const componentCount = f[p++]!;
+      for (let j = 0; j < componentCount; j++) {
+        const node = reader.readNode(p);
+        p += reader.nodeWords(p);
+        if (node === undefined) return false;
+        components.push(node);
+      }
+      if (keyType === undefined || valueType === undefined) return false;
+      infos.push(new IndexInfo(keyType, valueType, isReadonly, declaration, components));
     }
-    const t = this.build(r, types);
-    if (r.id >= 0 && !this.failed) this.translated.set(r.id, t);
-    return t;
+    setStructuredTypeMembers(c, shell, members, [], [], infos);
+    keepPropertiesOnly(c, shell as StructuredType, members, scannedLiteralPropertiesLimit);
+    return true;
   }
 
   /**
@@ -955,90 +1250,136 @@ export class Translator {
     }
   }
 
-  alias(r: PortableRecord, types: Type[]): TypeAlias | undefined {
-    if (r.aliasSymbol === undefined && r.aliasMergedId < 0) return undefined;
-    const symbol = r.aliasMergedId >= 0 ? this.c.mergedSymbols.get(r.aliasMergedId)! : r.aliasSymbol!;
-    // An instantiation of an alias follows its declared type, which records the alias's type parameters.
-    getDeclaredTypeOfSymbol(this.c, symbol);
-    return new TypeAlias(
-      symbol,
-      r.aliasRefs.map((i) => types[i]!),
-    );
-  }
-
-  symbol(r: PortableRecord): Symbol {
-    return r.mergedId >= 0 ? this.c.mergedSymbols.get(r.mergedId)! : r.symbol!;
-  }
-
-  build(r: PortableRecord, types: Type[]): Type {
+  /** The type record `index`; undefined if it or a record it needs can't be translated here. */
+  record(index: number): Type | undefined {
     const c = this.c;
+    const store = this.store;
+    const reader = store.reader;
+    if (!reader.begin(index)) return this.abandon();
+    const f = reader.numbers;
+    const header = reader.header;
+    const kind = reader.kind;
+    const n = reader.refCount;
     // An instantiation's refs end with the return types of its signatures, which are built after it.
-    const own = r.kind === RecordKind.Instantiation ? r.refs.slice(0, 1 + r.num) : r.refs;
-    const refs = own.map((i) => types[i]!);
-    switch (r.kind) {
+    const count = kind === RecordKind.Instantiation ? Math.min(n, 1 + f[reader.fields]!) : n;
+    const refs = new Array<Type>(count);
+    for (let i = 0; i < count; i++) {
+      const t = store.types.get(f[reader.refAt + i]!);
+      if (t === undefined) return this.abandon();
+      refs[i] = t;
+    }
+    let aliasSymbol: Symbol | undefined = undefined;
+    let aliasRefs: Type[] = noTypes;
+    if (reader.aliasNaming >= 0) {
+      if (reader.aliasNaming === SymbolNaming.Merged) {
+        aliasSymbol = c.mergedSymbols.get(reader.aliasMergedId);
+        if (aliasSymbol === undefined) return this.abandon();
+      } else {
+        const aliasNode = reader.readNode(reader.aliasNodeStart);
+        if (aliasNode === undefined) return this.abandon();
+        aliasSymbol = this.namedSymbol(aliasNode, reader.aliasNaming);
+        if (aliasSymbol === undefined) return this.abandon();
+      }
+      const aliasCount = reader.aliasRefCount;
+      const types = new Array<Type>(aliasCount);
+      for (let i = 0; i < aliasCount; i++) {
+        const t = store.types.get(f[reader.aliasRefAt + i]!);
+        if (t === undefined) return this.abandon();
+        types[i] = t;
+      }
+      aliasRefs = types;
+    }
+    let symbol: Symbol | undefined = undefined;
+    if (reader.symbolNaming === SymbolNaming.Merged) {
+      symbol = c.mergedSymbols.get(reader.symbolMergedId);
+      if (symbol === undefined) return this.abandon();
+    } else if (reader.symbolNaming !== SymbolNaming.None) {
+      const symbolNode = reader.readNode(reader.symbolNodeStart);
+      if (symbolNode === undefined) return this.abandon();
+      symbol = this.namedSymbol(symbolNode, reader.symbolNaming);
+      if (symbol === undefined) return this.abandon();
+    }
+    let node: Node | undefined = undefined;
+    if (reader.nodeStart >= 0) {
+      node = reader.readNode(reader.nodeStart);
+      if (node === undefined) return this.abandon();
+    }
+    let p = reader.fields;
+    switch (kind) {
       case RecordKind.Initial:
-        return this.initial[r.num]!;
-      case RecordKind.Literal:
-        if ((r.flags & TypeFlags.StringLiteral) !== 0) return getStringLiteralType(c, r.text);
-        if ((r.flags & TypeFlags.NumberLiteral) !== 0) return getNumberLiteralType(c, r.num);
-        return getBigIntLiteralType(c, r.text);
+        return this.initial[f[p]!];
+      case RecordKind.Literal: {
+        const flags = f[p++]!;
+        if ((flags & TypeFlags.NumberLiteral) !== 0) return getNumberLiteralType(c, reader.doubleAt(p));
+        const text = reader.textAt(p);
+        return (flags & TypeFlags.StringLiteral) !== 0 ? getStringLiteralType(c, text) : getBigIntLiteralType(c, text);
+      }
       case RecordKind.FreshLiteral:
         return getFreshTypeOfLiteralType(c, refs[0]!);
       case RecordKind.EnumLiteral:
       case RecordKind.Declared:
-        return getDeclaredTypeOfSymbol(c, this.symbol(r));
+        return getDeclaredTypeOfSymbol(c, symbol!);
       case RecordKind.ThisType:
-        return (getDeclaredTypeOfSymbol(c, this.symbol(r)) as InterfaceType).thisType!;
+        return (getDeclaredTypeOfSymbol(c, symbol!) as InterfaceType).thisType!;
       case RecordKind.UniqueSymbol:
-        return getESSymbolLikeTypeForNode(c, this.symbol(r).valueDeclaration!);
+        return getESSymbolLikeTypeForNode(c, symbol!.valueDeclaration!);
       case RecordKind.SymbolType:
-        return getTypeOfSymbol(c, this.symbol(r));
+        return getTypeOfSymbol(c, symbol!);
       case RecordKind.NodeType: {
-        const node = r.node!;
-        const cached = c.resolvedTypes.get(node.id);
+        const cached = c.resolvedTypes.get(node!.id);
         if (cached !== undefined) return cached;
-        this.aliasOfNode(node);
-        if (this.failed) return c.errorType;
-        const t = getTypeFromTypeNode(c, node);
-        return c.resolvedTypes.get(node.id) ?? t;
+        this.aliasOfNode(node!);
+        if (this.failed) return undefined;
+        const t = getTypeFromTypeNode(c, node!);
+        return c.resolvedTypes.get(node!.id) ?? t;
       }
       case RecordKind.Reference:
         return createTypeReference(c, refs[0]!, refs.slice(1));
       case RecordKind.TupleTarget: {
+        const readonly = f[p++]! === 1;
+        const infosCount = f[p++]!;
         const infos: TupleElementInfo[] = [];
-        for (let i = 0; i < r.nums.length; i++) infos.push(new TupleElementInfo(r.nums[i]!, r.nodes[i]));
-        return getTupleTargetType(c, infos, r.num === 1);
+        for (let i = 0; i < infosCount; i++) {
+          const flags = f[p++]!;
+          const label = reader.readNode(p);
+          p += reader.nodeWords(p);
+          infos.push(new TupleElementInfo(flags, label));
+        }
+        return getTupleTargetType(c, infos, readonly);
       }
       case RecordKind.Instantiation: {
+        const args = f[p++]!;
         const target = refs[0]!;
-        const typeParameters = outerTypeParametersOf(c, r.node!, target);
+        const typeParameters = outerTypeParametersOf(c, node!, target);
         return instantiateTypeWithAlias(
           c,
           target,
-          newTypeMapper(typeParameters, refs.slice(1, 1 + r.num)),
-          this.alias(r, types),
+          newTypeMapper(typeParameters, refs.slice(1, 1 + args)),
+          aliasSymbol === undefined ? undefined : typeAliasOf(c, aliasSymbol, aliasRefs),
         );
       }
       case RecordKind.Union: {
-        if (r.num === -2) return newUnionType(c, r.flags & ObjectFlags.None, refs);
-        const origin = r.num >= 0 ? types[r.num] : undefined;
+        const flags = f[p++]!;
+        const originAt = f[p++]!;
+        if ((header & RecordHeader.Constituent) !== 0) return newUnionType(c, flags & ObjectFlags.None, refs);
         return getUnionTypeFromSortedList(
           c,
           refs,
-          r.flags & (ObjectFlags.PrimitiveUnion | ObjectFlags.ContainsIntersections),
-          this.alias(r, types),
-          origin,
+          flags & (ObjectFlags.PrimitiveUnion | ObjectFlags.ContainsIntersections),
+          aliasSymbol === undefined ? undefined : typeAliasOf(c, aliasSymbol, aliasRefs),
+          originAt >= 0 ? store.types.get(originAt) : undefined,
         );
       }
       case RecordKind.Intersection: {
-        if (r.num === -2) return newIntersectionType(c, ObjectFlags.None, refs);
-        const alias = this.alias(r, types);
+        const flags = f[p++]!;
+        if ((header & RecordHeader.Constituent) !== 0) return newIntersectionType(c, ObjectFlags.None, refs);
+        const alias = aliasSymbol === undefined ? undefined : typeAliasOf(c, aliasSymbol, aliasRefs);
         const hash = typeListHash(refs, alias, 0);
         const existing = c.intersectionTypes.get(hash, refs, alias, 0);
         if (existing !== undefined) return existing;
         const result = newIntersectionType(
           c,
-          (r.flags & ObjectFlags.IsConstrainedTypeVariable) | getPropagatingFlagsOfTypes(refs, TypeFlags.Nullable),
+          (flags & ObjectFlags.IsConstrainedTypeVariable) | getPropagatingFlagsOfTypes(refs, TypeFlags.Nullable),
           refs,
         );
         result.alias = alias;
@@ -1046,54 +1387,71 @@ export class Translator {
         return result;
       }
       case RecordKind.Index:
-        return getIndexTypeEx(c, refs[0]!, r.num);
+        return getIndexTypeEx(c, refs[0]!, f[p]!);
       case RecordKind.IndexedAccess:
-        return getIndexedAccessTypeEx(c, refs[0]!, refs[1]!, r.num, undefined, this.alias(r, types));
+        return getIndexedAccessTypeEx(
+          c,
+          refs[0]!,
+          refs[1]!,
+          f[p]!,
+          undefined,
+          aliasSymbol === undefined ? undefined : typeAliasOf(c, aliasSymbol, aliasRefs),
+        );
       case RecordKind.Conditional: {
-        this.aliasOfNode(r.node!);
-        if (this.failed) return c.errorType;
-        const declared = c.resolvedTypes.get(r.node!.id) ?? getTypeFromTypeNode(c, r.node!);
+        const tag = f[p++]!;
+        this.aliasOfNode(node!);
+        if (this.failed) return undefined;
+        const declared = c.resolvedTypes.get(node!.id) ?? getTypeFromTypeNode(c, node!);
         const root = (declared as ConditionalType).root;
         return getConditionalTypeInstantiation(
           c,
           declared as ConditionalType,
           newTypeMapper(root.outerTypeParameters, refs),
-          r.num === 1,
-          this.alias(r, types),
+          tag === 1,
+          aliasSymbol === undefined ? undefined : typeAliasOf(c, aliasSymbol, aliasRefs),
         );
       }
       case RecordKind.DistributedConditional: {
-        this.aliasOfNode(r.node!);
-        if (this.failed) return c.errorType;
-        const declared = (c.resolvedTypes.get(r.node!.id) ?? getTypeFromTypeNode(c, r.node!)) as ConditionalType;
+        const tag = f[p++]!;
+        this.aliasOfNode(node!);
+        if (this.failed) return undefined;
+        const declared = (c.resolvedTypes.get(node!.id) ?? getTypeFromTypeNode(c, node!)) as ConditionalType;
         const root = declared.root;
         const args = refs.slice(0, refs.length - 1);
-        const alias = this.alias(r, types);
-        getConditionalTypeInstantiation(c, declared, newTypeMapper(root.outerTypeParameters, args), r.num === 1, alias);
-        const member = c.distributedByKey?.get(
-          distributedKey(root.node.id, args, alias, r.num, refs[refs.length - 1]!),
-        );
-        if (member === undefined) this.failed = true;
-        return member ?? c.errorType;
+        const alias = aliasSymbol === undefined ? undefined : typeAliasOf(c, aliasSymbol, aliasRefs);
+        getConditionalTypeInstantiation(c, declared, newTypeMapper(root.outerTypeParameters, args), tag === 1, alias);
+        const member = c.distributedByKey?.get(distributedKey(root.node.id, args, alias, tag, refs[refs.length - 1]!));
+        if (member === undefined) return this.abandon();
+        return member;
       }
-      case RecordKind.Template:
-        return getTemplateLiteralType(c, r.texts.slice(), refs);
+      case RecordKind.Template: {
+        const textsCount = f[p++]!;
+        const texts: string[] = [];
+        for (let i = 0; i < textsCount; i++) {
+          texts.push(reader.textAt(p));
+          p += 2;
+        }
+        return getTemplateLiteralType(c, texts, refs);
+      }
       case RecordKind.StringMapping:
-        return getStringMappingType(c, this.symbol(r), refs[0]!);
+        return getStringMappingType(c, symbol!, refs[0]!);
       case RecordKind.Substitution:
         return getSubstitutionType(c, refs[0]!, refs[1]!);
       case RecordKind.NoInfer:
         return getNoInferType(c, refs[0]!);
-      case RecordKind.AnonymousObject:
-        return newObjectType(c, r.flags | ObjectFlags.Anonymous, this.symbol(r));
+      case RecordKind.AnonymousObject: {
+        // A translation that failed after this record opened the type still made it, and a record built then may name
+        // it: the completion must fill that type, not a new one beside it.
+        const known = store.types.get(index);
+        if (known !== undefined) return known;
+        return newObjectType(c, f[p]! | ObjectFlags.Anonymous, symbol);
+      }
       case RecordKind.CompleteObject:
       case RecordKind.Property:
-        return c.errorType;
+        return this.abandon();
     }
   }
 }
-
-/** The outer type parameters an instantiation of `target` (declared at `declaration`) maps, as instantiation computes them. */
 function outerTypeParametersOf(c: Checker, declaration: Node, target: Type): Type[] {
   const known = c.nodeLinks(declaration).outerTypeParameters;
   if (known !== undefined) return known;
@@ -1179,14 +1537,15 @@ export interface ThreadSharingData {
   readonly symbolIds: number;
   /**
    * Each checker's store of the records of the results it shares, by checker index: their numbers, and the code units
-   * of their strings. `used` has two counters per checker, how much of each it wrote. (Results go through shared
-   * memory: a message a worker receives synchronously makes the native build store the number fields of classes as
-   * doubles.)
+   * of their strings. `used` has two counters per checker, `usedStride` int32s apart, how much of each it wrote; a
+   * checker keeps its cursors in its own writer and writes them there only for the summary. (Results go through
+   * shared memory: a message a worker receives synchronously makes the native build store the number fields of
+   * classes as doubles.)
    */
   readonly numberLogs: SharedArrayBuffer[];
   readonly stringLogs: SharedArrayBuffer[];
   readonly used: SharedArrayBuffer;
-  /** For each checker, where each record of its store is in its number log, and each object's completion. */
+  /** For each checker, where each record of its store is in its number log: a word per record. */
   readonly recordTables: SharedArrayBuffer[];
   /**
    * One int32, read by every checker before it posts or translates a result: 0 runs, 1 stops posting, 2
@@ -1226,6 +1585,9 @@ export const stringLogSize = 1 << 20;
 
 /** The number of records each checker's store can hold. */
 export const recordTableSize = 1 << 20;
+
+/** The int32s each checker gets in `ThreadSharingData.used`, a cache line each, for two counters. */
+export const usedStride = 16;
 
 /** The number of entries of each result table: a power of two. */
 export const resultTableSize = 1 << 20;
@@ -1388,7 +1750,7 @@ export interface PostingRule {
     sharing: ThreadSharing,
     key: number,
     ms: number,
-    diagnosticFiles: readonly string[],
+    diagnosticFiles: readonly number[],
     fileIndex: number,
   ): boolean;
 
@@ -1411,7 +1773,7 @@ export class CostBoundedRule implements PostingRule {
     sharing: ThreadSharing,
     _key: number,
     ms: number,
-    _diagnosticFiles: readonly string[],
+    _diagnosticFiles: readonly number[],
     _fileIndex: number,
   ): boolean {
     return ms >= sharing.minMs;
@@ -1429,7 +1791,8 @@ const shareBlockValue = process.env.TSC_TS_SHARE_BLOCK;
 const shareAllowValue = process.env.TSC_TS_SHARE_ALLOW;
 const shareTraceValue = process.env.TSC_TS_SHARE_TRACE;
 // Debugging: TSC_TS_SHARE_VERIFY=1 computes each result a checker could translate, translates it after, and prints
-// the results whose translation prints differently.
+// the results whose translation prints differently; =2 checks that a translation creates types record by record, in
+// the order the producer created them.
 const shareVerifyValue = process.env.TSC_TS_SHARE_VERIFY;
 
 /** Checks a translation against the computation it replaces (TSC_TS_SHARE_VERIFY). */
@@ -1547,17 +1910,18 @@ export class IdBits {
 
 /**
  * The files of the diagnostics of results, by key (a symbol or declaration id), with a bit per key: most results have
- * none, and the bit answers that without a lookup.
+ * none, and the bit answers that without a lookup. A file is its index in the program (`Checker.fileIndex`), and -1
+ * a diagnostic without a file.
  */
 export class FilesByKey {
-  private readonly files = new Map<number, readonly string[]>();
+  private readonly files = new Map<number, readonly number[]>();
   private readonly keys = new IdBits();
 
-  get(key: number): readonly string[] | undefined {
+  get(key: number): readonly number[] | undefined {
     return this.keys.has(key) ? this.files.get(key) : undefined;
   }
 
-  set(key: number, files: readonly string[]): void {
+  set(key: number, files: readonly number[]): void {
     this.keys.add(key);
     this.files.set(key, files);
   }
@@ -1582,7 +1946,7 @@ export class ThreadSharing {
    * reason the cost model's functions give (`shareKappa`).
    */
   readonly rule: PostingRule;
-  readonly initialIndexes = new Map<Type, number>();
+  readonly initialIndexes = new Map<number, number>();
   readonly initial: Type[];
   readonly numberLogs: Int32Array[] = [];
   readonly recordTables: Int32Array[] = [];
@@ -1602,6 +1966,14 @@ export class ThreadSharing {
   /** The number of results this checker posted. */
   posted = 0;
   translated = 0;
+  /**
+   * Set while this checker exports a result into its store. A computation nested in the export walk can reach
+   * another shared result: posting it would write its records in the middle of the record being exported, and an
+   * export that failed would rewind over the posted result's words.
+   */
+  exporting = false;
+  /** Shared results a nested computation left to the checkers that compute them. */
+  nested = 0;
   /** Outermost shared-kind computations: nesting depth, the kind of the current one, and the time by kind. */
   depth = 0;
   kind = 0;
@@ -1624,7 +1996,7 @@ export class ThreadSharing {
     for (let k = 0; k < shareStatKinds; k++) s[row + k] = this.kindMs[k]!;
     s[row + shareStatExport] = this.exportMs;
     s[row + shareStatTranslation] = this.translationMs;
-    s[row + shareStatUnpack] = this.unpackMs;
+    // A translation reads its records in place, so there is no separate unpacking time: shareStatUnpack stays 0.
     s[row + shareStatPosted] = this.posted;
     s[row + shareStatTranslated] = this.translated;
   }
@@ -1658,8 +2030,10 @@ export class ThreadSharing {
   exportFailed = 0;
   exportFailedMs = 0;
   readonly exportFailures = new Map<string, number>();
-  packFailed = 0;
-  /** Of `packFailed`, the results that didn't fit in this checker's logs. */
+  /** TSC_TS_SHARE_VERIFY=2: records whose translation created types before an earlier record's. */
+  orderViolations = 0;
+  storeFailed = 0;
+  /** Of `storeFailed`, the results that didn't fit in this checker's logs. */
   logFull = 0;
   computedPrivately = 0;
   /** Results this checker computed and kept because the main thread stopped sharing (control 1 or 2). */
@@ -1667,7 +2041,6 @@ export class ThreadSharing {
   /** How often a posted result couldn't be taken here; and results for declarations of the checker's own files. */
   sawDoneUnusable = 0;
   owned = 0;
-  unpackMs = 0;
   /** The program's nodes results named, by id. */
   readonly nodesById = new Map<number, Node>();
   readonly origins = new MergedOrigins();
@@ -1695,15 +2068,15 @@ export class ThreadSharing {
   readonly typeFiles = new FilesByKey();
   readonly returnFiles = new FilesByKey();
   /** The files of the computations in progress, innermost last. */
-  readonly fileStack: (Set<string> | undefined)[] = [];
+  readonly fileStack: (Set<number> | undefined)[] = [];
 
   /** Adds `files` to those of the computation in progress. */
-  noteFiles(files: readonly string[] | undefined): void {
+  noteFiles(files: readonly number[] | undefined): void {
     const stack = this.fileStack;
     if (files === undefined || stack.length === 0) return;
     let top = stack[stack.length - 1];
     if (top === undefined) {
-      top = new Set<string>();
+      top = new Set<number>();
       stack[stack.length - 1] = top;
     }
     for (const f of files) top.add(f);
@@ -1739,18 +2112,18 @@ export class ThreadSharing {
     } finally {
       let own = this.fileStack.pop();
       for (let i = diagnosticsBefore; i < diagnostics.length; i++) {
-        if (own === undefined) own = new Set<string>();
+        if (own === undefined) own = new Set<number>();
         const file = diagnostics[i]!.file;
-        own.add(file === undefined ? '' : file.fileName);
+        own.add(file === undefined ? -1 : this.fileIndexOfName(file.fileName));
       }
       for (let i = suggestionsBefore; i < suggestions.length; i++) {
-        if (own === undefined) own = new Set<string>();
+        if (own === undefined) own = new Set<number>();
         const file = suggestions[i]!.file;
-        own.add(file === undefined ? '' : file.fileName);
+        own.add(file === undefined ? -1 : this.fileIndexOfName(file.fileName));
       }
       // A deferred diagnostic is reported where its file is checked, as the diagnostics it reported are.
       for (let i = deferredBefore; i < deferred.length; i++) {
-        if (own === undefined) own = new Set<string>();
+        if (own === undefined) own = new Set<number>();
         own.add(deferred[i]!);
       }
       if (own !== undefined) {
@@ -1760,6 +2133,23 @@ export class ThreadSharing {
       }
     }
   }
+
+  /**
+   * The index of the program file named `fileName`, or -1: a diagnostic in a file this checker hasn't is one every
+   * checker would report, like a diagnostic without a file.
+   */
+  fileIndexOfName(fileName: string): number {
+    let files = this.filesByIndex;
+    if (files === undefined) {
+      files = new Map<string, number>();
+      for (const [file, index] of this.c.fileIndex) files.set(file.fileName, index);
+      this.filesByIndex = files;
+    }
+    return files.get(fileName) ?? -1;
+  }
+
+  /** The index of each file by name, built on first use. */
+  private filesByIndex: Map<string, number> | undefined = undefined;
 
   constructor(c: Checker, data: ThreadSharingData) {
     this.c = c;
@@ -1787,7 +2177,7 @@ export class ThreadSharing {
         ? (this.bounded ? shareFloorTotalMs : shareFloorTotalMsPhase1) / data.count
         : Number(shareMinValue);
     this.initial = initialTypes(c);
-    for (let i = 0; i < this.initial.length; i++) this.initialIndexes.set(this.initial[i]!, i);
+    for (let i = 0; i < this.initial.length; i++) this.initialIndexes.set(this.initial[i]!.id, i);
     for (let k = 0; k < data.count; k++) {
       this.numberLogs.push(new Int32Array(data.numberLogs[k]!));
       this.recordTables.push(new Int32Array(data.recordTables[k]!));
@@ -1798,9 +2188,16 @@ export class ThreadSharing {
   }
 
   summary(): string {
+    // The stores are written through a local cursor; the shared counters are only for this summary.
+    const writer = this.storeExporter?.writer;
+    const me = this.data.index;
+    if (writer !== undefined) {
+      this.used[usedStride * me] = writer.at;
+      this.used[usedStride * me + 1] = writer.unitAt;
+    }
     return (
       'checker ' +
-      this.data.index +
+      me +
       ': outermost ms owned/computed here/translated/other ' +
       this.kindMs.map((v) => v.toFixed(0)).join('/') +
       '; posted ' +
@@ -1811,8 +2208,6 @@ export class ThreadSharing {
       this.translated +
       ' (' +
       this.translationMs.toFixed(0) +
-      ' ms, unpacking ' +
-      this.unpackMs.toFixed(0) +
       ' ms), export ' +
       this.exportMs.toFixed(0) +
       ' ms, computed here ' +
@@ -1849,16 +2244,21 @@ export class ThreadSharing {
         .slice(0, 4)
         .map(([k, v]) => k + ' ' + v.toFixed(0))
         .join('; ') +
-      '), not packed ' +
-      this.packFailed +
+      '), in an export ' +
+      this.nested +
+      ', not stored ' +
+      this.storeFailed +
       ' (logs full ' +
       this.logFull +
       ', used ' +
-      this.used[2 * this.data.index] +
+      this.used[usedStride * me] +
       ' numbers, ' +
-      this.used[2 * this.data.index + 1] +
+      this.used[usedStride * me + 1] +
       ' code units)' +
-      (shareVerifyValue === '1' ? '; verified ' + this.verified + ' (' + this.verifiedIdentity + ' equal as text)' : '')
+      (shareVerifyValue === '1'
+        ? '; verified ' + this.verified + ' (' + this.verifiedIdentity + ' equal as text)'
+        : '') +
+      (shareVerifyValue === '2' ? '; order violations ' + this.orderViolations : '')
     );
   }
 
@@ -1869,7 +2269,12 @@ export class ThreadSharing {
    */
   owns(file: SourceFile): boolean {
     const index = this.c.fileIndex.get(file);
-    if (index === undefined) return true;
+    return index === undefined || this.ownsIndex(index);
+  }
+
+  /** Whether this checker checks file `index`, or may; -1 names a diagnostic without a file, which it has. */
+  ownsIndex(index: number): boolean {
+    if (index < 0) return true;
     const taker = Atomics.load(this.takers, index);
     if (taker === 0) return false;
     return taker !== -2 && (taker < 0 || taker === this.data.index + 1);
@@ -1910,7 +2315,11 @@ export class ThreadSharing {
   /** After taking a result for a declaration in `file`: if no checker took the file yet, this one never will. */
   forbid(file: SourceFile): void {
     const index = this.c.fileIndex.get(file);
-    if (index === undefined) return;
+    if (index !== undefined) this.forbidIndex(index);
+  }
+
+  forbidIndex(index: number): void {
+    if (index < 0) return;
     const me = this.data.index;
     if (Atomics.load(this.takers, index) === 0)
       Atomics.or(this.forbidden, index * forbiddenWords(this.data.count) + (me >>> 5), 1 << (me & 31));
@@ -1935,42 +2344,14 @@ export class ThreadSharing {
     return true;
   }
 
-  forbidsLastNamed(fileName: string): boolean {
-    this.ownsFileNamed(fileName);
-    const file = this.filesByName!.get(fileName);
-    const index = file === undefined ? undefined : this.c.fileIndex.get(file);
-    return index !== undefined && this.forbidsLast(index);
-  }
-
-  forbidNamed(fileName: string): void {
-    this.ownsFileNamed(fileName);
-    const file = this.filesByName!.get(fileName);
-    if (file !== undefined) this.forbid(file);
-  }
-
-  filesByName: Map<string, SourceFile> | undefined = undefined;
-
-  ownsFileNamed(fileName: string): boolean {
-    let files = this.filesByName;
-    if (files === undefined) {
-      files = new Map<string, SourceFile>();
-      for (const file of this.c.files) files.set(file.fileName, file);
-      this.filesByName = files;
-    }
-    const file = files.get(fileName);
-    return file === undefined || this.owns(file);
-  }
-
-  /** The result checker `k` posted at `offset` in its number log. */
+  /** The result checker `k` posted at `offset` in its number log: the record of its type, and the files it named. */
   result(k: number, offset: number): StoredResult {
     const numbers = this.numberLogs[k]!;
-    const strings = this.stringLogs[k]!;
     const root = numbers[offset]!;
     const computeMs = numbers[offset + 1]! / 1000;
     const count = numbers[offset + 2]!;
-    const files: string[] = [];
-    for (let i = 0; i < count; i++)
-      files.push(readText(strings, numbers[offset + 3 + 2 * i]!, numbers[offset + 4 + 2 * i]!));
+    const files: number[] = [];
+    for (let i = 0; i < count; i++) files.push(numbers[offset + 3 + i]!);
     return new StoredResult(root, files, computeMs);
   }
 
@@ -1982,11 +2363,13 @@ export class ThreadSharing {
    * tables, -1 if it doesn't fit in the logs or a node or symbol in it can't be named across threads, or why it can't
    * be exported.
    */
-  post(t: Type, diagnosticFiles: readonly string[], computeMs: number): number | string {
+  post(t: Type, diagnosticFiles: readonly number[], computeMs: number): number | string {
     const c = this.c;
+    const me = this.data.index;
     let exporter = this.storeExporter;
     if (exporter === undefined) {
-      exporter = new Exporter(c, this.initialIndexes);
+      const writer = new StoreWriter(this.numberLogs[me]!, this.stringLogs[me]!, this.recordTables[me]!, c.fileIndex);
+      exporter = new Exporter(c, this.initialIndexes, writer);
       exporter.nodeLimit = this.data.nodeIds;
       exporter.symbolLimit = this.data.symbolIds;
       exporter.originsCache = this.origins;
@@ -1999,59 +2382,47 @@ export class ThreadSharing {
       if (maxRecords < 0) return budgetFailure;
       exporter.limit = exporter.base + maxRecords;
     } else exporter.limit = Number.POSITIVE_INFINITY;
+    const writer = exporter.writer;
     exporter.failure = undefined;
     exporter.mergedOrigins = undefined;
-    const root = exporter.type(t);
-    if (exporter.failure !== undefined) {
-      const failure = exporter.failure;
-      forgetExport(exporter);
-      return failure;
-    }
-    const me = this.data.index;
-    const numbers = this.numberLogs[me]!;
-    const strings = this.stringLogs[me]!;
-    const table = this.recordTables[me]!;
-    const offset = this.used[2 * me]!;
-    const p = new RecordPacker(c.fileIndex, strings, this.used[2 * me + 1]!);
-    const starts: number[] = [];
-    for (const r of exporter.records) {
-      starts.push(p.f.length);
-      if (!packRecord(p, r)) {
-        forgetExport(exporter);
+    exporter.base = this.storedRecords;
+    exporter.count = 0;
+    const at = writer.at;
+    const unitAt = writer.unitAt;
+    this.exporting = true;
+    try {
+      const root = exporter.type(t);
+      if (exporter.failure !== undefined) {
+        const failure = exporter.failure;
+        forgetExport(exporter, at, unitAt);
+        return failure;
+      }
+      // The result's own words, at the cursor after the records it added: its root record, how long the result
+      // took to compute (microseconds: a checker that translates it saved that much), and the files its
+      // diagnostics are in.
+      const header = writer.at;
+      writer.word(root);
+      writer.word(Math.round(computeMs * 1000));
+      writer.word(diagnosticFiles.length);
+      for (const index of diagnosticFiles) writer.word(index);
+      if (writer.full) {
+        this.logFull++;
+        forgetExport(exporter, at, unitAt);
         return -1;
       }
+      const count = exporter.count;
+      exporter.base += count;
+      exporter.count = 0;
+      exporter.addedTypes.length = 0;
+      exporter.addedProperties.length = 0;
+      this.posted++;
+      this.storedRecords += count;
+      this.writeStats();
+      // Only this checker writes its logs and store; the result table's state publishes what it wrote.
+      return postedState(this.data.count, me, header);
+    } finally {
+      this.exporting = false;
     }
-    // The header: the root record, how long the result took to compute (microseconds: a checker that
-    // translates it saved that much), and the number of files its diagnostics are in.
-    const header = p.f.length;
-    p.f.push(root, Math.round(computeMs * 1000), diagnosticFiles.length);
-    for (const fileName of diagnosticFiles) p.text(fileName);
-    const count = exporter.records.length;
-    let fits = !p.full && offset + p.f.length <= numbers.length && exporter.base + count <= recordTableSize;
-    for (const v of p.f) if ((v | 0) !== v) fits = false;
-    if (!fits) {
-      this.logFull++;
-      forgetExport(exporter);
-      return -1;
-    }
-    for (let i = 0; i < p.f.length; i++) numbers[offset + i] = p.f[i]!;
-    for (let i = 0; i < count; i++) {
-      const index = exporter.base + i;
-      table[2 * index] = offset + starts[i]! + 1;
-      const r = exporter.records[i]!;
-      if (r.kind === RecordKind.CompleteObject) table[2 * r.num + 1] = index + 1;
-    }
-    // Only this checker writes its logs and store; the result table's state publishes what it wrote.
-    this.used[2 * me] = offset + p.f.length;
-    this.used[2 * me + 1] = p.unitAt;
-    exporter.base += count;
-    exporter.records = [];
-    exporter.addedTypes.length = 0;
-    exporter.addedProperties.length = 0;
-    this.posted++;
-    this.storedRecords += count;
-    this.writeStats();
-    return postedState(this.data.count, me, offset + header);
   }
 
   /** The records this checker stored. */
@@ -2068,8 +2439,7 @@ export class ThreadSharing {
     key: number,
     declarationFile: SourceFile,
   ): Type | undefined {
-    for (const fileName of posted.files)
-      if (fileName === '' || this.ownsFileNamed(fileName) || this.forbidsLastNamed(fileName)) return undefined;
+    for (const index of posted.files) if (this.ownsIndex(index) || this.forbidsLast(index)) return undefined;
     const declarationIndex = this.c.fileIndex.get(declarationFile);
     if (declarationIndex !== undefined && this.forbidsLast(declarationIndex)) return undefined;
     const start = performance.now();
@@ -2088,7 +2458,7 @@ export class ThreadSharing {
       this.translated++;
       // Translating the result saved the time its producer's computation took (`post`'s header).
       this.addSaved(posted.computeMs);
-      for (const fileName of posted.files) this.forbidNamed(fileName);
+      for (const index of posted.files) this.forbidIndex(index);
       if (posted.files.length > 0) {
         files.set(key, posted.files);
         this.noteFiles(posted.files);
@@ -2102,11 +2472,11 @@ export class ThreadSharing {
 /** A result in a checker's store: the record of its type, and the files of its diagnostics. */
 export class StoredResult {
   readonly root: number;
-  readonly files: string[];
+  readonly files: number[];
   /** How long computing the result took its producer, in milliseconds. */
   readonly computeMs: number;
 
-  constructor(root: number, files: string[], computeMs: number = 0) {
+  constructor(root: number, files: number[], computeMs: number = 0) {
     this.root = root;
     this.files = files;
     this.computeMs = computeMs;
@@ -2119,14 +2489,16 @@ function readText(strings: Uint16Array, start: number, length: number): string {
   return text;
 }
 
-/** Forgets the types and properties a failed export of a store gave indexes. */
-function forgetExport(exporter: Exporter): void {
+/** Forgets the types and properties a failed export of a store gave indexes, and its words. */
+function forgetExport(exporter: Exporter, at: number, unitAt: number): void {
   for (const t of exporter.addedTypes) exporter.indexes.delete(t);
   for (const prop of exporter.addedProperties) exporter.properties.delete(prop);
   exporter.addedTypes.length = 0;
   exporter.addedProperties.length = 0;
-  exporter.records = [];
+  exporter.count = 0;
   exporter.failure = undefined;
+  exporter.writer.at = at;
+  exporter.writer.unitAt = unitAt;
 }
 
 /**
@@ -2150,7 +2522,7 @@ function computeAndPost(
     sharing.notShareableMs += ms;
     return t;
   }
-  let diagnosticFiles: readonly string[] | undefined;
+  let diagnosticFiles: readonly number[] | undefined;
   if (sharing.bounded) {
     // The main thread stopped sharing at its window (control 1 or 2): this result is the checker's own,
     // and the others compute theirs, as they do when they find none posted.
@@ -2186,6 +2558,12 @@ function computeAndPost(
       return t;
     }
   }
+  // A result computed inside this checker's export walk doesn't have the store to itself: the walk would write over
+  // its records, so it stays with the checkers that compute it.
+  if (sharing.exporting) {
+    sharing.nested++;
+    return t;
+  }
   const slot = table.slot(key);
   if (slot < 0 || table.state(slot) !== 0) return t;
   const start = performance.now();
@@ -2198,7 +2576,7 @@ function computeAndPost(
     sharing.exportFailed++;
     sharing.exportFailedMs += ms;
     sharing.exportFailures.set(state, (sharing.exportFailures.get(state) ?? 0) + ms);
-  } else if (state === -1) sharing.packFailed++;
+  } else if (state === -1) sharing.storeFailed++;
   else table.publish(slot, state);
   sharing.exportMs += performance.now() - start;
   sharing.writeStats();
@@ -2382,221 +2760,8 @@ function doubleWords(): DoubleWords {
   return doubleWordsValue;
 }
 
-/** Packs records into a checker's store: their numbers into `f`, their strings into its string log from `unitAt`. */
-class RecordPacker {
-  readonly f: number[] = [];
-  readonly fileIndex: Map<SourceFile, number>;
-  readonly strings: Uint16Array;
-  unitAt: number;
-  /** Set when the string log is full. */
-  full = false;
-
-  constructor(fileIndex: Map<SourceFile, number>, strings: Uint16Array, unitAt: number) {
-    this.fileIndex = fileIndex;
-    this.strings = strings;
-    this.unitAt = unitAt;
-  }
-
-  text(t: string): void {
-    if (this.unitAt + t.length > this.strings.length) {
-      this.full = true;
-      this.f.push(0, 0);
-      return;
-    }
-    this.f.push(this.unitAt, t.length);
-    for (let j = 0; j < t.length; j++) this.strings[this.unitAt++] = t.charCodeAt(j);
-  }
-
-  list(values: readonly number[]): void {
-    this.f.push(values.length);
-    for (const v of values) this.f.push(v);
-  }
-
-  /** A double as the two int32 halves of its bits. */
-  double(v: number): void {
-    const words = doubleWords();
-    words.f[0] = v;
-    this.f.push(words.i[0]!, words.i[1]!);
-  }
-
-  node(node: Node | undefined): boolean {
-    if (node === undefined) {
-      this.f.push(-1);
-      return true;
-    }
-    const file = getSourceFileOfNode(node);
-    const index = this.fileIndex.get(file);
-    if (index === undefined) return false;
-    this.f.push(index, node.pos, node.end, node.kind, node.id);
-    return true;
-  }
-
-  nodes(list: readonly (Node | undefined)[]): boolean {
-    this.f.push(list.length);
-    for (const node of list) if (!this.node(node)) return false;
-    return true;
-  }
-
-  /** A symbol of the program (by the node it is the symbol of, or the export symbol of), or none. */
-  symbol(symbol: Symbol | undefined): boolean {
-    if (symbol === undefined) {
-      this.f.push(-1);
-      return true;
-    }
-    const declaration = symbol.declaration;
-    if (declaration === undefined) return false;
-    const local = getSymbol(declaration);
-    if (local === symbol) this.f.push(0);
-    else if (local !== undefined && local.exportSymbol === symbol) this.f.push(1);
-    else return false;
-    return this.node(declaration);
-  }
-}
-
-/** Writes `r`; false if a node or symbol in it can't be named across threads. */
-function packRecord(p: RecordPacker, r: PortableRecord): boolean {
-  p.f.push(r.kind, r.id, r.flags);
-  // A number literal's value is any double, written as its two halves.
-  if (r.kind === RecordKind.Literal) p.double(r.num);
-  else p.f.push(r.num);
-  p.f.push(r.mergedId, r.aliasMergedId);
-  p.text(r.text);
-  if (!p.symbol(r.symbol) || !p.node(r.node) || !p.symbol(r.aliasSymbol)) return false;
-  p.list(r.refs);
-  p.list(r.nums);
-  if (!p.nodes(r.nodes)) return false;
-  p.f.push(r.texts.length);
-  for (const t of r.texts) p.text(t);
-  p.list(r.aliasRefs);
-  p.f.push(r.indexInfos.length);
-  for (const info of r.indexInfos) {
-    p.f.push(info.keyType, info.valueType, info.isReadonly ? 1 : 0);
-    if (!p.node(info.declaration) || !p.nodes(info.components)) return false;
-  }
-  return true;
-}
-
-/** Reads records from a checker's store. */
-class RecordUnpacker {
-  readonly c: Checker;
-  readonly f: Int32Array;
-  readonly strings: Uint16Array;
-  at = 0;
-  failed = false;
-
-  /** The nodes found so far, by id. */
-  readonly nodesById: Map<number, Node>;
-
-  constructor(c: Checker, numbers: Int32Array, strings: Uint16Array, nodesById: Map<number, Node>) {
-    this.c = c;
-    this.f = numbers;
-    this.strings = strings;
-    this.nodesById = nodesById;
-  }
-
-  next(): number {
-    return this.f[this.at++]!;
-  }
-
-  double(): number {
-    const words = doubleWords();
-    words.i[0] = this.next();
-    words.i[1] = this.next();
-    return words.f[0]!;
-  }
-
-  text(): string {
-    const start = this.next();
-    const length = this.next();
-    return readText(this.strings, start, length);
-  }
-
-  list(): number[] {
-    const n = this.next();
-    const values: number[] = [];
-    for (let i = 0; i < n; i++) values.push(this.next());
-    return values;
-  }
-
-  node(): Node | undefined {
-    const fileIndex = this.next();
-    if (fileIndex < 0) return undefined;
-    const pos = this.next();
-    const end = this.next();
-    const kind = this.next();
-    const id = this.next();
-    let node = this.nodesById.get(id);
-    if (node === undefined) {
-      const file = this.c.files[fileIndex];
-      node = file === undefined ? undefined : findNode(file, pos, end, kind, id);
-      if (node === undefined) {
-        this.failed = true;
-        return undefined;
-      }
-      this.nodesById.set(id, node);
-    }
-    return node;
-  }
-
-  nodes(): (Node | undefined)[] {
-    const n = this.next();
-    const list: (Node | undefined)[] = [];
-    for (let i = 0; i < n; i++) list.push(this.node());
-    return list;
-  }
-
-  symbol(): Symbol | undefined {
-    const how = this.next();
-    if (how < 0) return undefined;
-    const node = this.node();
-    if (node === undefined) return undefined;
-    const local = getSymbol(node);
-    const symbol = how === 0 ? local : local?.exportSymbol;
-    if (symbol === undefined) this.failed = true;
-    return symbol;
-  }
-}
-
-/** Reads a record; undefined if a node or symbol in it isn't in `u`'s program. */
-function unpackRecord(u: RecordUnpacker): PortableRecord | undefined {
-  const kind = u.next() as RecordKind;
-  const id = u.next();
-  const flags = u.next();
-  const num = kind === RecordKind.Literal ? u.double() : u.next();
-  const mergedId = u.next();
-  const aliasMergedId = u.next();
-  const text = u.text();
-  const symbol = u.symbol();
-  const node = u.node();
-  const aliasSymbol = u.symbol();
-  const refs = u.list();
-  const record = new PortableRecord(kind, id, flags, num, text, symbol, node, refs);
-  record.mergedId = mergedId;
-  record.aliasMergedId = aliasMergedId;
-  record.aliasSymbol = aliasSymbol;
-  record.nums = u.list();
-  record.nodes = u.nodes();
-  const textCount = u.next();
-  const texts: string[] = [];
-  for (let k = 0; k < textCount; k++) texts.push(u.text());
-  record.texts = texts;
-  record.aliasRefs = u.list();
-  const infoCount = u.next();
-  const infos: PortableIndexInfo[] = [];
-  for (let k = 0; k < infoCount; k++) {
-    const keyType = u.next();
-    const valueType = u.next();
-    const isReadonly = u.next() === 1;
-    const declaration = u.node();
-    const components = u.nodes() as Node[];
-    infos.push(new PortableIndexInfo(keyType, valueType, isReadonly, declaration, components));
-  }
-  record.indexInfos = infos;
-  return u.failed ? undefined : record;
-}
-
 /** Collects the children of a node (`forEachChild`). */
-class ChildCollector extends NodeVisitor {
+class ChildVisitor extends NodeVisitor {
   readonly children: Node[] = [];
 
   visitNode(node: Node): boolean {
@@ -2605,80 +2770,275 @@ class ChildCollector extends NodeVisitor {
   }
 }
 
-/** The node of `file` with the range, kind and id given, found by descending through the nodes that contain it. */
-function findNode(file: SourceFile, pos: number, end: number, kind: number, id: number): Node | undefined {
-  let node: Node = file;
-  for (;;) {
-    if (node.id === id) return node.kind === kind && node.pos === pos && node.end === end ? node : undefined;
-    const collector = new ChildCollector();
-    node.forEachChild(collector);
-    let next: Node | undefined = undefined;
-    for (const child of collector.children)
-      if (child.pos <= pos && end <= child.end) {
-        // The innermost of nested nodes with one range is found by its id further down.
-        if (child.id === id) return child.kind === kind && child.pos === pos && child.end === end ? child : undefined;
-        if (next === undefined) next = child;
+/** The nodes of the program records name, by id, found by descending from their file through the nodes that contain them. */
+export class NodeFinder {
+  readonly files: readonly SourceFile[];
+  readonly nodesById: Map<number, Node>;
+  private visitor: ChildVisitor | undefined = undefined;
+
+  constructor(files: readonly SourceFile[], nodesById: Map<number, Node>) {
+    this.files = files;
+    this.nodesById = nodesById;
+  }
+
+  /** The node of file `fileIndex` with the range `pos`-`end` and id `id`; undefined if the program hasn't it. */
+  find(fileIndex: number, pos: number, end: number, id: number): Node | undefined {
+    const known = this.nodesById.get(id);
+    if (known !== undefined) return known;
+    const file = this.files[fileIndex];
+    if (file === undefined) return undefined;
+    let visitor = this.visitor;
+    if (visitor === undefined) visitor = this.visitor = new ChildVisitor();
+    let node: Node = file;
+    for (;;) {
+      if (node.id === id) {
+        if (node.pos !== pos || node.end !== end) return undefined;
+        this.nodesById.set(id, node);
+        return node;
       }
-    if (next === undefined) return undefined;
-    node = next;
+      visitor.children.length = 0;
+      node.forEachChild(visitor);
+      let next: Node | undefined = undefined;
+      for (const child of visitor.children)
+        if (child.pos <= pos && end <= child.end) {
+          // The innermost of nested nodes with one range is found by its id further down.
+          if (child.id === id) {
+            if (child.pos !== pos || child.end !== end) return undefined;
+            this.nodesById.set(id, child);
+            return child;
+          }
+          if (next === undefined) next = child;
+        }
+      if (next === undefined) return undefined;
+      node = next;
+    }
   }
 }
 
 /**
- * A consumer's translations of another checker's store: each record is read and translated once, when a result
- * first needs it, in the order of the store, which is the order the producer exported them in.
+ * Reads the records of a checker's store where it wrote them. `begin` starts a record at its offset in the number log
+ * and finds its parts without decoding its kind's fields: its refs, its alias, its symbol, its node, then the fields
+ * at `fields`.
+ */
+export class RecordReader {
+  readonly numbers: Int32Array;
+  readonly strings: Uint16Array;
+  readonly table: Int32Array;
+  readonly finder: NodeFinder;
+  /** The record in progress: its header and kind, and where its refs are. */
+  header = 0;
+  kind = 0;
+  refAt = 0;
+  refCount = 0;
+  /** Where its alias refs are, if it has an alias; -1 if none. */
+  aliasRefAt = -1;
+  aliasRefCount = 0;
+  /** How its alias is named: `SymbolNaming` and a merged symbol id, or a node at `aliasNodeStart`. */
+  aliasNaming = -1;
+  aliasMergedId = -1;
+  aliasNodeStart = -1;
+  /** How its symbol is named: the kind of naming, a merged symbol id, or a node at `symbolNodeStart`. */
+  symbolNaming = 0;
+  symbolMergedId = -1;
+  symbolNodeStart = -1;
+  /** Where its node is, if it has one; -1 if none. */
+  nodeStart = -1;
+  /** The offset of its kind's own fields. */
+  fields = 0;
+  /** The records a record names, filled by `scan`. */
+  readonly deps: number[] = [];
+
+  constructor(
+    numbers: Int32Array,
+    strings: Uint16Array,
+    table: Int32Array,
+    files: readonly SourceFile[],
+    nodesById: Map<number, Node>,
+  ) {
+    this.numbers = numbers;
+    this.strings = strings;
+    this.table = table;
+    this.finder = new NodeFinder(files, nodesById);
+  }
+
+  /** Starts the record at `index`; false if the store hasn't it. */
+  begin(index: number): boolean {
+    if (index < 0 || index >= this.table.length) return false;
+    const start = this.table[index]!;
+    if (start <= 0) return false;
+    const numbers = this.numbers;
+    const at = start - 1;
+    const header = numbers[at]!;
+    this.header = header;
+    this.kind = header & RecordHeader.KindMask;
+    let count = (header >>> 16) & RefCountMask;
+    this.refAt = at + 1;
+    if (count === RecordHeader.RefEscape) {
+      count = numbers[this.refAt]!;
+      this.refAt++;
+    }
+    this.refCount = count;
+    this.locate();
+    return true;
+  }
+
+  /** Finds the record's alias refs, its symbol and its node, and the fields that follow them. */
+  private locate(): void {
+    const numbers = this.numbers;
+    const header = this.header;
+    let p = this.refAt + this.refCount;
+    this.aliasNaming = -1;
+    this.aliasMergedId = -1;
+    this.aliasNodeStart = -1;
+    this.aliasRefAt = -1;
+    this.aliasRefCount = 0;
+    if ((header & RecordHeader.HasAlias) !== 0) {
+      if ((header & RecordHeader.AliasMerged) !== 0) {
+        this.aliasNaming = SymbolNaming.Merged;
+        this.aliasMergedId = numbers[p++]!;
+      } else {
+        this.aliasNaming = numbers[p]! === 1 ? SymbolNaming.Export : SymbolNaming.Node;
+        this.aliasNodeStart = p + 1;
+        p = this.aliasNodeStart + this.nodeWords(this.aliasNodeStart);
+      }
+      this.aliasRefCount = numbers[p]!;
+      this.aliasRefAt = p + 1;
+      p = this.aliasRefAt + this.aliasRefCount;
+    }
+    const naming = (header & RecordHeader.NamingMask) >>> RecordHeader.NamingShift;
+    this.symbolNaming = naming;
+    this.symbolMergedId = -1;
+    this.symbolNodeStart = -1;
+    if (naming === SymbolNaming.Merged) this.symbolMergedId = numbers[p++]!;
+    else if (naming !== SymbolNaming.None) {
+      this.symbolNodeStart = p;
+      p += this.nodeWords(p);
+    }
+    this.nodeStart = -1;
+    if ((header & RecordHeader.HasNode) !== 0) {
+      this.nodeStart = p;
+      p += this.nodeWords(p);
+    }
+    this.fields = p;
+  }
+
+  /** The words a node at `p` takes: its file index, range and id, or one word for no node. */
+  nodeWords(p: number): number {
+    return this.numbers[p]! < 0 ? 1 : 4;
+  }
+
+  /** The node at `p`; undefined if it is none or the program hasn't it. */
+  readNode(p: number): Node | undefined {
+    if (p < 0 || this.numbers[p]! < 0) return undefined;
+    const numbers = this.numbers;
+    return this.finder.find(numbers[p]!, numbers[p + 1]!, numbers[p + 2]!, numbers[p + 3]!);
+  }
+
+  /** The record's own node; undefined if it has none or the program hasn't it. */
+  node(): Node | undefined {
+    return this.readNode(this.nodeStart);
+  }
+
+  doubleAt(p: number): number {
+    const words = doubleWords();
+    words.i[0] = this.numbers[p]!;
+    words.i[1] = this.numbers[p + 1]!;
+    return words.f[0]!;
+  }
+
+  textAt(p: number): string {
+    return readText(this.strings, this.numbers[p]!, this.numbers[p + 1]!);
+  }
+
+  /**
+   * Collects in `deps` the indexes of the records the record in progress needs: its refs, its alias refs, and the
+   * types of its own fields that are records (a union's origin, an object literal's completion, a completed object's
+   * members' types). A record is written before the records it needs.
+   */
+  scan(): void {
+    const numbers = this.numbers;
+    const deps = this.deps;
+    deps.length = 0;
+    for (let i = 0; i < this.refCount; i++) deps.push(numbers[this.refAt + i]!);
+    for (let i = 0; i < this.aliasRefCount; i++) deps.push(numbers[this.aliasRefAt + i]!);
+    let p = this.fields;
+    switch (this.kind) {
+      case RecordKind.Union:
+      case RecordKind.AnonymousObject:
+        // The origin of a union, and the completion of an object literal.
+        deps.push(numbers[p + 1]!);
+        break;
+      case RecordKind.CompleteObject: {
+        // The object literal completed, then each index signature's key and value types.
+        deps.push(numbers[p]!);
+        const count = numbers[p + 1]!;
+        let q = p + 2;
+        for (let i = 0; i < count; i++) {
+          deps.push(numbers[q]!, numbers[q + 1]!);
+          q += 3;
+          q += this.nodeWords(q);
+          const components = numbers[q++]!;
+          for (let j = 0; j < components; j++) q += this.nodeWords(q);
+        }
+        break;
+      }
+    }
+  }
+}
+
+/** The bits of a record header that hold the number of refs, or `RefEscape` if the number is a word of its own. */
+const RefCountMask = 0xffff;
+
+/**
+ * A consumer's translations of another checker's store: each record is read where it is, and translated once, when a
+ * result first needs it, in the order of the store, which is the order the producer exported them in.
  */
 class StoreReader {
   readonly sharing: ThreadSharing;
   readonly producer: number;
   readonly translator: Translator;
-  readonly table: Int32Array;
-  readonly unpacker: RecordUnpacker;
+  readonly reader: RecordReader;
   /** Whether the last `translate` stopped at its budget, having built nothing. */
   stopped = false;
-  /** By record: the record, its translation and whether it is translated. */
-  readonly records: (PortableRecord | undefined)[] = [];
-  readonly types: Type[] = [];
-  readonly symbols: (Symbol | undefined)[] = [];
-  readonly built: number[] = [];
+  /** By record: the type it translated to, the symbol a property record makes, and whether a completion is done. */
+  readonly types = new LinkTable<Type>();
+  readonly symbols = new LinkTable<Symbol>();
+  readonly completed = new LinkTable<boolean>();
 
   constructor(sharing: ThreadSharing, producer: number) {
     this.sharing = sharing;
     this.producer = producer;
-    this.translator = new Translator(sharing.c);
-    this.table = sharing.recordTables[producer]!;
-    this.unpacker = new RecordUnpacker(
-      sharing.c,
+    this.translator = new Translator(sharing.c, this);
+    this.reader = new RecordReader(
       sharing.numberLogs[producer]!,
       sharing.stringLogs[producer]!,
+      sharing.recordTables[producer]!,
+      sharing.c.files,
       sharing.nodesById,
     );
   }
 
-  private ensure(index: number): void {
-    const placeholder = this.sharing.c.errorType;
-    while (this.types.length <= index) {
-      this.types.push(placeholder);
-      this.symbols.push(undefined);
-      this.records.push(undefined);
-      this.built.push(0);
-    }
+  /**
+   * Whether record `index` is translated: a property record made its symbol, an object literal got its members, a
+   * shell whose members come later only counts with them. A translation that fails after it built a shell leaves
+   * the empty type behind, and a later translation of the shell alone would take it for the object.
+   */
+  private isBuilt(index: number): boolean {
+    if (!this.reader.begin(index)) return false;
+    const kind = this.reader.kind;
+    if (kind === RecordKind.Property) return this.symbols.get(index) !== undefined;
+    if (kind === RecordKind.CompleteObject) return this.completed.get(index) !== undefined;
+    if (this.types.get(index) === undefined) return false;
+    if (kind !== RecordKind.AnonymousObject) return true;
+    const completion = this.reader.numbers[this.reader.fields + 1]!;
+    return completion < 0 || this.completed.get(completion) !== undefined;
   }
 
-  /** Record `index`, read on first use; undefined if a node or symbol in it isn't in this program. */
-  private record(index: number): PortableRecord | undefined {
-    this.ensure(index);
-    const known = this.records[index];
-    if (known !== undefined) return known;
-    const u = this.unpacker;
-    u.at = this.table[2 * index]! - 1;
-    u.failed = false;
-    const start = performance.now();
-    const record = unpackRecord(u);
-    this.sharing.unpackMs += performance.now() - start;
-    this.sharing.writeStats();
-    if (record !== undefined) this.records[index] = record;
-    return record;
+  /** Whether the record in progress names only merged symbols this program has. */
+  private present(reader: RecordReader): boolean {
+    const merged = this.sharing.c.mergedSymbols;
+    if (reader.aliasNaming === SymbolNaming.Merged && !merged.has(reader.aliasMergedId)) return false;
+    return reader.symbolNaming !== SymbolNaming.Merged || merged.has(reader.symbolMergedId);
   }
 
   /**
@@ -2688,36 +3048,25 @@ class StoreReader {
   translate(root: number, budget: number = Number.POSITIVE_INFINITY): Type | undefined {
     const c = this.sharing.c;
     const translator = this.translator;
+    const reader = this.reader;
+    translator.failed = false;
     const needed = new Set<number>();
     const stack = [root];
     this.stopped = false;
     while (stack.length > 0) {
       const i = stack.pop()!;
-      if (needed.has(i)) continue;
-      this.ensure(i);
-      if (this.built[i] === 1) continue;
+      if (needed.has(i) || this.isBuilt(i)) continue;
       if (needed.size >= budget) {
         this.stopped = true;
         return undefined;
       }
-      const r = this.record(i);
-      if (r === undefined) return undefined;
-      if (
-        (r.mergedId >= 0 && !c.mergedSymbols.has(r.mergedId)) ||
-        (r.aliasMergedId >= 0 && !c.mergedSymbols.has(r.aliasMergedId))
-      )
-        return undefined;
+      if (!reader.begin(i) || !this.present(reader)) return undefined;
       needed.add(i);
-      for (const j of r.refs) if (j >= 0) stack.push(j);
-      for (const j of r.aliasRefs) stack.push(j);
-      if (r.kind === RecordKind.CompleteObject || (r.kind === RecordKind.Union && r.num >= 0)) stack.push(r.num);
-      for (const info of r.indexInfos) {
-        stack.push(info.keyType);
-        stack.push(info.valueType);
-      }
-      if (r.kind === RecordKind.AnonymousObject) {
-        const completion = this.table[2 * i + 1]! - 1;
-        if (completion >= 0) stack.push(completion);
+      reader.scan();
+      const deps = reader.deps;
+      for (let k = 0; k < deps.length; k++) {
+        const j = deps[k]!;
+        if (j >= 0) stack.push(j);
       }
     }
     const order = [...needed].sort((a, b) => a - b);
@@ -2725,33 +3074,71 @@ class StoreReader {
     // record is translated. A translation can start translations of this store again (resolving a type alias, or
     // a type of a symbol), which translate some of these records first.
     for (const i of order) {
-      if (this.built[i] === 1) continue;
-      const r = this.records[i]!;
-      if (
-        r.kind === RecordKind.NodeType ||
-        r.kind === RecordKind.Conditional ||
-        r.kind === RecordKind.DistributedConditional
-      )
-        translator.aliasOfNode(r.node!);
+      if (this.isBuilt(i)) continue;
+      reader.begin(i);
+      const kind = reader.kind;
+      if (kind !== RecordKind.NodeType && kind !== RecordKind.Conditional && kind !== RecordKind.DistributedConditional)
+        continue;
+      const node = reader.node();
+      if (node === undefined) return undefined;
+      translator.aliasOfNode(node);
     }
     if (translator.failed) {
       translator.failed = false;
       return undefined;
     }
+    const verifyOrder = shareVerifyValue === '2';
+    let lastNew = -1;
     for (const i of order) {
-      if (this.built[i] === 1) continue;
-      const r = this.records[i]!;
-      if (r.kind === RecordKind.Property) this.symbols[i] = translator.property(r, this.types, this.symbols);
-      else if (r.kind === RecordKind.CompleteObject) translator.complete(r, this.types, this.symbols);
-      else this.types[i] = translator.record(r, this.types);
-      if (translator.failed) {
-        translator.failed = false;
-        return undefined;
+      if (this.isBuilt(i)) continue;
+      reader.begin(i);
+      const before = verifyOrder ? c.typeCount : 0;
+      switch (reader.kind) {
+        case RecordKind.Property: {
+          const symbol = translator.property(i);
+          if (symbol === undefined) {
+            translator.failed = false;
+            return undefined;
+          }
+          this.symbols.set(i, symbol);
+          continue;
+        }
+        case RecordKind.CompleteObject:
+          if (!translator.complete(i)) {
+            translator.failed = false;
+            return undefined;
+          }
+          this.completed.set(i, true);
+          continue;
+        default: {
+          const t = translator.record(i);
+          if (t === undefined) {
+            translator.failed = false;
+            return undefined;
+          }
+          this.types.set(i, t);
+          // The types a translation creates, record by record, are created in the order the producer created them.
+          if (verifyOrder && c.typeCount > before) {
+            if (before < lastNew) {
+              const violations = ++this.sharing.orderViolations;
+              if (violations <= 20)
+                process.stderr.write(
+                  'share-verify: checker ' +
+                    this.sharing.data.index +
+                    ' record ' +
+                    i +
+                    ' created type ' +
+                    c.typeCount +
+                    ' after ' +
+                    lastNew +
+                    '\n',
+                );
+            }
+            lastNew = c.typeCount;
+          }
+        }
       }
-      this.built[i] = 1;
-      // A translated record is not read again.
-      this.records[i] = undefined;
     }
-    return this.types[root]!;
+    return this.types.get(root);
   }
 }

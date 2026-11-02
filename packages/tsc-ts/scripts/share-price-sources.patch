@@ -1,8 +1,7 @@
 diff --git a/compiler/checker-type-factory.ts b/compiler/checker-type-factory.ts
-index f677372..fe53a1c 100644
 --- a/compiler/checker-type-factory.ts
 +++ b/compiler/checker-type-factory.ts
-@@ -71,16 +71,21 @@ import { getTypeOfSymbol } from './checker-symbol-types.js';
+@@ -71,16 +71,21 @@
  import { getDeclaredTypeOfSymbol, getParentOfSymbol } from './checker-declared-types.js';
  import { isTypeRelatedTo, isTypeStrictSubtypeOf, isTypeSubtypeOf, isTypeDerivedFrom } from './relations.js';
  import {
@@ -24,7 +23,7 @@ index f677372..fe53a1c 100644
  
  export const enum UnionReduction {
    None = 0,
-@@ -2607,6 +2612,10 @@ export function getTemplateLiteralType(c: Checker, texts: string[], types: Type[
+@@ -2607,6 +2612,10 @@
      const key = 'templateLiteral:' + typeListKey(types) + '|' + texts.join('\u0000');
      const cached = c.cachedTypes.get(key);
      if (cached !== undefined) return cached;
@@ -35,7 +34,7 @@ index f677372..fe53a1c 100644
      if (!checkCrossProductUnion(c, types)) return c.errorType;
      const result = mapType(c, types[unionIndex]!, (t) => {
        const replaced = types.slice();
-@@ -2614,6 +2623,11 @@ export function getTemplateLiteralType(c: Checker, texts: string[], types: Type[
+@@ -2614,6 +2623,11 @@
        return getTemplateLiteralType(c, texts, replaced);
      });
      c.cachedTypes.set(key, result);
@@ -48,10 +47,9 @@ index f677372..fe53a1c 100644
    }
    if (types.includes(c.wildcardType)) return c.wildcardType;
 diff --git a/compiler/checker-type-operators.ts b/compiler/checker-type-operators.ts
-index 6e6c318..6498e2d 100644
 --- a/compiler/checker-type-operators.ts
 +++ b/compiler/checker-type-operators.ts
-@@ -53,6 +53,7 @@ import {
+@@ -53,6 +53,7 @@
    type TypeMapper,
    type TypeParameter,
    type TupleType,
@@ -59,7 +57,7 @@ index 6e6c318..6498e2d 100644
    type UnionType,
    appendTypeMapping,
    prependTypeMapping,
-@@ -408,6 +409,24 @@ function isKeyTypeIncluded(keyType: Type, include: TypeFlags): boolean {
+@@ -408,6 +409,24 @@
  
  /** The keys of a mapped type, without resolving its properties. */
  export function getIndexForMappedType(c: Checker, t: MappedType, indexFlags: IndexFlags = IndexFlags.None): Type {
@@ -84,11 +82,10 @@ index 6e6c318..6498e2d 100644
    const typeParameter = getTypeParameterFromMappedType(c, t);
    const constraintType = getConstraintTypeFromMappedType(c, t);
    const nameType = getNameTypeFromMappedType(c, mappedTypeTarget(t));
-@@ -571,6 +590,35 @@ export function getIndexedAccessTypeOrUndefinedEx(
-   accessFlags: AccessFlags,
+@@ -572,6 +591,35 @@
    accessNode: Node | undefined,
    alias: TypeAlias | undefined,
-+): Type | undefined {
+ ): Type | undefined {
 +  const log = c.priceLog;
 +  if (log === undefined) return indexedAccessType(c, objectType, indexType, accessFlags, accessNode, alias);
 +  const start = performance.now();
@@ -117,10 +114,11 @@ index 6e6c318..6498e2d 100644
 +  accessFlags: AccessFlags,
 +  accessNode: Node | undefined,
 +  alias: TypeAlias | undefined,
- ): Type | undefined {
++): Type | undefined {
    if (objectType === c.wildcardType || indexType === c.wildcardType) return c.wildcardType;
    objectType = getReducedType(c, objectType);
-@@ -1407,8 +1455,23 @@ export function applyStringMapping(symbol: Symbol, s: string): string {
+   // A type with only a string index signature always yields that signature's type.
+@@ -1407,8 +1455,23 @@
  }
  
  export function getStringMappingType(c: Checker, symbol: Symbol, t: Type): Type {
@@ -146,7 +144,7 @@ index 6e6c318..6498e2d 100644
    if ((t.flags & TypeFlags.StringLiteral) !== 0)
      return getStringLiteralType(c, applyStringMapping(symbol, (t as LiteralType).stringValue));
    if ((t.flags & TypeFlags.TemplateLiteral) !== 0) {
-@@ -1905,6 +1968,30 @@ function instantiateMappedTupleType(
+@@ -1905,6 +1968,30 @@
  import { TupleElementInfo } from './checker-types.js';
  import { createDiagnosticForNode } from './checker.js';
  import { isJSLiteralType, isThisPropertyAccessInConstructor } from './checker-javascript.js';
@@ -177,7 +175,7 @@ index 6e6c318..6498e2d 100644
  
  function withFlags(info: TupleElementInfo, flags: ElementFlags): TupleElementInfo {
    return new TupleElementInfo(flags, info.labeledDeclaration);
-@@ -1978,6 +2065,112 @@ function conditionalNode(root: ConditionalRoot): ConditionalTypeNode {
+@@ -1978,6 +2065,112 @@
    return root.node as ConditionalTypeNode;
  }
  
@@ -290,7 +288,7 @@ index 6e6c318..6498e2d 100644
  export function getConditionalTypeInstantiation(
    c: Checker,
    t: ConditionalType,
-@@ -1993,6 +2186,10 @@ export function getConditionalTypeInstantiation(
+@@ -1993,6 +2186,10 @@
    const hash = typeListHash(typeArguments, alias, tag);
    let result = root.instantiations.get(hash, typeArguments, alias, tag);
    if (result === undefined) {
@@ -301,7 +299,7 @@ index 6e6c318..6498e2d 100644
      const newMapper = newTypeMapper(root.outerTypeParameters, typeArguments);
      const checkType = root.checkType;
      const distributionType = root.isDistributive ? getReducedType(c, getMappedType(checkType, newMapper)) : undefined;
-@@ -2003,10 +2200,13 @@ export function getConditionalTypeInstantiation(
+@@ -2003,10 +2200,13 @@
        (distributionType.flags & (TypeFlags.Union | TypeFlags.Never)) !== 0
      ) {
        const distributed = c.distributedConditionals;
@@ -315,7 +313,7 @@ index 6e6c318..6498e2d 100644
            const member = getConditionalType(
              c,
              root,
-@@ -2014,6 +2214,15 @@ export function getConditionalTypeInstantiation(
+@@ -2014,6 +2214,15 @@
              forConstraint,
              undefined,
            );
@@ -331,7 +329,7 @@ index 6e6c318..6498e2d 100644
            // Sharing results (shared-results.ts) names a distributed member by the instantiation it is part of.
            if (distributed !== undefined && (member.flags & TypeFlags.Conditional) !== 0) {
              if (!distributed.has(member))
-@@ -2026,6 +2235,15 @@ export function getConditionalTypeInstantiation(
+@@ -2026,6 +2235,15 @@
        );
      } else result = getConditionalType(c, root, newMapper, forConstraint, alias);
      root.instantiations.set(hash, typeArguments, alias, tag, result);
@@ -348,10 +346,9 @@ index 6e6c318..6498e2d 100644
      const results = c.conditionalResults;
      if (results !== undefined && (result.flags & TypeFlags.Conditional) !== 0 && !results.has(result))
 diff --git a/compiler/checker.ts b/compiler/checker.ts
-index f199310..28e9046 100644
 --- a/compiler/checker.ts
 +++ b/compiler/checker.ts
-@@ -139,6 +139,7 @@ import type { ResolvedModule } from './module-resolution-types.js';
+@@ -139,6 +139,7 @@
  import type { ModuleSpecifierHost } from './module-specifiers.js';
  import type { PropertyListIndex } from './checker-members.js';
  import { startThreadSharing, type ThreadSharing } from './shared-results.js';
@@ -359,10 +356,10 @@ index f199310..28e9046 100644
  
  /** What the checker needs from a program. */
  export abstract class CheckerHost {
-@@ -844,6 +845,11 @@ export class Checker implements TypeChecking {
+@@ -844,6 +845,11 @@
    indexedAccessKeyFlags: Map<Type, number> | undefined = undefined;
    /** Where results are shared between checker threads (shared-results.ts): the file of each diagnostic deferred. */
-   deferredDiagnosticFiles: string[] | undefined = undefined;
+   deferredDiagnosticFiles: number[] | undefined = undefined;
 +  /**
 +   * TSC_TS_SHARE_PRICE: the price log of this checker, read on hot paths, `undefined` unless it keeps one. It comes
 +   * after every field that was here before it, so no object of the checker built so far moves a field.
@@ -372,10 +369,9 @@ index f199310..28e9046 100644
    constructor(host: CheckerHost) {
      this.host = host;
 diff --git a/compiler/instantiation.ts b/compiler/instantiation.ts
-index 711cf0d..3751a49 100644
 --- a/compiler/instantiation.ts
 +++ b/compiler/instantiation.ts
-@@ -75,6 +75,7 @@ import {
+@@ -75,6 +75,7 @@
    isGenericType,
    isNoInferType,
    getNoInferType,
@@ -383,7 +379,7 @@ index 711cf0d..3751a49 100644
  } from './checker-type-operators.js';
  import { getConstraintDeclaration } from './checker-declared-types.js';
  import { isTypeAssignableTo } from './relations.js';
-@@ -89,6 +90,7 @@ import {
+@@ -89,6 +90,7 @@
    SymbolFlags,
  } from './symbol.js';
  import { symbolToString } from './type-printer.js';
@@ -391,7 +387,7 @@ index 711cf0d..3751a49 100644
  
  // ---- Mappers that need the checker
  
-@@ -204,6 +206,7 @@ export function instantiateTypeWithAlias(
+@@ -204,6 +206,7 @@
    }
    if (!could && (type.alias === undefined || !aliasCouldContainTypeVariables(c, type))) return type;
    if (c.instantiationDepth === 100 || c.instantiationCount >= 5000000) {
@@ -402,7 +398,7 @@ index 711cf0d..3751a49 100644
 diff --git a/compiler/parallel-check.ts b/compiler/parallel-check.ts
 --- a/compiler/parallel-check.ts
 +++ b/compiler/parallel-check.ts
-@@ -1885,6 +1885,9 @@
+@@ -1884,6 +1884,9 @@
      }
    }
    mark(`checked ${done.length} files, ${unitsDone.length} ranges`);
@@ -423,7 +419,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
  import { getSymbol, getType, type Node, NodeVisitor, type SourceFile } from './ast.js';
  import { getSourceFileOfNode } from './binder-utilities.js';
  import type { Checker } from './checker.js';
-@@ -68,13 +69,20 @@
+@@ -68,7 +69,15 @@
  import { SyntaxKind } from './syntax-kind.js';
  import { instantiateTypeWithAlias } from './instantiation.js';
  import { resolvedReturnTypeOf, sideOf } from './side-state.js';
@@ -440,14 +436,8 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
  import { keepPropertiesOnly, scannedLiteralPropertiesLimit } from './checker-members.js';
  import { findResolutionCycleStartIndex, TypeSystemPropertyName } from './checker-symbols.js';
  import { typeToString } from './type-printer.js';
- import { getTypeOfSymbol } from './checker-symbol-types.js';
- import { getReturnTypeOfSignature } from './checker-signatures.js';
--
- // Functions, classes, enums and modules have anonymous types that are cheap to create; their members are not. (A
- // function: a top-level constant computed from an enum member of a module in an import cycle doesn't compile natively.)
- function sharedValueFlags(): SymbolFlags {
-@@ -148,6 +156,35 @@
-   Property,
+@@ -169,6 +178,35 @@
+   RefEscape = 0xffff,
  }
  
 +/** The record kinds above, by name: for the summary and for scripts/share-price.mjs. */
@@ -479,10 +469,10 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +  'property',
 +];
 +
- /** An index signature of an `AnonymousObject` record. */
- export class PortableIndexInfo {
-   readonly keyType: number;
-@@ -1642,8 +1679,6 @@
+ /** How a record names a symbol. */
+ const enum SymbolNaming {
+   None,
+@@ -2009,8 +2047,6 @@
  
    notShareable = 0;
    notShareableMs = 0;
@@ -491,7 +481,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
    /** TSC_TS_SHARE_VERIFY: translations checked, and those equal only as text. */
    verified = 0;
    verifiedIdentity = 0;
-@@ -1793,11 +1828,142 @@
+@@ -2178,11 +2214,141 @@
        this.recordTables.push(new Int32Array(data.recordTables[k]!));
        this.stringLogs.push(new Uint16Array(data.stringLogs[k]!));
      }
@@ -601,11 +591,11 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +      );
 +    }
 +    return parts.join(' ');
-   }
- 
--  summary(): string {
++  }
++
 +  /** What translations walked and built, and the time of building each record kind. */
 +  private recordLine(): string {
++    // A translation reads its records in place, so it pays no unpacking time and the whole interval goes to building.
 +    const parts: string[] = [
 +      'checker ' +
 +        this.data.index +
@@ -613,10 +603,8 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +        this.walked +
 +        ', built ' +
 +        this.built +
-+        ' (unpacking ' +
-+        this.unpackMs.toFixed(0) +
-+        ' ms, building ' +
-+        (this.translationMs - this.unpackMs).toFixed(0) +
++        ' (unpacking 0 ms, building ' +
++        this.translationMs.toFixed(0) +
 +        ' ms)',
 +    ];
 +    const kinds: number[] = [];
@@ -631,84 +619,80 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +      );
 +    }
 +    return parts.join('; ');
-+  }
-+
+   }
+ 
+-  summary(): string {
 +  private summaryLine(): string {
-     return (
-       'checker ' +
-       this.data.index +
-@@ -2054,12 +2220,214 @@
-     return postedState(this.data.count, me, offset + header);
+     // The stores are written through a local cursor; the shared counters are only for this summary.
+     const writer = this.storeExporter?.writer;
+     const me = this.data.index;
+@@ -2420,12 +2586,176 @@
+     }
    }
  
 +  /**
 +   * `post` with the per-kind counters of the summary (`TSC_TS_SHARE_SUMMARY`). It repeats the body of `post`, so that
 +   * a run that leaves the summary unset calls the function the committed profile describes.
 +   */
-+  postPriced(t: Type, diagnosticFiles: readonly string[], kind: number, computeMs: number): number | string {
-+    const c = this.c;
++  postPriced(t: Type, diagnosticFiles: readonly number[], kind: number, computeMs: number): number | string {
 +    const summary = this.summary;
 +    const start = summary ? performance.now() : 0;
++    const me = this.data.index;
 +    const exporter = this.exporterOf();
++    const writer = exporter.writer;
 +    exporter.failure = undefined;
 +    exporter.mergedOrigins = undefined;
-+    const root = exporter.type(t);
-+    if (exporter.failure !== undefined) {
-+      const failure = exporter.failure;
-+      forgetExport(exporter);
-+      return failure;
-+    }
-+    const me = this.data.index;
-+    const numbers = this.numberLogs[me]!;
-+    const strings = this.stringLogs[me]!;
-+    const table = this.recordTables[me]!;
-+    const offset = this.used[2 * me]!;
-+    const p = new RecordPacker(c.fileIndex, strings, this.used[2 * me + 1]!);
-+    const starts: number[] = [];
-+    for (const r of exporter.records) {
-+      starts.push(p.f.length);
-+      if (!packRecord(p, r)) {
-+        forgetExport(exporter);
++    exporter.base = this.storedRecords;
++    exporter.count = 0;
++    // The export budget: a post appends at most `(kappa*T - p0)/e` records, so it costs at most `kappa*T` even when
++    // the result is over it, and an over-budget result is not posted.
++    if (this.bounded) {
++      const maxRecords = Math.floor((shareKappa() * computeMs * 1000 - sharePostUs()) / shareExportRecordUs());
++      if (maxRecords < 0) return budgetFailure;
++      exporter.limit = exporter.base + maxRecords;
++    } else exporter.limit = Number.POSITIVE_INFINITY;
++    const at = writer.at;
++    const unitAt = writer.unitAt;
++    this.exporting = true;
++    try {
++      const root = exporter.type(t);
++      if (exporter.failure !== undefined) {
++        const failure = exporter.failure;
++        forgetExport(exporter, at, unitAt);
++        return failure;
++      }
++      // The result's own words, at the cursor after the records it added: its root record, how long the result
++      // took to compute (microseconds: a checker that translates it saved that much), and the files its
++      // diagnostics are in.
++      const header = writer.at;
++      writer.word(root);
++      writer.word(Math.round(computeMs * 1000));
++      writer.word(diagnosticFiles.length);
++      for (const index of diagnosticFiles) writer.word(index);
++      if (writer.full) {
++        this.logFull++;
++        forgetExport(exporter, at, unitAt);
 +        return -1;
 +      }
++      const count = exporter.count;
++      exporter.base += count;
++      exporter.count = 0;
++      exporter.addedTypes.length = 0;
++      exporter.addedProperties.length = 0;
++      this.posted++;
++      this.storedRecords += count;
++      if (summary) {
++        this.posts[kind]!++;
++        this.postMs[kind]! += performance.now() - start;
++        this.postRecords[kind]! += count;
++        this.postWords[kind]! += writer.at - at;
++      }
++      this.writeStats();
++      // Only this checker writes its logs and store; the result table's state publishes what it wrote.
++      return postedState(this.data.count, me, header);
++    } finally {
++      this.exporting = false;
 +    }
-+    // The header: the root record, how long the result took to compute (microseconds: a checker that
-+    // translates it saved that much), and the number of files its diagnostics are in.
-+    const header = p.f.length;
-+    p.f.push(root, Math.round(computeMs * 1000), diagnosticFiles.length);
-+    for (const fileName of diagnosticFiles) p.text(fileName);
-+    const count = exporter.records.length;
-+    let fits = !p.full && offset + p.f.length <= numbers.length && exporter.base + count <= recordTableSize;
-+    for (const v of p.f) if ((v | 0) !== v) fits = false;
-+    if (!fits) {
-+      this.logFull++;
-+      forgetExport(exporter);
-+      return -1;
-+    }
-+    for (let i = 0; i < p.f.length; i++) numbers[offset + i] = p.f[i]!;
-+    for (let i = 0; i < count; i++) {
-+      const index = exporter.base + i;
-+      table[2 * index] = offset + starts[i]! + 1;
-+      const r = exporter.records[i]!;
-+      if (r.kind === RecordKind.CompleteObject) table[2 * r.num + 1] = index + 1;
-+    }
-+    // Only this checker writes its logs and store; the result table's state publishes what it wrote.
-+    this.used[2 * me] = offset + p.f.length;
-+    this.used[2 * me + 1] = p.unitAt;
-+    exporter.base += count;
-+    exporter.records = [];
-+    exporter.addedTypes.length = 0;
-+    exporter.addedProperties.length = 0;
-+    this.posted++;
-+    this.storedRecords += count;
-+    if (summary) {
-+      this.posts[kind]!++;
-+      this.postMs[kind]! += performance.now() - start;
-+      this.postRecords[kind]! += count;
-+      this.postWords[kind]! += p.f.length;
-+    }
-+    this.writeStats();
-+    return postedState(this.data.count, me, offset + header);
 +  }
 +
 +  /** The exporter of this checker's store, which exports each type once. */
@@ -716,7 +700,9 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    let exporter = this.storeExporter;
 +    if (exporter === undefined) {
 +      const c = this.c;
-+      exporter = new Exporter(c, this.initialIndexes);
++      const me = this.data.index;
++      const writer = new StoreWriter(this.numberLogs[me]!, this.stringLogs[me]!, this.recordTables[me]!, c.fileIndex);
++      exporter = new Exporter(c, this.initialIndexes, writer);
 +      exporter.nodeLimit = this.data.nodeIds;
 +      exporter.symbolLimit = this.data.symbolIds;
 +      exporter.originsCache = this.origins;
@@ -725,41 +711,6 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    return exporter;
 +  }
 +
-+  /** The strings a dry run of an export packs into, so that it writes nothing of this checker's store. */
-+  private dryStrings: Uint16Array | undefined = undefined;
-+
-+  /**
-+   * What posting `t` would append to this checker's store, without appending it: the records, the words and code units
-+   * it would write, and how long the export took, or the reason the export fails (TSC_TS_SHARE_PRICE). The export is
-+   * rolled back exactly as a failed export is, so the store keeps what a run without prices keeps.
-+   */
-+  measureExport(t: Type, diagnosticFiles: readonly string[]): ExportPrice {
-+    const exporter = this.exporterOf();
-+    exporter.failure = undefined;
-+    exporter.mergedOrigins = undefined;
-+    const start = performance.now();
-+    const root = exporter.type(t);
-+    if (exporter.failure !== undefined) {
-+      const failure = exporter.failure;
-+      forgetExport(exporter);
-+      return new ExportPrice(0, 0, 0, performance.now() - start, failure);
-+    }
-+    let strings = this.dryStrings;
-+    if (strings === undefined) {
-+      strings = new Uint16Array(stringLogSize);
-+      this.dryStrings = strings;
-+    }
-+    const p = new RecordPacker(this.c.fileIndex, strings, 0);
-+    let packed = true;
-+    for (const r of exporter.records) if (!packRecord(p, r)) packed = false;
-+    p.f.push(root, diagnosticFiles.length);
-+    for (const fileName of diagnosticFiles) p.text(fileName);
-+    const records = exporter.records.length;
-+    forgetExport(exporter);
-+    return packed
-+      ? new ExportPrice(records, p.f.length, p.unitAt, performance.now() - start, undefined)
-+      : new ExportPrice(0, 0, 0, performance.now() - start, 'unpackable');
-+  }
 +
    /** The records this checker stored. */
    storedRecords = 0;
@@ -780,13 +731,13 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    kind: number,
 +  ): Type | undefined {
 +    // A result whose diagnostics a checker would report here is not taken: it would have reported them computing it.
-+    for (const fileName of posted.files)
-+      if (fileName === '' || this.ownsFileNamed(fileName)) {
++    for (const index of posted.files)
++      if (index < 0 || this.ownsIndex(index)) {
 +        this.refusal = 'refused-diagnostics';
 +        return undefined;
 +      }
-+    for (const fileName of posted.files)
-+      if (this.forbidsLastNamed(fileName)) {
++    for (const index of posted.files)
++      if (this.forbidsLast(index)) {
 +        this.refusal = 'refused-forbids-last';
 +        return undefined;
 +      }
@@ -797,7 +748,6 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    }
 +    const price = this.price;
 +    const start = performance.now();
-+    const unpackBefore = this.unpackMs;
 +    const typesBefore = price === undefined ? 0 : this.c.typeCount;
 +    const symbolsBefore = price === undefined ? 0 : lastSymbolIdValue();
 +    let reader = this.readers[producer];
@@ -805,7 +755,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +      reader = new StoreReader(this, producer);
 +      this.readers[producer] = reader;
 +    }
-+    const t = reader.translatePriced(posted.root);
++    const t = reader.translatePriced(posted.root, this.rule.buildBudget(posted.computeMs));
 +    const end = performance.now();
 +    const ms = end - start;
 +    this.translationMs += ms;
@@ -815,7 +765,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +      this.built += reader.builtCount;
 +      // Translating the result saved the time its producer's computation took (`post`'s header).
 +      this.addSaved(posted.computeMs);
-+      for (const fileName of posted.files) this.forbidNamed(fileName);
++      for (const index of posted.files) this.forbidIndex(index);
 +      if (posted.files.length > 0) {
 +        files.set(key, posted.files);
 +        this.noteFiles(posted.files);
@@ -829,7 +779,8 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +      if (this.refusal === '') this.refusal = 'refused-translation';
 +    }
 +    if (price !== undefined) {
-+      const unpack = this.unpackMs - unpackBefore;
++      // A translation reads its records where they are written, so it pays no unpacking time: the whole interval
++      // goes to building.
 +      price.translation(
 +        key,
 +        kind,
@@ -838,8 +789,8 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +        end,
 +        reader.walked,
 +        reader.builtCount,
-+        unpack,
-+        ms - unpack,
++        0,
++        ms,
 +        this.c.typeCount - typesBefore,
 +        lastSymbolIdValue() - symbolsBefore,
 +        t !== undefined,
@@ -852,7 +803,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
    /** The translation of `posted` into this checker, or undefined if it can't be taken here. */
    translatePosted(
      producer: number,
-@@ -2097,6 +2465,56 @@
+@@ -2462,8 +2792,42 @@
      this.writeStats();
      return t;
    }
@@ -889,27 +840,13 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +  built = 0;
 +  readonly builtByKind: number[] = [];
 +  readonly buildMsByKind: number[] = [];
-+}
-+
-+/** What a dry run of an export found: the records it would append, the words and code units it would write, its time, or why it fails. */
-+export class ExportPrice {
-+  readonly records: number;
-+  readonly words: number;
-+  readonly units: number;
-+  readonly ms: number;
-+  readonly failure: string | undefined;
-+
-+  constructor(records: number, words: number, units: number, ms: number, failure: string | undefined) {
-+    this.records = records;
-+    this.words = words;
-+    this.units = units;
-+    this.ms = ms;
-+    this.failure = failure;
-+  }
  }
  
++
  /** A result in a checker's store: the record of its type, and the files of its diagnostics. */
-@@ -2134,6 +2552,95 @@
+ export class StoredResult {
+   readonly root: number;
+@@ -2501,6 +2865,132 @@
   * enough, unless another checker posted it meanwhile. Nothing is written for the others before: a checker that finds
   * no result computes its own.
   */
@@ -920,6 +857,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +  key: number,
 +  symbol: Symbol | undefined,
 +  sig: Signature | undefined,
++  declarationFile: SourceFile,
 +  kind: number,
 +  afterLookup: boolean,
 +  price: PriceEntry | undefined,
@@ -940,23 +878,55 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    if (price !== undefined) price.reason('cycle');
 +    return t;
 +  }
-+  // A quick computation is cheaper to repeat than to export, post and translate.
-+  if (ms < sharing.minMs) {
-+    sharing.belowMin++;
-+    sharing.belowMinMs += ms;
-+    if (price !== undefined) {
-+      // What posting it would cost, and what it would write: exported and rolled back (TSC_TS_SHARE_PRICE).
-+      const dry = sharing.measureExport(t, diagnosticFiles ?? []);
-+      if (dry.failure === undefined) price.export(dry.records, dry.words, dry.units, dry.ms);
-+      price.reason('below-min' + (dry.failure === undefined ? '' : ': ' + dry.failure));
++  let postFiles: readonly number[] | undefined;
++  if (sharing.bounded) {
++    // The main thread stopped sharing at its window (control 1 or 2): this result is the checker's own,
++    // and the others compute theirs, as they do when they find none posted.
++    if (Atomics.load(sharing.control, 0) !== 0) {
++      sharing.stopped++;
++      if (price !== undefined) price.reason('stopped');
++      return t;
 +    }
-+    return t;
++    const index = sharing.c.fileIndex.get(declarationFile);
++    if (index === undefined) {
++      if (price !== undefined) price.reason('no-file');
++      return t;
++    }
++    // The rule priced this result: a quick computation is cheaper to repeat than to export, post and translate.
++    postFiles = diagnosticFiles ?? [];
++    if (!sharing.rule.posts(sharing, key, ms, postFiles, index)) {
++      sharing.belowMin++;
++      sharing.belowMinMs += ms;
++      if (price !== undefined) price.reason('below-min');
++      return t;
++    }
++    // A result is posted only for a declaration whose file another checker that may take it missed on: a file only
++    // its own checkers read has nobody to take it.
++    if (!sharing.demanded(index)) {
++      sharing.notDemanded++;
++      if (price !== undefined) price.reason('not-demanded');
++      return t;
++    }
++  } else {
++    // Below the bounded count the run is Phase 1's, and takes the same path: the floor first, then the stop switch,
++    // and none of the bounded path's lookups (the file index and the diagnostics) is made.
++    if (ms < sharing.minMs) {
++      sharing.belowMin++;
++      sharing.belowMinMs += ms;
++      if (price !== undefined) price.reason('below-min');
++      return t;
++    }
++    if (Atomics.load(sharing.control, 0) !== 0) {
++      sharing.stopped++;
++      if (price !== undefined) price.reason('stopped');
++      return t;
++    }
 +  }
-+  // The main thread stopped sharing at its window (control 1 or 2): this result is the checker's own,
-+  // and the others compute theirs, as they do when they find none posted.
-+  if (Atomics.load(sharing.control, 0) !== 0) {
-+    sharing.stopped++;
-+    if (price !== undefined) price.reason('stopped');
++  // A result computed inside this checker's export walk doesn't have the store to itself: the walk would write over
++  // its records, so it stays with the checkers that compute it.
++  if (sharing.exporting) {
++    sharing.nested++;
++    if (price !== undefined) price.reason('nested');
 +    return t;
 +  }
 +  const slot = table.slot(key);
@@ -970,16 +940,20 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +  const unitsBefore = sharing.used[2 * me + 1]!;
 +  const start = performance.now();
 +  // Diagnostics stay with this checker; the others only learn which files they are in.
-+  const state = sharing.postPriced(t, diagnosticFiles ?? [], kind, ms);
++  const state = sharing.postPriced(t, postFiles ?? diagnosticFiles ?? [], kind, ms);
 +  const postMs = performance.now() - start;
 +  sharing.exportMs += postMs;
-+  if (typeof state === 'string') {
++  if (state === budgetFailure) {
++    sharing.overBudget++;
++    sharing.overBudgetMs += ms;
++    if (price !== undefined) price.reason('export-failure: ' + state);
++  } else if (typeof state === 'string') {
 +    sharing.exportFailed++;
 +    sharing.exportFailedMs += ms;
 +    sharing.exportFailures.set(state, (sharing.exportFailures.get(state) ?? 0) + ms);
 +    if (price !== undefined) price.reason('export-failure: ' + state);
 +  } else if (state === -1) {
-+    sharing.packFailed++;
++    sharing.storeFailed++;
 +    if (price !== undefined) price.reason('log-full');
 +  } else {
 +    table.publish(slot, state);
@@ -1005,7 +979,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
  function computeAndPost(
    sharing: ThreadSharing,
    table: ResultTable,
-@@ -2209,12 +2716,16 @@
+@@ -2582,12 +3072,16 @@
  export function threadTypeOfSymbol(c: Checker, symbol: Symbol): Type {
    const sharing = c.threadSharing!;
    if (!sharing.timing || sharing.depth > 0 || c.symbolTypes.get(getSymbolId(symbol)) !== undefined)
@@ -1024,7 +998,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
    } finally {
      sharing.depth--;
      sharing.addOutermost(performance.now() - start);
-@@ -2285,6 +2796,86 @@
+@@ -2658,6 +3152,106 @@
    return computeAndPost(sharing, table, sharing.typeFiles, id, symbol, undefined, file);
  }
  
@@ -1039,6 +1013,15 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +  }
 +  const price = sharing.beginPrice(priceKindTypes, id, symbol.valueDeclaration);
 +  if (id > sharing.data.symbolIds) {
++    if (price !== undefined) price.outcome(priceLocal, 'thread-local');
++    sharing.endPrice(price, false, 0);
++    return sharing.tracked(sharing.typeFiles, id, symbol, undefined);
++  }
++  const declaration = symbol.valueDeclaration!;
++  // A declaration with a type annotation: computing its type resolves the annotation, and translating the records
++  // does too (`NodeType` resolves the node), so sharing saves nothing on it and costs a lookup. Below the bounded
++  // count the exclusion is off, as it is in Phase 1.
++  if (sharing.bounded && getType(declaration) !== undefined) {
 +    if (price !== undefined) price.outcome(priceLocal, 'thread-local');
 +    sharing.endPrice(price, false, 0);
 +    return sharing.tracked(sharing.typeFiles, id, symbol, undefined);
@@ -1105,13 +1088,24 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    sharing.owned++;
 +    if (sharing.depth === 1) sharing.kind = 0;
 +  }
-+  return computeAndPostPriced(sharing, table, sharing.typeFiles, id, symbol, undefined, priceKindTypes, other, price);
++  return computeAndPostPriced(
++    sharing,
++    table,
++    sharing.typeFiles,
++    id,
++    symbol,
++    undefined,
++    getSourceFileOfNode(symbol.valueDeclaration!),
++    priceKindTypes,
++    other,
++    price,
++  );
 +}
 +
  /** Notes that the computation in progress used the cached return type of `sig` (see `ThreadSharing.typeFiles`). */
  export function noteReturnTypeUse(c: Checker, sig: Signature): void {
    const sharing = c.threadSharing!;
-@@ -2294,12 +2885,17 @@
+@@ -2667,12 +3261,17 @@
  
  export function threadReturnType(c: Checker, sig: Signature): Type {
    const sharing = c.threadSharing!;
@@ -1131,7 +1125,7 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
    } finally {
      sharing.depth--;
      sharing.addOutermost(performance.now() - start);
-@@ -2358,6 +2954,78 @@
+@@ -2731,6 +3330,97 @@
    return computeAndPost(sharing, table, sharing.returnFiles, key, undefined, sig, file);
  }
  
@@ -1141,6 +1135,14 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +  const key = declaration.id;
 +  const price = sharing.beginPrice(priceKindReturns, key, declaration);
 +  if (key > sharing.data.nodeIds) {
++    if (price !== undefined) price.outcome(priceLocal, 'thread-local');
++    sharing.endPrice(price, false, 0);
++    return sharing.tracked(sharing.returnFiles, key, undefined, sig);
++  }
++  // A declaration with a return type annotation: computing the return type resolves the annotation, and translating
++  // the records does too, so sharing saves nothing on it and costs a lookup. Below the bounded count the exclusion is
++  // off, as it is in Phase 1.
++  if (sharing.bounded && getType(declaration) !== undefined) {
 +    if (price !== undefined) price.outcome(priceLocal, 'thread-local');
 +    sharing.endPrice(price, false, 0);
 +    return sharing.tracked(sharing.returnFiles, key, undefined, sig);
@@ -1204,30 +1206,44 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    sharing.owned++;
 +    if (sharing.depth === 1) sharing.kind = 0;
 +  }
-+  return computeAndPostPriced(sharing, table, sharing.returnFiles, key, undefined, sig, priceKindReturns, other, price);
++  return computeAndPostPriced(
++    sharing,
++    table,
++    sharing.returnFiles,
++    key,
++    undefined,
++    sig,
++    getSourceFileOfNode(declaration),
++    priceKindReturns,
++    other,
++    price,
++  );
 +}
 +
  // ---- Records in a checker's store
  //
  // Records travel between threads as numbers and strings only: a class instance received in a worker makes the native
-@@ -2641,6 +3309,9 @@
-   readonly types: Type[] = [];
-   readonly symbols: (Symbol | undefined)[] = [];
-   readonly built: number[] = [];
-+  /** What the last `translate` walked and built. */
+@@ -2999,6 +3689,9 @@
+   readonly types = new LinkTable<Type>();
+   readonly symbols = new LinkTable<Symbol>();
+   readonly completed = new LinkTable<boolean>();
++  /** What the last `translatePriced` walked and built. */
 +  walked = 0;
 +  builtCount = 0;
  
    constructor(sharing: ThreadSharing, producer: number) {
      this.sharing = sharing;
-@@ -2681,6 +3352,87 @@
-     return record;
+@@ -3037,6 +3730,96 @@
    }
  
-+  /** The translation of record `root` and the records it needs; undefined if one can't be translated here (priced). */
-+  translatePriced(root: number): Type | undefined {
-+    const c = this.sharing.c;
+   /**
++   * `translate`, counting the records it walked and built and timing the build of each record kind (TSC_TS_SHARE_PRICE,
++   * TSC_TS_SHARE_SUMMARY).
++   */
++  translatePriced(root: number, budget: number = Number.POSITIVE_INFINITY): Type | undefined {
 +    const translator = this.translator;
++    const reader = this.reader;
++    translator.failed = false;
 +    const needed = new Set<number>();
 +    const stack = [root];
 +    this.stopped = false;
@@ -1235,28 +1251,19 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    this.builtCount = 0;
 +    while (stack.length > 0) {
 +      const i = stack.pop()!;
-+      if (needed.has(i)) continue;
-+      this.ensure(i);
-+      if (this.built[i] === 1) continue;
-+      const r = this.record(i);
-+      if (r === undefined) return undefined;
-+      if (
-+        (r.mergedId >= 0 && !c.mergedSymbols.has(r.mergedId)) ||
-+        (r.aliasMergedId >= 0 && !c.mergedSymbols.has(r.aliasMergedId))
-+      )
++      if (needed.has(i) || this.isBuilt(i)) continue;
++      if (needed.size >= budget) {
++        this.stopped = true;
 +        return undefined;
++      }
++      if (!reader.begin(i) || !this.present(reader)) return undefined;
 +      needed.add(i);
 +      this.walked++;
-+      for (const j of r.refs) if (j >= 0) stack.push(j);
-+      for (const j of r.aliasRefs) stack.push(j);
-+      if (r.kind === RecordKind.CompleteObject || (r.kind === RecordKind.Union && r.num >= 0)) stack.push(r.num);
-+      for (const info of r.indexInfos) {
-+        stack.push(info.keyType);
-+        stack.push(info.valueType);
-+      }
-+      if (r.kind === RecordKind.AnonymousObject) {
-+        const completion = this.table[2 * i + 1]! - 1;
-+        if (completion >= 0) stack.push(completion);
++      reader.scan();
++      const deps = reader.deps;
++      for (let k = 0; k < deps.length; k++) {
++        const j = deps[k]!;
++        if (j >= 0) stack.push(j);
 +      }
 +    }
 +    const order = [...needed].sort((a, b) => a - b);
@@ -1264,14 +1271,14 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    // record is translated. A translation can start translations of this store again (resolving a type alias, or
 +    // a type of a symbol), which translate some of these records first.
 +    for (const i of order) {
-+      if (this.built[i] === 1) continue;
-+      const r = this.records[i]!;
-+      if (
-+        r.kind === RecordKind.NodeType ||
-+        r.kind === RecordKind.Conditional ||
-+        r.kind === RecordKind.DistributedConditional
-+      )
-+        translator.aliasOfNode(r.node!);
++      if (this.isBuilt(i)) continue;
++      reader.begin(i);
++      const kind = reader.kind;
++      if (kind !== RecordKind.NodeType && kind !== RecordKind.Conditional && kind !== RecordKind.DistributedConditional)
++        continue;
++      const node = reader.node();
++      if (node === undefined) return undefined;
++      translator.aliasOfNode(node);
 +    }
 +    if (translator.failed) {
 +      translator.failed = false;
@@ -1281,35 +1288,50 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +    const byKind = sharing.summary;
 +    let built = 0;
 +    for (const i of order) {
-+      if (this.built[i] === 1) continue;
-+      const r = this.records[i]!;
++      if (this.isBuilt(i)) continue;
++      reader.begin(i);
++      const kind = reader.kind;
 +      const started = byKind ? performance.now() : 0;
-+      if (r.kind === RecordKind.Property) this.symbols[i] = translator.property(r, this.types, this.symbols);
-+      else if (r.kind === RecordKind.CompleteObject) translator.complete(r, this.types, this.symbols);
-+      else this.types[i] = translator.record(r, this.types);
-+      if (byKind) {
-+        sharing.builtByKind[r.kind]!++;
-+        sharing.buildMsByKind[r.kind]! += performance.now() - started;
++      if (kind === RecordKind.Property) {
++        const symbol = translator.property(i);
++        if (symbol === undefined) {
++          translator.failed = false;
++          this.builtCount = built;
++          return undefined;
++        }
++        this.symbols.set(i, symbol);
++      } else if (kind === RecordKind.CompleteObject) {
++        if (!translator.complete(i)) {
++          translator.failed = false;
++          this.builtCount = built;
++          return undefined;
++        }
++        this.completed.set(i, true);
++      } else {
++        const t = translator.record(i);
++        if (t === undefined) {
++          translator.failed = false;
++          this.builtCount = built;
++          return undefined;
++        }
++        this.types.set(i, t);
 +      }
-+      if (translator.failed) {
-+        translator.failed = false;
-+        this.builtCount = built;
-+        return undefined;
++      if (byKind) {
++        sharing.builtByKind[kind]!++;
++        sharing.buildMsByKind[kind]! += performance.now() - started;
 +      }
 +      built++;
-+      this.built[i] = 1;
-+      // A translated record is not read again.
-+      this.records[i] = undefined;
 +    }
 +    this.builtCount = built;
-+    return this.types[root]!;
++    return this.types.get(root);
 +  }
 +
-   /**
++  /**
     * The translation of record `root` and the records it needs; undefined if one can't be translated here, or if the
     * records it would build pass `budget`.
-@@ -2755,3 +3507,429 @@
-     return this.types[root]!;
+    */
+@@ -3137,3 +3920,429 @@
+     return this.types.get(root);
    }
  }
 +
@@ -1739,10 +1761,9 @@ diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
 +  return (h ^ (h >>> 16)) >>> 0;
 +}
 diff --git a/compiler/thread-entry.ts b/compiler/thread-entry.ts
-index 4db70c8..d4003e1 100644
 --- a/compiler/thread-entry.ts
 +++ b/compiler/thread-entry.ts
-@@ -237,6 +237,9 @@ function runCheckerThread(job: CheckerThreadData, drivers: ThreadDrivers): void
+@@ -237,6 +237,9 @@
            job.units,
            job.sharing,
          );

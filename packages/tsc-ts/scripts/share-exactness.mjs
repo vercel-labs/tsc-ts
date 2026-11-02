@@ -7,7 +7,7 @@
 //
 // Usage: node scripts/share-exactness.mjs --native BINARY [--projects FILE] [--corpus] [--checkers 4,16]
 //                                         [--repeat N] [--batch N] [--options A,B] [--only NAME] [--save DIR]
-//                                         [--work DIR]
+//                                         [--work DIR] [--declaration]
 //
 // --projects names a file with one project per line: a name, a directory and its tsconfig file (relative to the
 // directory), separated by spaces; lines starting with # are skipped. --corpus adds TypeScript's test cases,
@@ -17,13 +17,16 @@
 // boolean compiler options for those projects. --repeat runs each shared configuration N times (default 1),
 // since what a checker translates depends on the timing of the threads. --only checks the projects whose name
 // contains NAME. --save keeps the outputs that differ in DIR; --work writes the batches into DIR, which is kept.
+// --declaration emits declaration files instead of checking only, and compares what it emits too: sharing must
+// leave the declarations the same, and translating another checker's types takes the same paths through them.
 // Exits with 1 if a shared run differs from both. Other TSC_TS_SHARE_* variables in the environment apply to the
 // shared runs.
 //
 // scripts/config-exactness.mjs checks the same projects against tsgo and at more counts; this script stays for
 // the runs that compare the two arms only.
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { tempDir } from '../tests/temp.mjs';
 import {
   changedLines,
@@ -56,6 +59,28 @@ const saveDir = option(args, '--save', undefined);
 const work = option(args, '--work', undefined) ?? tempDir('tsc-ts-share-exactness-');
 
 const projects = projectsFile === undefined ? [] : loadProjects(projectsFile);
+const declaration = args.includes('--declaration');
+let runCount = 0;
+
+/** The files `dir` holds, by path, with their text; a run that emits nothing leaves no directory. */
+function emitted(dir) {
+  const files = [];
+  const walk = (at) => {
+    let entries;
+    try {
+      entries = readdirSync(at, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(at, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else files.push(relative(dir, path) + '\n' + readFileSync(path, 'utf8'));
+    }
+  };
+  walk(dir);
+  return files.sort().join('\n');
+}
 
 /**
  * A run at one checker count, with `share` choosing whether the sharing variables stay in the environment.
@@ -69,13 +94,20 @@ function run(project, checkers, share) {
     for (const name of Object.keys(process.env)) if (name.startsWith('TSC_TS_SHARE')) env[name] = undefined;
     env.TSC_TS_SHARE = '0';
   }
-  return runBinary({
+  const args = ['-p', project.config, '--incremental', 'false', '--checkers', String(checkers)];
+  if (!declaration) return runBinary({ binary, project, args: [...args, '--noEmit'], env, work });
+  const outDir = join(work, 'emit-' + runCount++ + '-' + project.name.replace(/[^\w.-]+/g, '_'));
+  rmSync(outDir, { recursive: true, force: true });
+  const result = runBinary({
     binary,
     project,
-    args: ['-p', project.config, '--noEmit', '--incremental', 'false', '--checkers', String(checkers)],
+    args: [...args, '--noEmit', 'false', '--declaration', '--emitDeclarationOnly', '--outDir', outDir],
     env,
     work,
   });
+  const files = emitted(outDir);
+  rmSync(outDir, { recursive: true, force: true });
+  return { ...result, output: result.output + '\n' + files };
 }
 
 if (corpus) {

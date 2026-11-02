@@ -67,6 +67,7 @@ import {
   shareStatTranslation,
   shareStatTranslated,
   stringLogSize,
+  usedStride,
   type ThreadSharingData,
 } from './shared-results.js';
 import {
@@ -1683,10 +1684,10 @@ function threadSharingOf(
   const stringLogs: SharedArrayBuffer[] = [];
   for (let i = 0; i < count; i++) {
     numberLogs.push(new SharedArrayBuffer(4 * numberLogSize));
-    recordTables.push(new SharedArrayBuffer(8 * recordTableSize));
+    recordTables.push(new SharedArrayBuffer(4 * recordTableSize));
     stringLogs.push(new SharedArrayBuffer(2 * stringLogSize));
   }
-  const used = new SharedArrayBuffer(8 * count);
+  const used = new SharedArrayBuffer(4 * usedStride * count);
   // The stop switch (0 runs, 1 stops posting, 2 stops posting and translating) and the counters the
   // main thread reads at its window, a row per checker.
   const control = new SharedArrayBuffer(4);
@@ -2015,9 +2016,9 @@ interface SharingNumbers {
   /** What taking posted results saved, over the checkers: the computations they did not repeat. */
   readonly saved: number;
   /**
-   * What posting cost: exporting and translating results. Translating a result reads its records,
-   * unpacking them inside `ThreadSharing.translatePosted`'s timed translation (`StoreReader.record`),
-   * so `translationMs` already holds `unpackMs`; counting both would charge the window for it twice.
+   * What posting cost: exporting and translating results. Translating a result reads its records in
+   * place inside `ThreadSharing.translatePosted`'s timed translation, so `translationMs` holds that
+   * reading too; counting a separate unpacking time would charge the window for it twice.
    */
   readonly spent: number;
   readonly posted: number;
