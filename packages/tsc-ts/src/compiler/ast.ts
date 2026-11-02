@@ -8422,20 +8422,22 @@ export class PatternAmbientModule {
   readonly text: string;
   readonly starIndex: number;
   readonly symbol: Symbol;
+  /** The part of `text` before `starIndex`, kept so a match does not copy it. */
+  readonly prefix: string;
+  /** The part of `text` after `starIndex`, kept so a match does not copy it. */
+  readonly suffix: string;
 
   constructor(text: string, starIndex: number, symbol: Symbol) {
     this.text = text;
     this.starIndex = starIndex;
     this.symbol = symbol;
+    this.prefix = text.substring(0, starIndex);
+    this.suffix = text.substring(starIndex + 1);
   }
 
   matches(candidate: string): boolean {
-    const text = this.text;
-    const star = this.starIndex;
     return (
-      candidate.length >= text.length - 1 &&
-      candidate.startsWith(text.substring(0, star)) &&
-      candidate.endsWith(text.substring(star + 1))
+      candidate.length >= this.text.length - 1 && candidate.startsWith(this.prefix) && candidate.endsWith(this.suffix)
     );
   }
 }
