@@ -482,6 +482,9 @@ export class Exporter {
       this.aliasNaming = naming;
       this.aliasMerged = merged;
       this.aliasNode = node;
+      // The alias's type arguments are recorded after it is named (`aliasBits`). A record that names an alias which
+      // has none, such as a property naming its parent, keeps none of the last alias's.
+      this.aliasRefs = noRefs;
     } else {
       this.naming = naming;
       this.namingMerged = merged;
@@ -513,8 +516,8 @@ export class Exporter {
    */
   private aliasBits(alias: TypeAlias | undefined, refs: readonly number[]): number {
     if (alias === undefined) return 0;
-    this.aliasRefs = refs;
     if (!this.nameSymbol(alias.symbol, true)) return -1;
+    this.aliasRefs = refs;
     return RecordHeader.HasAlias | (this.aliasNaming === SymbolNaming.Merged ? RecordHeader.AliasMerged : 0);
   }
 
@@ -702,7 +705,9 @@ export class Exporter {
     const index = this.nextIndex();
     this.begin(kind, index, refs, RecordHeader.Constituent);
     this.writer.word(flags);
-    if (kind === RecordKind.Union) this.writer.word(0);
+    // A union's origin field is -1 here, as it is for a union with no origin: the constituents are refs, and the
+    // reader scans the field for records this record depends on.
+    if (kind === RecordKind.Union) this.writer.word(-1);
     return index;
   }
 

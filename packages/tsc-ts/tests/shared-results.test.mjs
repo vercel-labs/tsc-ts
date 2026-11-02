@@ -31,7 +31,9 @@ const UNION = 12;
 const LITERAL = 1;
 const ANONYMOUS_OBJECT = 22;
 const COMPLETE_OBJECT = 23;
+const PROPERTY = 24;
 const HAS_ALIAS = 1 << 5;
+const CONSTITUENT = 1 << 11;
 const NAMING_SHIFT = 6;
 const NODE_NAMING = 1;
 const HAS_NODE = 1 << 8;
@@ -160,6 +162,36 @@ test('a record with 0xffff refs or more counts them in a word after its header',
   assert.equal(reader.refAt, 2);
   reader.scan();
   assert.deepEqual(reader.deps, [7, 8, 9, -1]);
+});
+
+test('a union origin record depends on its constituents, not on record zero', () => {
+  const { writer, reader } = store();
+  const exporter = new Exporter({}, new Map(), writer);
+  // The origin of a distribution is not a type: a record of its constituents with no origin of its own.
+  assert.equal(exporter.originRecord(UNION, 0, [5, 6]), 0);
+  assert.equal(reader.begin(0), true);
+  assert.equal(reader.kind, UNION);
+  assert.ok((reader.header & CONSTITUENT) !== 0);
+  assert.equal(reader.numbers[reader.fields + 1], -1);
+  reader.scan();
+  assert.deepEqual(reader.deps, [5, 6, -1]);
+});
+
+test('a record that names an alias with no arguments writes none of the last alias arguments', () => {
+  const { writer, reader } = store();
+  const exporter = new Exporter({}, new Map(), writer);
+  // A union names an alias with two type arguments, records 6 and 7.
+  exporter.begin(UNION, 0, [], exporter.aliasBits({ symbol: undefined, typeArguments: [] }, [6, 7]));
+  // A property names its parent, an alias with no type arguments: the union's arguments are not its dependencies.
+  exporter.nameSymbol(undefined, true);
+  exporter.begin(PROPERTY, 1, [], HAS_ALIAS);
+  assert.equal(reader.begin(1), true);
+  assert.equal(reader.kind, PROPERTY);
+  assert.equal(reader.aliasNaming, NODE_NAMING);
+  assert.equal(reader.aliasNodeStart, 8);
+  assert.equal(reader.aliasRefCount, 0);
+  reader.scan();
+  assert.deepEqual(reader.deps, []);
 });
 
 test('a record names its alias, its symbol and its node where its refs end', () => {
