@@ -1659,9 +1659,15 @@ function threadSharingOf(
   order: readonly number[],
   units: readonly number[],
   files: number,
+  bounded: boolean,
 ): ThreadSharingData[] {
   const takers = new SharedArrayBuffer(4 * files);
   const forbidden = new SharedArrayBuffer(4 * files * forbiddenWords(count));
+  // The checkers that missed on a key in each file, which a post requires (`ThreadSharing.demanded`). An unbounded
+  // run posts as Phase 1 does and never reads it, so it gets a word rather than a bit per checker per file.
+  const wanted = bounded
+    ? new SharedArrayBuffer(4 * files * forbiddenWords(count))
+    : new SharedArrayBuffer(4);
   const handoff = new SharedArrayBuffer(4 * (3 + order.length));
   new Int32Array(handoff)[2] = count;
   const taken = new Int32Array(takers);
@@ -1692,8 +1698,10 @@ function threadSharingOf(
     data.push({
       index: i,
       count,
+      bounded,
       takers,
       forbidden,
+      wanted,
       handoff,
       typeTable,
       returnTable,
@@ -2358,7 +2366,7 @@ export function startParallelCheck(
   const sharesResults = config === undefined ? shareThreads === true : config.share;
   const sharing =
     sharesResults && shared && !mainChecks && count > 1 && count <= maxSharingCheckers
-      ? threadSharingOf(count, order, units, files.length)
+      ? threadSharingOf(count, order, units, files.length, config !== undefined && config.bounded)
       : undefined;
   if (sharing !== undefined) {
     // The main thread is idle while the checkers run, so a timer reads their counters at the window and

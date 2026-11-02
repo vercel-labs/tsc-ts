@@ -766,6 +766,7 @@ function recordSampleOf(sys: System, program: CompilerProgram, config: RunConfig
     role: config.role,
     checkers: config.checkers,
     share: config.share,
+    bounded: config.bounded,
     parseThreads: config.parseThreads,
     parseMs: Math.round(times.parseTime + times.bindTime),
     checkMs: Math.round(times.checkTime),
@@ -786,8 +787,14 @@ function chosenOf(config: RunConfig): RecordChoice {
   return {
     checkers: config.checkers,
     share: config.share,
+    bounded: config.bounded,
     parseThreads: config.parseThreads,
-    source: config.checkersSource === Source.Pinned || config.shareSource === Source.Pinned ? 'pinned' : 'default',
+    source:
+      config.checkersSource === Source.Pinned ||
+      config.shareSource === Source.Pinned ||
+      config.boundedSource === Source.Pinned
+        ? 'pinned'
+        : 'default',
     since: 0,
   };
 }

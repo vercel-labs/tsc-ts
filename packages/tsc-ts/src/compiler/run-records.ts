@@ -71,6 +71,11 @@ export interface RecordSample {
   role: 'chosen' | 'control' | 'explore' | 'doctor';
   checkers: number;
   share: boolean;
+  /**
+   * Whether the run's posts were cost-bounded (`RunConfig.bounded`). Records written before the run
+   * configuration chose it lack the field, and are unbounded ones.
+   */
+  bounded?: boolean;
   parseThreads: number;
   /** Parse and bind, milliseconds. */
   parseMs: number;
@@ -92,6 +97,8 @@ export interface RecordSample {
 export interface RecordChoice {
   checkers: number;
   share: boolean;
+  /** Whether the chosen configuration posts cost-bounded; absent in records written before the choice existed. */
+  bounded?: boolean;
   parseThreads: number;
   /** `default` or `pinned` today; a later step also records `learned`. */
   source: string;
@@ -106,6 +113,8 @@ export interface RecordChoice {
 export interface RecordRejection {
   checkers: number;
   share: boolean;
+  /** Whether the rejected configuration posted cost-bounded; absent in records written before the choice existed. */
+  bounded?: boolean;
   /** The run that rejected it. */
   run: number;
 }
@@ -313,6 +322,7 @@ function isChoice(value: unknown): value is RecordChoice {
   return (
     isNumber(c.checkers) &&
     typeof c.share === 'boolean' &&
+    (c.bounded === undefined || typeof c.bounded === 'boolean') &&
     isNumber(c.parseThreads) &&
     typeof c.source === 'string' &&
     isNumber(c.since)
@@ -322,7 +332,12 @@ function isChoice(value: unknown): value is RecordChoice {
 function isRejection(value: unknown): value is RecordRejection {
   if (typeof value !== 'object' || value === null) return false;
   const r = value as Partial<RecordRejection>;
-  return isNumber(r.checkers) && typeof r.share === 'boolean' && isNumber(r.run);
+  return (
+    isNumber(r.checkers) &&
+    typeof r.share === 'boolean' &&
+    (r.bounded === undefined || typeof r.bounded === 'boolean') &&
+    isNumber(r.run)
+  );
 }
 
 function isSample(value: unknown): value is RecordSample {
@@ -334,6 +349,7 @@ function isSample(value: unknown): value is RecordSample {
     typeof s.role === 'string' &&
     isNumber(s.checkers) &&
     typeof s.share === 'boolean' &&
+    (s.bounded === undefined || typeof s.bounded === 'boolean') &&
     isNumber(s.parseThreads) &&
     isNumber(s.parseMs) &&
     isNumber(s.checkMs) &&
@@ -413,6 +429,7 @@ function sameChoice(previous: RecordChoice, chosen: RecordChoice): boolean {
   return (
     previous.checkers === chosen.checkers &&
     previous.share === chosen.share &&
+    (previous.bounded === true) === (chosen.bounded === true) &&
     previous.parseThreads === chosen.parseThreads &&
     previous.source === chosen.source
   );
@@ -426,6 +443,7 @@ function sampleOf(sample: Omit<RecordSample, 'run'>, run: number): RecordSample 
     role: sample.role,
     checkers: sample.checkers,
     share: sample.share,
+    bounded: sample.bounded,
     parseThreads: sample.parseThreads,
     parseMs: sample.parseMs,
     checkMs: sample.checkMs,
@@ -442,6 +460,7 @@ function choiceOf(choice: RecordChoice, since: number): RecordChoice {
   return {
     checkers: choice.checkers,
     share: choice.share,
+    bounded: choice.bounded,
     parseThreads: choice.parseThreads,
     source: choice.source,
     since,

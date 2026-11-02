@@ -18,6 +18,7 @@ const {
   RunConfig,
   Source,
   beatsBy,
+  beatsPaired,
   checkTimes,
   checkersBand,
   decideCheck,
@@ -29,6 +30,7 @@ const {
   medianOf,
   minSharingCheckers,
   noiseOf,
+  pairedGains,
   pinsOf,
   preParseConfig,
   reportRunConfig,
@@ -488,6 +490,13 @@ function recordOf(samples, extra = {}) {
 }
 
 /** Signals that leave the static rules with 16 checkers and no sharing. */
+/** Signals that turn sharing on statically: library-bound ranges and half the files declarations. */
+function sharedSignals(extra = {}) {
+  const s = signals(16, 12_000_000, 1_000_000);
+  s.declarationShare = 0.5;
+  return Object.assign(s, extra);
+}
+
 function quietSignals(extra = {}) {
   const s = signals(16, 1_000_000, 5_000_000);
   return Object.assign(s, extra);
@@ -547,14 +556,56 @@ test('a comparison needs the margin its own noise allows', () => {
   assert.equal(usableSamples(busy).length, 1);
 });
 
+test('a comparison reads the spread of paired runs, not of the whole session', () => {
+  // Memory pressure moves a session's runs together: here every run's check time swings by 15% with the
+  // pressure while the alternative is 12% faster in every pair, so the arms' own noise hides the gain and the
+  // gains against each run's nearest neighbour show it.
+  const samples = samplesOf([
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 880 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1200 },
+    { checkers: 12, share: true, bounded: true, checkMs: 1056 },
+    { checkers: 12, share: true, bounded: false, checkMs: 900 },
+    { checkers: 12, share: true, bounded: true, checkMs: 792 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1100 },
+    { checkers: 12, share: true, bounded: true, checkMs: 968 },
+  ]);
+  const plain = { checkers: 12, share: true, bounded: false };
+  const bounded = { checkers: 12, share: true, bounded: true };
+  // The arms as a whole: 12% apart, inside twice the larger arm's 14% noise.
+  assert.equal(beatsBy(checkTimes(samples, 12, true, true), checkTimes(samples, 12, true, false)), undefined);
+  // The pairs: every one of them 12% faster.
+  assert.deepEqual(pairedGains(samples, bounded, plain), [0.12, 0.12, 0.12, 0.12]);
+  assert.equal(beatsPaired(samples, bounded, plain), 0.12);
+  // A gain the pairs disagree about is no gain, however tight the arms' medians look.
+  const scattered = samplesOf([
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 850 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 1100 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 880 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 980 },
+  ]);
+  assert.equal(beatsPaired(scattered, bounded, plain), undefined);
+  // The record adopts it: the same samples, read through a run.
+  const config = recordRun(recordOf(samples), sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(config.bounded, true);
+  assert.equal(config.boundedSource, Source.Learned);
+  assert.equal(config.boundedReasons[0], 'bounded posting 12% faster over 4 runs');
+});
+
 test('the sharing window is a tenth of the recorded check, at least 200 ms', () => {
   assert.equal(shareWindow, 300);
-  assert.equal(shareWindowOf(undefined, 16, false), 300);
-  assert.equal(shareWindowOf(recordOf([]), 16, false), 300);
-  assert.equal(shareWindowOf(recordOf(samplesOf([{ checkMs: 1000 }])), 16, false), 200);
-  assert.equal(shareWindowOf(recordOf(samplesOf([{ checkMs: 3000 }])), 16, false), 300);
-  assert.equal(shareWindowOf(recordOf(samplesOf([{ checkers: 8, checkMs: 5000 }])), 16, false), 300);
-  assert.equal(shareWindowOf(recordOf(samplesOf([{ checkers: 8, checkMs: 5000 }])), 8, false), 500);
+  assert.equal(shareWindowOf(undefined, 16, false, false), 300);
+  assert.equal(shareWindowOf(recordOf([]), 16, false, false), 300);
+  assert.equal(shareWindowOf(recordOf(samplesOf([{ checkMs: 1000 }])), 16, false, false), 200);
+  assert.equal(shareWindowOf(recordOf(samplesOf([{ checkMs: 3000 }])), 16, false, false), 300);
+  assert.equal(shareWindowOf(recordOf(samplesOf([{ checkers: 8, checkMs: 5000 }])), 16, false, false), 300);
+  assert.equal(shareWindowOf(recordOf(samplesOf([{ checkers: 8, checkMs: 5000 }])), 8, false, false), 500);
+  // A record whose only samples are bounded ones still gives a window.
+  assert.equal(shareWindowOf(recordOf(samplesOf([{ bounded: true, checkMs: 4000 }])), 16, false, false), 400);
 });
 
 test('a configuration the record shows faster is adopted, with the margin it won by', () => {
@@ -574,6 +625,7 @@ test('a configuration the record shows faster is adopted, with the margin it won
   assert.deepEqual(config.chosen, {
     checkers: 12,
     share: false,
+    bounded: false,
     parseThreads: defaultParseThreads(16),
     source: 'learned',
     since: 0,
@@ -603,6 +655,99 @@ test('a configuration the record shows faster is adopted, with the margin it won
   const limited = recordRun(recordOf(peaked), quietSignals(), quietDecision({ memoryBytes: 16 * 2 ** 30 }));
   assert.equal(limited.checkers, 16);
   assert.equal(limited.chosen.checkers, 16);
+});
+
+test('bounded posting is off by default and adopted only where the samples show it faster', () => {
+  // The static choice is Phase 1's posting, whatever the count: a project with no record never bounds it.
+  const plain = recordRun(recordOf([]));
+  assert.equal(plain.bounded, false);
+  assert.equal(plain.boundedSource, Source.Default);
+
+  // Three bounded samples 40% faster at the same count and sharing adopt it, and the record keeps it.
+  const faster = recordOf(
+    samplesOf([
+      { checkers: 12, share: true, bounded: false, checkMs: 100 },
+      { checkers: 12, share: true, bounded: false, checkMs: 100 },
+      { checkers: 12, share: true, bounded: false, checkMs: 100 },
+      { checkers: 12, share: true, bounded: true, checkMs: 60 },
+      { checkers: 12, share: true, bounded: true, checkMs: 60 },
+      { checkers: 12, share: true, bounded: true, checkMs: 60 },
+    ]),
+  );
+  const config = recordRun(faster, sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(config.share, true);
+  assert.equal(config.bounded, true);
+  assert.equal(config.boundedSource, Source.Learned);
+  assert.deepEqual(config.boundedReasons, ['bounded posting 40% faster over 3 runs']);
+  assert.equal(config.chosen.bounded, true);
+  assert.equal(config.chosen.source, 'learned');
+
+  // Samples that show it slower leave it off, and the reason says nothing.
+  const slower = recordOf(
+    samplesOf([
+      { checkers: 12, share: true, bounded: false, checkMs: 100 },
+      { checkers: 12, share: true, bounded: false, checkMs: 100 },
+      { checkers: 12, share: true, bounded: false, checkMs: 100 },
+      { checkers: 12, share: true, bounded: true, checkMs: 130 },
+      { checkers: 12, share: true, bounded: true, checkMs: 130 },
+      { checkers: 12, share: true, bounded: true, checkMs: 130 },
+    ]),
+  );
+  const kept = recordRun(slower, sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(kept.bounded, false);
+  assert.equal(kept.boundedSource, Source.Default);
+
+  // A run that does not share has nothing to bound.
+  const unshared = recordRun(
+    recordOf(
+      samplesOf([
+        { checkers: 16, share: false, checkMs: 100 },
+        { checkers: 16, share: false, checkMs: 100 },
+        { checkers: 16, share: false, checkMs: 100 },
+        { checkers: 16, share: false, bounded: true, checkMs: 60 },
+        { checkers: 16, share: false, bounded: true, checkMs: 60 },
+        { checkers: 16, share: false, bounded: true, checkMs: 60 },
+      ]),
+    ),
+  );
+  assert.equal(unshared.bounded, false);
+});
+
+test('an adopted bounded configuration is re-measured against the static one and reverts when it falls behind', () => {
+  // The record adopted bounded posting; its last samples now lose to the control runs.
+  const samples = samplesOf([
+    { checkers: 12, share: true, bounded: false, checkMs: 100, role: 'control' },
+    { checkers: 12, share: true, bounded: false, checkMs: 100, role: 'control' },
+    { checkers: 12, share: true, bounded: false, checkMs: 100, role: 'control' },
+    { checkers: 12, share: true, bounded: true, checkMs: 140, role: 'chosen' },
+    { checkers: 12, share: true, bounded: true, checkMs: 140, role: 'chosen' },
+    { checkers: 12, share: true, bounded: true, checkMs: 140, role: 'chosen' },
+  ]);
+  const record = recordOf(samples, {
+    chosen: recordChoice({ checkers: 12, share: true, bounded: true, source: 'learned', since: 1 }),
+  });
+  const config = recordRun(record, sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(config.bounded, false);
+  assert.equal(config.share, true);
+  assert.equal(config.role, 'chosen');
+});
+
+test('a pin keeps bounded posting whatever the record measured', () => {
+  const samples = samplesOf([
+    { checkers: 12, share: true, bounded: false, checkMs: 100 },
+    { checkers: 12, share: true, bounded: false, checkMs: 100 },
+    { checkers: 12, share: true, bounded: false, checkMs: 100 },
+    { checkers: 12, share: true, bounded: true, checkMs: 60 },
+    { checkers: 12, share: true, bounded: true, checkMs: 60 },
+    { checkers: 12, share: true, bounded: true, checkMs: 60 },
+  ]);
+  const off = recordRun(recordOf(samples), sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  // A pin is applied before parsing, as `TSC_TS_SHARE_BOUNDED=0` does; the record cannot turn it on.
+  off.boundedSource = Source.Pinned;
+  off.bounded = false;
+  decideCheck(off, sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(off.bounded, false);
+  assert.equal(off.boundedSource, Source.Pinned);
 });
 
 test("samples a doctor run measured are evidence for adoption like any other run's", () => {
@@ -722,11 +867,16 @@ test('an adopted configuration whose last samples are slower than control revert
     { checkers: 16, role: 'control', checkMs: 100 },
   ]);
   // Two control samples are one short of a comparison, so the margin rule cannot revert it.
-  assert.equal(beatsBy(checkTimes(samples, 16, false), checkTimes(samples, 12, false)), undefined);
-  assert.equal(fastRevert(usableSamples(recordOf(samples)), 12, false), true);
+  assert.equal(beatsBy(checkTimes(samples, 16, false, false), checkTimes(samples, 12, false, false)), undefined);
+  assert.equal(fastRevert(usableSamples(recordOf(samples)), 12, false, false), true);
   // One adopted sample inside the margin is enough to keep it.
   assert.equal(
-    fastRevert(usableSamples(recordOf(samples.map((s, i) => (i === 2 ? { ...s, checkMs: 101 } : s)))), 12, false),
+    fastRevert(
+      usableSamples(recordOf(samples.map((s, i) => (i === 2 ? { ...s, checkMs: 101 } : s)))),
+      12,
+      false,
+      false,
+    ),
     false,
   );
   const config = recordRun(recordOf(samples, { chosen: recordChoice({ checkers: 12, source: 'learned', since: 1 }) }));
@@ -743,8 +893,8 @@ test('a configuration fastRevert rejects is not adopted again from its older sam
     ...Array.from({ length: 3 }, () => ({ checkers: 16, role: 'control', checkMs: 100 })),
     ...Array.from({ length: 3 }, () => ({ checkers: 16, checkMs: 100 })),
   ]);
-  assert.equal(beatsBy(checkTimes(samples, 12, false), checkTimes(samples, 16, false)), 0.4);
-  assert.equal(fastRevert(usableSamples(recordOf(samples)), 12, false), true);
+  assert.equal(beatsBy(checkTimes(samples, 12, false, false), checkTimes(samples, 16, false, false)), 0.4);
+  assert.equal(fastRevert(usableSamples(recordOf(samples)), 12, false, false), true);
   const config = recordRun(recordOf(samples, { chosen: recordChoice({ checkers: 12, source: 'learned', since: 1 }) }));
   assert.equal(config.checkers, 16);
   assert.equal(config.checkersSource, Source.Default);
@@ -761,11 +911,11 @@ test('a fast revert is kept in the record, so the next run does not re-adopt wha
   const record = recordOf(samples, { chosen: learned });
   const reverted = recordRun(record);
   assert.equal(reverted.checkers, 16);
-  assert.deepEqual(reverted.rejected, { checkers: 12, share: false, run: record.runs });
+  assert.deepEqual(reverted.rejected, { checkers: 12, share: false, bounded: false, run: record.runs });
   // The run writes its record, and the next run reads it: the count the revert gave up is not adopted
   // again from the six samples it won on back when it was faster.
   const written = nextRecord(record, sampleOfRun(reverted), recordShape(), reverted.chosen, reverted.rejected);
-  assert.deepEqual(written.rejected, { checkers: 12, share: false, run: record.runs });
+  assert.deepEqual(written.rejected, { checkers: 12, share: false, bounded: false, run: record.runs });
   const next = recordRun(written);
   assert.equal(next.checkers, 16);
   assert.equal(next.checkersSource, Source.Default);
@@ -851,6 +1001,32 @@ test('one run in 16 re-measures the static choice, as does the first after two w
   assert.equal(preParseConfig({}, 16, {}, stale).role, 'control');
   // TSC_TS_AUTO=static keeps no record, and no control run.
   assert.equal(preParseConfig({}, 16, { TSC_TS_AUTO: 'static' }, stale).role, 'chosen');
+});
+
+test('a busy adoption sample still dates the adoption, so the next run is not a control run', () => {
+  // The run that adopted the learned choice was busy: its sample is in the record but above the load gate. The
+  // control schedule reads when the choice was adopted, which is a fact about the record and not a measurement
+  // to weigh, so this run is an ordinary one. Reading only the usable samples would find no adoption and no
+  // control sample, call the choice stale, and make every run after it a control run.
+  const samples = samplesOf([
+    { checkers: 12, checkMs: 100 },
+    { checkers: 12, checkMs: 100 },
+    { checkers: 12, checkMs: 100 },
+    { checkers: 12, checkMs: 60, load: 0.62 },
+  ]);
+  const record = recordOf(samples, {
+    runs: 4,
+    chosen: recordChoice({ checkers: 12, source: 'learned', since: 4 }),
+  });
+  const config = preParseConfig({}, 16, {}, record);
+  assert.equal(config.role, 'chosen');
+  assert.equal(usableSamples(record).length, 3);
+  // The same record two weeks on is stale, busy sample or not.
+  const old = recordOf(
+    samples.map((sample) => ({ ...sample, at: now - 15 * 86400 })),
+    { runs: 4, chosen: recordChoice({ checkers: 12, source: 'learned', since: 4 }) },
+  );
+  assert.equal(preParseConfig({}, 16, {}, old).role, 'control');
 });
 
 test('the record chooses the parse threads it adopted, and why', () => {
@@ -1046,6 +1222,33 @@ test('signals that leave sharing uncertain explore it, when sharing is possible'
   assert.equal(alone.role, 'chosen');
 });
 
+test('a record that leaves bounded posting open tries it once in eight runs', () => {
+  // Sharing is on statically, the checks are long enough to pay for a wrong guess, and no bounded sample
+  // exists yet: the run tries bounded posting, and says so.
+  const samples = samplesOf(Array.from({ length: 8 }, () => ({ checkers: 12, share: true, checkMs: 2500 })));
+  const config = recordRun(
+    recordOf(samples),
+    sharedSignals(),
+    quietDecision({ possible: true, fit: { sharing: 16 } }),
+    true,
+  );
+  assert.equal(config.share, true);
+  assert.equal(config.bounded, true);
+  assert.equal(config.boundedSource, Source.Explore);
+  assert.equal(config.role, 'explore');
+  // Without TSC_TS_AUTO=explore the same record changes nothing.
+  const plain = recordRun(recordOf(samples), sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(plain.bounded, false);
+  assert.equal(plain.role, 'chosen');
+  // Three bounded samples that lose close it: the run does not try it again.
+  const lost = recordOf([
+    ...samples,
+    ...samplesOf(Array.from({ length: 3 }, () => ({ checkers: 12, share: true, bounded: true, checkMs: 3000 }))),
+  ]);
+  const closed = recordRun(lost, sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }), true);
+  assert.equal(closed.bounded, false);
+});
+
 test('a pin keeps the checker count the count band would try', () => {
   // The band would try three quarters of the count, and a pin keeps the count it fixed.
   const band = quietSignals({ library: 4_000_000, own: 1_000_000 });
@@ -1112,6 +1315,7 @@ test('the section prints the value, its source, and how to pin it', () => {
     '\nSuggestions:\n' +
       `  Checkers: 4 (default); pin with --checkers 4\n` +
       '  Sharing: off (default); pin with TSC_TS_SHARE=0\n' +
+      '  Bounded posting: off (default); pin with TSC_TS_SHARE_BOUNDED=0\n' +
       '  Parse threads: 3 (pinned: TSC_TS_PARSE_THREADS)\n',
   );
 
@@ -1123,6 +1327,7 @@ test('the section prints the value, its source, and how to pin it', () => {
     '\nSuggestions:\n' +
       '  Checkers: 2 (pinned: --checkers)\n' +
       '  Sharing: on (pinned: TSC_TS_SHARE)\n' +
+      '  Bounded posting: off (default); pin with TSC_TS_SHARE_BOUNDED=0\n' +
       `  Parse threads: ${pinned.parseThreads} (default); pin with TSC_TS_PARSE_THREADS=${pinned.parseThreads}\n`,
   );
 });
@@ -1255,10 +1460,11 @@ test('--extendedDiagnostics prints the section, after the statistics', { skip },
   assert.match(lines[at - 2], /^Total time:/);
   assert.equal(lines[at + 1], '  Checkers: 2 (pinned: --checkers)');
   assert.equal(lines[at + 2], '  Sharing: off (default); pin with TSC_TS_SHARE=0');
-  assert.match(lines[at + 3], /^ {2}Parse threads: \d+ \(default\); pin with TSC_TS_PARSE_THREADS=\d+$/);
-  assert.equal(lines[at + 4], '  Records: off (TSC_TS_CACHE=0)');
-  // Nothing after the four lines.
-  assert.deepEqual(lines.slice(at + 5), ['']);
+  assert.equal(lines[at + 3], '  Bounded posting: off (default); pin with TSC_TS_SHARE_BOUNDED=0');
+  assert.match(lines[at + 4], /^ {2}Parse threads: \d+ \(default\); pin with TSC_TS_PARSE_THREADS=\d+$/);
+  assert.equal(lines[at + 5], '  Records: off (TSC_TS_CACHE=0)');
+  // Nothing after the five lines.
+  assert.deepEqual(lines.slice(at + 6), ['']);
 });
 
 test('--extendedDiagnostics reports the pins of sharing and the parse threads', { skip }, () => {
@@ -1266,8 +1472,10 @@ test('--extendedDiagnostics reports the pins of sharing and the parse threads', 
   const { output } = run(dir, ['-p', '.', '--extendedDiagnostics'], {
     TSC_TS_SHARE: '1',
     TSC_TS_PARSE_THREADS: '2',
+    TSC_TS_SHARE_BOUNDED: '1',
   });
   assert.match(output, /^ {2}Sharing: on \(pinned: TSC_TS_SHARE\)$/m);
+  assert.match(output, /^ {2}Bounded posting: on \(pinned: TSC_TS_SHARE_BOUNDED\)$/m);
   assert.match(output, /^ {2}Parse threads: 2 \(pinned: TSC_TS_PARSE_THREADS\)$/m);
 });
 

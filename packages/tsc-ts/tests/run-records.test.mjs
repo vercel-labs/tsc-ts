@@ -125,6 +125,40 @@ test('a written record follows the choice each run made, and a changed choice st
   assert.equal(kept.chosen.since, 2);
 });
 
+test('a record keeps whether a run posted cost-bounded, and a flip is a new choice', () => {
+  const dir = tempDir('tsc-ts-run-records-');
+  const file = recordFile(dir, 'abc');
+  writeRecord(dir, 'abc', sample({ bounded: true }), shape(), chosen({ bounded: true }));
+  const read = readRecord(file);
+  assert.equal(read.samples[0].bounded, true);
+  assert.equal(read.chosen.bounded, true);
+  writeRecord(dir, 'abc', sample({ at: now + 1 }), shape(), chosen({ bounded: false }));
+  const after = readRecord(file);
+  assert.equal(after.samples[1].bounded, undefined);
+  assert.equal(after.chosen.bounded, false);
+  assert.equal(after.chosen.since, 2);
+});
+
+test('samples written before bounded posting existed read as unbounded ones', () => {
+  const dir = tempDir('tsc-ts-run-records-');
+  const file = recordFile(dir, 'abc');
+  mkdirSync(join(dir, 'runs-v1'), { recursive: true });
+  const record = {
+    format: 1,
+    shape: shape(),
+    runs: 1,
+    lastExplore: 0,
+    lastControl: 0,
+    chosen: { checkers: 4, share: false, parseThreads: 3, source: 'default', since: 1 },
+    samples: [{ run: 1, ...sample() }],
+  };
+  writeFileSync(file, JSON.stringify(record));
+  const read = readRecord(file);
+  assert.equal(read.samples.length, 1);
+  assert.equal(read.samples[0].bounded, undefined);
+  assert.equal(read.chosen.bounded, undefined);
+});
+
 test('an explore or control sample moves the schedule its role keeps', () => {
   let record;
   record = nextRecord(record, sample({ at: now }), shape(), chosen());
