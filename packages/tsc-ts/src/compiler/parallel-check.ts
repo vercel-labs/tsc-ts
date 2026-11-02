@@ -1665,9 +1665,7 @@ function threadSharingOf(
   const forbidden = new SharedArrayBuffer(4 * files * forbiddenWords(count));
   // The checkers that missed on a key in each file, which a post requires (`ThreadSharing.demanded`). An unbounded
   // run posts as Phase 1 does and never reads it, so it gets a word rather than a bit per checker per file.
-  const wanted = bounded
-    ? new SharedArrayBuffer(4 * files * forbiddenWords(count))
-    : new SharedArrayBuffer(4);
+  const wanted = bounded ? new SharedArrayBuffer(4 * files * forbiddenWords(count)) : new SharedArrayBuffer(4);
   const handoff = new SharedArrayBuffer(4 * (3 + order.length));
   new Int32Array(handoff)[2] = count;
   const taken = new Int32Array(takers);

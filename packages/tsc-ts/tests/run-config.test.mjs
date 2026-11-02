@@ -596,6 +596,62 @@ test('a comparison reads the spread of paired runs, not of the whole session', (
   assert.equal(config.boundedReasons[0], 'bounded posting 12% faster over 4 runs');
 });
 
+test('a paired comparison needs three samples of each arm, not three pairs on one baseline', () => {
+  const plain = { checkers: 12, share: true, bounded: false };
+  const bounded = { checkers: 12, share: true, bounded: true };
+  // One unbounded sample and three bounded ones: every pair reads the same baseline run, which leaves the
+  // unbounded arm one usable sample, so nothing has three.
+  const single = samplesOf([
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 600 },
+    { checkers: 12, share: true, bounded: true, checkMs: 600 },
+    { checkers: 12, share: true, bounded: true, checkMs: 600 },
+  ]);
+  assert.deepEqual(pairedGains(single, bounded, plain), [0.4]);
+  assert.equal(beatsPaired(single, bounded, plain), undefined);
+  assert.equal(beatsBy(checkTimes(single, 12, true, true), checkTimes(single, 12, true, false)), undefined);
+  // Read through a run, the record adopts nothing.
+  const kept = recordRun(recordOf(single), sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(kept.bounded, false);
+  assert.equal(kept.boundedSource, Source.Default);
+  // Three baseline samples and three bounded ones pair one to one: the block a record that tried the
+  // alternative last keeps reads three baselines, not the nearest one three times.
+  const blocked = samplesOf([
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 600 },
+    { checkers: 12, share: true, bounded: true, checkMs: 600 },
+    { checkers: 12, share: true, bounded: true, checkMs: 600 },
+  ]);
+  assert.deepEqual(pairedGains(blocked, bounded, plain), [0.4, 0.4, 0.4]);
+  assert.equal(beatsPaired(blocked, bounded, plain), 0.4);
+});
+
+test('a paired comparison that cannot show the gain is not overruled by the arm medians', () => {
+  const plain = { checkers: 12, share: true, bounded: false };
+  const bounded = { checkers: 12, share: true, bounded: true };
+  // The arms' medians are 10% apart and tight, but one pair jumps up and one down: the pairs do not agree
+  // enough for the paired comparison, and that verdict is the record's.
+  const split = samplesOf([
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 900 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 900 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1400 },
+    { checkers: 12, share: true, bounded: true, checkMs: 900 },
+    { checkers: 12, share: true, bounded: false, checkMs: 1000 },
+    { checkers: 12, share: true, bounded: true, checkMs: 1500 },
+  ]);
+  assert.deepEqual(pairedGains(split, bounded, plain), [1 - 900 / 1000, 1 - 900 / 1000, 1 - 900 / 1400, -0.5]);
+  assert.equal(beatsPaired(split, bounded, plain), undefined);
+  const byArms = beatsBy(checkTimes(split, 12, true, true), checkTimes(split, 12, true, false));
+  assert.ok(byArms !== undefined && Math.abs(byArms - 0.1) < 1e-9);
+  const kept = recordRun(recordOf(split), sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }));
+  assert.equal(kept.bounded, false);
+  assert.equal(kept.boundedSource, Source.Default);
+});
+
 test('the sharing window is a tenth of the recorded check, at least 200 ms', () => {
   assert.equal(shareWindow, 300);
   assert.equal(shareWindowOf(undefined, 16, false, false), 300);
@@ -1247,6 +1303,48 @@ test('a record that leaves bounded posting open tries it once in eight runs', ()
   ]);
   const closed = recordRun(lost, sharedSignals(), quietDecision({ possible: true, fit: { sharing: 16 } }), true);
   assert.equal(closed.bounded, false);
+});
+
+test('a checker band whose candidates are all closed leaves bounded posting its turn', () => {
+  // The signals leave the checker count uncertain, sharing is pinned on, and the count's candidate has its
+  // three samples: exploration has nothing left in the count band, so it moves to the dimension after it.
+  const band = quietSignals({ library: 4_000_000, own: 1_000_000 });
+  assert.equal(checkersBand(band), true);
+  const samples = samplesOf([
+    ...Array.from({ length: 8 }, () => ({ checkers: 16, share: true, checkMs: 2500 })),
+    ...Array.from({ length: 3 }, () => ({ checkers: 12, share: true, checkMs: 3000 })),
+  ]);
+  const run = (record) => {
+    const config = new RunConfig();
+    config.explore = true;
+    config.checkers = 16;
+    config.share = true;
+    config.shareSource = Source.Pinned;
+    config.sharePin = 'TSC_TS_SHARE';
+    config.record = record;
+    decideCheck(config, band, quietDecision({ possible: true, fit: { sharing: 16 } }));
+    return config;
+  };
+  const tried = run(recordOf(samples));
+  assert.equal(tried.checkers, 16);
+  assert.equal(tried.bounded, true);
+  assert.equal(tried.boundedSource, Source.Explore);
+  assert.equal(tried.role, 'explore');
+  // While the count's candidate is open it is the one tried, and bounded posting waits.
+  const counted = run(recordOf(samples.slice(0, 8)));
+  assert.equal(counted.checkers, 12);
+  assert.equal(counted.checkersSource, Source.Explore);
+  assert.equal(counted.bounded, false);
+  assert.equal(counted.role, 'explore');
+  // Three bounded samples that lose close the last dimension too.
+  const lost = run(
+    recordOf([
+      ...samples,
+      ...samplesOf(Array.from({ length: 3 }, () => ({ checkers: 16, share: true, bounded: true, checkMs: 3000 }))),
+    ]),
+  );
+  assert.equal(lost.bounded, false);
+  assert.equal(lost.role, 'chosen');
 });
 
 test('a pin keeps the checker count the count band would try', () => {

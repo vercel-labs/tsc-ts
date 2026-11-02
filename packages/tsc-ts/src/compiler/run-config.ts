@@ -361,20 +361,25 @@ function checkedWithArm(sample: RecordSample, arm: CheckArm): boolean {
  * this reads. A tie goes to the earlier sample, the run the alternative was tried after.
  *
  * The record may alternate the two arms or space them `exploreRuns` apart; either way a sample is compared with
- * the record's nearest evidence of the other arm, not with a global median.
+ * the record's nearest evidence of the other arm, not with a global median. Each sample of `worse` pairs once:
+ * three alternative samples must read three runs of the baseline, so a record with one baseline sample gives one
+ * gain however many alternative samples it has.
  */
 export function pairedGains(samples: readonly RecordSample[], better: CheckArm, worse: CheckArm): number[] {
   const gains: number[] = [];
+  const paired: boolean[] = [];
   for (let i = 0; i < samples.length; i++) {
     const sample = samples[i]!;
     if (!checkedWithArm(sample, better)) continue;
     let near = -1;
     for (let j = 0; j < samples.length; j++) {
-      if (j === i || !checkedWithArm(samples[j]!, worse)) continue;
+      if (j === i || paired[j] || !checkedWithArm(samples[j]!, worse)) continue;
       const distance = Math.abs(j - i);
       if (near < 0 || distance < Math.abs(near - i) || (distance === Math.abs(near - i) && j < near)) near = j;
     }
-    const worseMs = near < 0 ? 0 : samples[near]!.checkMs;
+    if (near < 0) continue;
+    paired[near] = true;
+    const worseMs = samples[near]!.checkMs;
     if (worseMs > 0) gains.push(1 - sample.checkMs / worseMs);
   }
   return gains;
@@ -386,11 +391,22 @@ export function pairedGains(samples: readonly RecordSample[], better: CheckArm, 
  * twice the standard error of the median of the gains, 2 × 1.2533 × 1.4826 × their median absolute deviation /
  * √(the pairs): the spread two neighbouring runs do not share is what one pair is worth, and a median of several
  * pairs is closer than that. The arms' medians must also differ by the floor, so a gain made up of a few lucky
- * pairs cannot carry a comparison the record as a whole does not show.
+ * pairs cannot carry a comparison the record as a whole does not show. The comparison needs `comparisonSamples`
+ * pairs, and `pairedGains` pairs each baseline sample once, so that is three usable samples of each arm.
  */
 export function beatsPaired(samples: readonly RecordSample[], better: CheckArm, worse: CheckArm): number | undefined {
   const gains = pairedGains(samples, better, worse);
   if (gains.length < comparisonSamples) return undefined;
+  return pairedBeat(samples, better, worse, gains);
+}
+
+/** `beatsPaired` over `gains`, which the caller has already found to be `comparisonSamples` or more. */
+function pairedBeat(
+  samples: readonly RecordSample[],
+  better: CheckArm,
+  worse: CheckArm,
+  gains: readonly number[],
+): number | undefined {
   const median = medianOf(gains)!;
   const spread = 1.4826 * (medianOf(gains.map((gain) => Math.abs(gain - median))) ?? 0);
   if (median < Math.max(marginFloor, (2 * 1.2533 * spread) / Math.sqrt(gains.length))) return undefined;
@@ -402,9 +418,12 @@ export function beatsPaired(samples: readonly RecordSample[], better: CheckArm, 
 
 /**
  * How much faster `better` is than `worse` on the record's evidence: the median paired gain where the record has
- * enough pairs of neighbouring samples (`beatsPaired`), and the arm medians by `marginOf` where it does not
- * (`beatsBy`). `considered` is the alternative's samples with the rejected configuration's left out; the static
- * arm is compared over every sample the record kept.
+ * enough pairs of neighbouring samples (`beatsPaired`), and the arm medians by `marginOf` only where it has too
+ * few pairs to read one (`beatsBy`). A paired comparison that found the pairs and still could not show the gain
+ * is the record's verdict on the alternative, and the fallback does not overrule it.
+ *
+ * `considered` is the alternative's samples with the rejected configuration's left out; the static arm is
+ * compared over every sample the record kept.
  */
 function beats(
   samples: readonly RecordSample[],
@@ -412,8 +431,8 @@ function beats(
   better: CheckArm,
   worse: CheckArm,
 ): number | undefined {
-  const paired = beatsPaired(considered, better, worse);
-  if (paired !== undefined) return paired;
+  const gains = pairedGains(considered, better, worse);
+  if (gains.length >= comparisonSamples) return pairedBeat(considered, better, worse, gains);
   return beatsBy(
     checkTimes(considered, better.checkers, better.share, better.bounded),
     checkTimes(samples, worse.checkers, worse.share, worse.bounded),
@@ -913,6 +932,10 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
         const checkMs = medianOf(checkTimes(samples, checkers, share, bounded));
         if (record.runs - record.lastExplore >= exploreRuns && checkMs !== undefined && checkMs >= exploreCheckMs) {
           const shareAlt = !share;
+          // The dimensions are tried in order and the first with an alternative left takes the run: a band whose
+          // alternatives are all closed, such as a checker count whose candidates have measured, leaves the next
+          // one to be tried rather than ending exploration.
+          let exploring = false;
           if (
             !sharePinned &&
             sharingBand(signals) &&
@@ -921,17 +944,22 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
           ) {
             share = shareAlt;
             role = 'explore';
-          } else if (!checkersPinned && checkersBand(signals)) {
+            exploring = true;
+          }
+          if (!exploring && !checkersPinned && checkersBand(signals)) {
             for (const candidate of countCandidates(staticCheckers, cpus)) {
               if (candidate === checkers || !fits(candidate, share, decision, cpus, samples, decision.memoryBytes))
                 continue;
               if (openCandidate(samples, candidate, share, bounded, checkers, share, bounded)) {
                 checkers = candidate;
                 role = 'explore';
+                exploring = true;
                 break;
               }
             }
-          } else if (
+          }
+          if (
+            !exploring &&
             !boundedPinned &&
             share &&
             decision.possible &&
