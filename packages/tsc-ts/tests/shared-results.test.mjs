@@ -10,8 +10,10 @@ import { compileSources } from './temp.mjs';
 const out = compileSources('tsc-ts-shared-results-', ['main.ts']);
 const {
   Exporter,
+  budgetFailure,
   forbiddenWords,
   isForbidden,
+  isWanted,
   maxSharingCheckers,
   numberLogSize,
   postedOffset,
@@ -54,6 +56,48 @@ test('each checker has its own forbidden bit', () => {
       assert.equal(isForbidden(forbidden, count, 2, index), false);
     }
   }
+});
+
+test('each checker has its own wanted bit', () => {
+  for (const count of counts) {
+    const words = forbiddenWords(count);
+    const files = 3;
+    const wanted = new Int32Array(new SharedArrayBuffer(4 * files * words));
+    const file = 1;
+    for (let index = 0; index < count; index++) {
+      Atomics.or(wanted, file * words + (index >>> 5), 1 << (index & 31));
+      for (let other = 0; other < count; other++)
+        assert.equal(
+          isWanted(wanted, count, file, other),
+          other <= index,
+          `checker ${other} after ${index} of ${count}`,
+        );
+      assert.equal(isWanted(wanted, count, 0, index), false);
+    }
+  }
+});
+
+// The export budget: a record past it fails the export, and a type the failed export would have given an index does
+// not keep one.
+test('an export stops at its record budget', () => {
+  const exporter = new Exporter(undefined, new Map());
+  exporter.limit = 2;
+  assert.equal(exporter.push({}), 0);
+  assert.equal(exporter.push({}), 1);
+  assert.equal(exporter.push({}), -1);
+  assert.equal(exporter.failure, budgetFailure);
+});
+
+test('a type over the export budget keeps no index', () => {
+  const exporter = new Exporter(undefined, new Map());
+  exporter.limit = 0;
+  const t = {};
+  assert.equal(
+    exporter.add(t, { kind: 0, id: 0, flags: 0, num: 0, text: '', refs: [], nodes: [], indexInfos: [] }),
+    -1,
+  );
+  assert.equal(exporter.addedTypes.length, 0);
+  assert.equal(exporter.indexes.has(t), false);
 });
 
 // An instantiation's record lists the return types of its signatures when they can be exported (optionalType); one

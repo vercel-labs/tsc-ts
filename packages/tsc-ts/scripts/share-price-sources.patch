@@ -400,10 +400,9 @@ index 711cf0d..3751a49 100644
      // instantiations nest three or more times.
      const circularTypeNames = getCircularTypeNames(c);
 diff --git a/compiler/parallel-check.ts b/compiler/parallel-check.ts
-index a1448dc..3f2588d 100644
 --- a/compiler/parallel-check.ts
 +++ b/compiler/parallel-check.ts
-@@ -1877,6 +1877,9 @@ export function checkFromQueue(
+@@ -1885,6 +1885,9 @@
      }
    }
    mark(`checked ${done.length} files, ${unitsDone.length} ranges`);
@@ -414,7 +413,6 @@ index a1448dc..3f2588d 100644
    // CheckedProgram.getGlobalDiagnostics deduplicates them with these.
    const globals = (onMainThread ? checked.checker.getGlobalDiagnostics() : checked.getGlobalDiagnostics()).slice();
 diff --git a/compiler/shared-results.ts b/compiler/shared-results.ts
-index 9f22d63..e3ff90b 100644
 --- a/compiler/shared-results.ts
 +++ b/compiler/shared-results.ts
 @@ -7,6 +7,7 @@
@@ -422,10 +420,10 @@ index 9f22d63..e3ff90b 100644
  // declared types of symbols, types of declarations and type nodes). Another checker translates the records through
  // its own interning caches, so each type still has one object in it.
 +import { writeFileSync } from 'node:fs';
- import { getSymbol, type Node, NodeVisitor, type SourceFile } from './ast.js';
+ import { getSymbol, getType, type Node, NodeVisitor, type SourceFile } from './ast.js';
  import { getSourceFileOfNode } from './binder-utilities.js';
  import type { Checker } from './checker.js';
-@@ -68,13 +69,20 @@ import { getESSymbolLikeTypeForNode, getTypeFromTypeNode } from './checker-type-
+@@ -68,13 +69,20 @@
  import { SyntaxKind } from './syntax-kind.js';
  import { instantiateTypeWithAlias } from './instantiation.js';
  import { resolvedReturnTypeOf, sideOf } from './side-state.js';
@@ -448,7 +446,7 @@ index 9f22d63..e3ff90b 100644
  // Functions, classes, enums and modules have anonymous types that are cheap to create; their members are not. (A
  // function: a top-level constant computed from an enum member of a module in an import cycle doesn't compile natively.)
  function sharedValueFlags(): SymbolFlags {
-@@ -148,6 +156,35 @@ const enum RecordKind {
+@@ -148,6 +156,35 @@
    Property,
  }
  
@@ -484,7 +482,7 @@ index 9f22d63..e3ff90b 100644
  /** An index signature of an `AnonymousObject` record. */
  export class PortableIndexInfo {
    readonly keyType: number;
-@@ -1498,8 +1535,6 @@ export class ThreadSharing {
+@@ -1642,8 +1679,6 @@
  
    notShareable = 0;
    notShareableMs = 0;
@@ -493,7 +491,7 @@ index 9f22d63..e3ff90b 100644
    /** TSC_TS_SHARE_VERIFY: translations checked, and those equal only as text. */
    verified = 0;
    verifiedIdentity = 0;
-@@ -1636,11 +1671,142 @@ export class ThreadSharing {
+@@ -1793,11 +1828,142 @@
        this.recordTables.push(new Int32Array(data.recordTables[k]!));
        this.stringLogs.push(new Uint16Array(data.stringLogs[k]!));
      }
@@ -603,8 +601,9 @@ index 9f22d63..e3ff90b 100644
 +      );
 +    }
 +    return parts.join(' ');
-+  }
-+
+   }
+ 
+-  summary(): string {
 +  /** What translations walked and built, and the time of building each record kind. */
 +  private recordLine(): string {
 +    const parts: string[] = [
@@ -632,14 +631,13 @@ index 9f22d63..e3ff90b 100644
 +      );
 +    }
 +    return parts.join('; ');
-   }
- 
--  summary(): string {
++  }
++
 +  private summaryLine(): string {
      return (
        'checker ' +
        this.data.index +
-@@ -1850,12 +2016,214 @@ export class ThreadSharing {
+@@ -2054,12 +2220,214 @@
      return postedState(this.data.count, me, offset + header);
    }
  
@@ -854,7 +852,7 @@ index 9f22d63..e3ff90b 100644
    /** The translation of `posted` into this checker, or undefined if it can't be taken here. */
    translatePosted(
      producer: number,
-@@ -1889,6 +2257,56 @@ export class ThreadSharing {
+@@ -2097,6 +2465,56 @@
      this.writeStats();
      return t;
    }
@@ -911,15 +909,10 @@ index 9f22d63..e3ff90b 100644
  }
  
  /** A result in a checker's store: the record of its type, and the files of its diagnostics. */
-@@ -1921,6 +2339,95 @@ function forgetExport(exporter: Exporter): void {
-   exporter.failure = undefined;
- }
- 
-+/**
-+ * Runs `compute` for the result keyed `key` in `table`, then exports and posts it if it can be shared and took long
-+ * enough, unless another checker posted it meanwhile. Nothing is written for the others before: a checker that finds
-+ * no result computes its own.
-+ */
+@@ -2134,6 +2552,95 @@
+  * enough, unless another checker posted it meanwhile. Nothing is written for the others before: a checker that finds
+  * no result computes its own.
+  */
 +function computeAndPostPriced(
 +  sharing: ThreadSharing,
 +  table: ResultTable,
@@ -1004,10 +997,15 @@ index 9f22d63..e3ff90b 100644
 +  return t;
 +}
 +
- /**
-  * Runs `compute` for the result keyed `key` in `table`, then exports and posts it if it can be shared and took long
-  * enough, unless another checker posted it meanwhile. Nothing is written for the others before: a checker that finds
-@@ -1973,12 +2480,16 @@ function computeAndPost(
++/**
++ * Runs `compute` for the result keyed `key` in `table`, then exports and posts it if it can be shared and took long
++ * enough, unless another checker posted it meanwhile. Nothing is written for the others before: a checker that finds
++ * no result computes its own.
++ */
+ function computeAndPost(
+   sharing: ThreadSharing,
+   table: ResultTable,
+@@ -2209,12 +2716,16 @@
  export function threadTypeOfSymbol(c: Checker, symbol: Symbol): Type {
    const sharing = c.threadSharing!;
    if (!sharing.timing || sharing.depth > 0 || c.symbolTypes.get(getSymbolId(symbol)) !== undefined)
@@ -1026,8 +1024,8 @@ index 9f22d63..e3ff90b 100644
    } finally {
      sharing.depth--;
      sharing.addOutermost(performance.now() - start);
-@@ -2040,6 +2551,86 @@ function threadTypeOfSymbolWorker(c: Checker, symbol: Symbol): Type {
-   return computeAndPost(sharing, table, sharing.typeFiles, id, symbol, undefined);
+@@ -2285,6 +2796,86 @@
+   return computeAndPost(sharing, table, sharing.typeFiles, id, symbol, undefined, file);
  }
  
 +function threadTypeOfSymbolWorkerPriced(c: Checker, symbol: Symbol): Type {
@@ -1113,7 +1111,7 @@ index 9f22d63..e3ff90b 100644
  /** Notes that the computation in progress used the cached return type of `sig` (see `ThreadSharing.typeFiles`). */
  export function noteReturnTypeUse(c: Checker, sig: Signature): void {
    const sharing = c.threadSharing!;
-@@ -2049,12 +2640,17 @@ export function noteReturnTypeUse(c: Checker, sig: Signature): void {
+@@ -2294,12 +2885,17 @@
  
  export function threadReturnType(c: Checker, sig: Signature): Type {
    const sharing = c.threadSharing!;
@@ -1133,8 +1131,8 @@ index 9f22d63..e3ff90b 100644
    } finally {
      sharing.depth--;
      sharing.addOutermost(performance.now() - start);
-@@ -2107,6 +2703,78 @@ function threadReturnTypeWorker(c: Checker, sig: Signature): Type {
-   return computeAndPost(sharing, table, sharing.returnFiles, key, undefined, sig);
+@@ -2358,6 +2954,78 @@
+   return computeAndPost(sharing, table, sharing.returnFiles, key, undefined, sig, file);
  }
  
 +function threadReturnTypeWorkerPriced(c: Checker, sig: Signature): Type {
@@ -1212,7 +1210,7 @@ index 9f22d63..e3ff90b 100644
  // ---- Records in a checker's store
  //
  // Records travel between threads as numbers and strings only: a class instance received in a worker makes the native
-@@ -2388,6 +3056,9 @@ class StoreReader {
+@@ -2641,6 +3309,9 @@
    readonly types: Type[] = [];
    readonly symbols: (Symbol | undefined)[] = [];
    readonly built: number[] = [];
@@ -1222,7 +1220,7 @@ index 9f22d63..e3ff90b 100644
  
    constructor(sharing: ThreadSharing, producer: number) {
      this.sharing = sharing;
-@@ -2428,6 +3099,86 @@ class StoreReader {
+@@ -2681,6 +3352,87 @@
      return record;
    }
  
@@ -1232,6 +1230,7 @@ index 9f22d63..e3ff90b 100644
 +    const translator = this.translator;
 +    const needed = new Set<number>();
 +    const stack = [root];
++    this.stopped = false;
 +    this.walked = 0;
 +    this.builtCount = 0;
 +    while (stack.length > 0) {
@@ -1306,10 +1305,10 @@ index 9f22d63..e3ff90b 100644
 +    return this.types[root]!;
 +  }
 +
-   /** The translation of record `root` and the records it needs; undefined if one can't be translated here. */
-   translate(root: number): Type | undefined {
-     const c = this.sharing.c;
-@@ -2494,3 +3245,429 @@ class StoreReader {
+   /**
+    * The translation of record `root` and the records it needs; undefined if one can't be translated here, or if the
+    * records it would build pass `budget`.
+@@ -2755,3 +3507,429 @@
      return this.types[root]!;
    }
  }

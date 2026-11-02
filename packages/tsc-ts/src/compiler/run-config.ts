@@ -72,12 +72,21 @@ export class RunConfig {
   /** Whether checker threads share the results they compute (`shared-results.ts`). */
   share = false;
   shareSource: Source = Source.Default;
+  /**
+   * Whether a sharing run's posts are cost-bounded (`shared-results.ts`): it posts only results another checker
+   * demanded and budgets the records a post adds and a take builds. Off by default: a run that gains nothing by
+   * it pays for the demand bits and the budget, and no signal separates the projects that gain from those that
+   * do not, so a project turns it on by measuring it (`learn`).
+   */
+  bounded = false;
+  boundedSource: Source = Source.Default;
   /** The threads that parse and bind the program's files ahead of it (`parallel-parse.ts`). */
   parseThreads = 1;
   parseSource: Source = Source.Default;
   /** The pin a value came from, for the section (`--checkers`, `TSC_TS_SHARE`, `TSC_TS_PARSE_THREADS`). */
   checkersPin: string | undefined = undefined;
   sharePin: string | undefined = undefined;
+  boundedPin: string | undefined = undefined;
   parsePin: string | undefined = undefined;
   /** How much of the selection may run (`TSC_TS_AUTO`); `Off` leaves every value to the pins and defaults. */
   automaticity = Automaticity.On;
@@ -86,6 +95,7 @@ export class RunConfig {
   /** Why each value was chosen, for the section's `automatic:` reason on that setting's line. */
   readonly checkersReasons: string[] = [];
   readonly shareReasons: string[] = [];
+  readonly boundedReasons: string[] = [];
   readonly parseReasons: string[] = [];
   /** Whether this run may write a run record (`run-records.ts`), and why not where it may not. */
   records = true;
@@ -127,13 +137,24 @@ export interface Pins {
   readonly automaticity: Automaticity;
   /** `TSC_TS_SHARE`: sharing pinned on or off; `undefined` when the variable is not set. */
   readonly share: boolean | undefined;
+  /** `TSC_TS_SHARE_BOUNDED`: bounded posting pinned on or off; `undefined` when the variable is not set. */
+  readonly bounded: boolean | undefined;
   /** `TSC_TS_PARSE_THREADS`: the parse threads pinned; `undefined` when not set or not a whole number above 0. */
   readonly parseThreads: number | undefined;
 }
 
 /** `TSC_TS_SHARE` parsed: `1` pins sharing on, `0` pins it off, and anything else pins nothing. */
 export function sharePin(env: Record<string, string | undefined>): boolean | undefined {
-  const value = env.TSC_TS_SHARE;
+  return binaryPin(env.TSC_TS_SHARE);
+}
+
+/** `TSC_TS_SHARE_BOUNDED` parsed: `1` pins bounded posting on, `0` pins it off, anything else pins nothing. */
+export function boundedPin(env: Record<string, string | undefined>): boolean | undefined {
+  return binaryPin(env.TSC_TS_SHARE_BOUNDED);
+}
+
+/** `1` as true, `0` as false, and anything else (including unset) as no pin. */
+function binaryPin(value: string | undefined): boolean | undefined {
   return value === '1' ? true : value === '0' ? false : undefined;
 }
 
@@ -151,6 +172,7 @@ export function pinsOf(env: Record<string, string | undefined>): Pins {
             ? Automaticity.Explore
             : Automaticity.On,
     share: sharePin(env),
+    bounded: boundedPin(env),
     parseThreads: Number.isInteger(threads) && threads >= 1 ? threads : undefined,
   };
 }
@@ -248,7 +270,8 @@ export const shareWindow = 300;
  * Learning (DESIGN 3, 4, 5). A run with a record of the project's earlier runs compares the configurations
  * those samples measured with the ones the static rules choose. It needs three usable samples of each arm
  * before it trusts a comparison (`comparisonSamples`), and a configuration beats another only when it is
- * faster by a margin that its own noise cannot explain (`marginOf`, DESIGN 4.1: 3% at least, twice the
+ * faster by the margin the runs around each sample leave (`beatsPaired`, DESIGN 4.1: 3% at least, twice the
+ * standard error of the paired gains), or, where the record has too few pairs, by `marginOf` (3% at least, twice the
  * larger arm's relative MAD). Adopted configurations are re-measured by control runs and dropped by the
  * fast-revert rule; a configuration the signals leave uncertain is tried in a real run, at most one in
  * `exploreRuns` and never when the record shows it loses.
@@ -317,10 +340,119 @@ export function usableSamples(record: RunRecord): RecordSample[] {
   return record.samples.filter((sample) => sample.load <= usableLoad);
 }
 
-/** The check times of the samples that checked with `checkers` checkers and sharing `share`. */
-export function checkTimes(samples: readonly RecordSample[], checkers: number, share: boolean): number[] {
+/** A configuration a paired comparison names: the three settings a sample's check time depends on. */
+export interface CheckArm {
+  readonly checkers: number;
+  readonly share: boolean;
+  readonly bounded: boolean;
+}
+
+/** Whether `sample` checked with `arm`. */
+function checkedWithArm(sample: RecordSample, arm: CheckArm): boolean {
+  return sample.checkers === arm.checkers && sample.share === arm.share && (sample.bounded ?? false) === arm.bounded;
+}
+
+/**
+ * The relative gains of each sample of `better` against the sample of `worse` nearest to it in record order: `1 -
+ * better/worse` for every sample of the first arm that has one of the second to compare with. Runs minutes apart
+ * meet the same memory pressure — the page cache, the allocator, the garbage collector's footprint — and that
+ * pressure moves a whole session's runs together, so the spread of either arm's samples over-counts it
+ * (`noiseOf` reads that spread). A difference against the nearest run of the other arm cancels it, which is what
+ * this reads. A tie goes to the earlier sample, the run the alternative was tried after.
+ *
+ * The record may alternate the two arms or space them `exploreRuns` apart; either way a sample is compared with
+ * the record's nearest evidence of the other arm, not with a global median. Each sample of `worse` pairs once:
+ * three alternative samples must read three runs of the baseline, so a record with one baseline sample gives one
+ * gain however many alternative samples it has.
+ */
+export function pairedGains(samples: readonly RecordSample[], better: CheckArm, worse: CheckArm): number[] {
+  const gains: number[] = [];
+  const paired: boolean[] = [];
+  for (let i = 0; i < samples.length; i++) {
+    const sample = samples[i]!;
+    if (!checkedWithArm(sample, better)) continue;
+    let near = -1;
+    for (let j = 0; j < samples.length; j++) {
+      if (j === i || paired[j] || !checkedWithArm(samples[j]!, worse)) continue;
+      const distance = Math.abs(j - i);
+      if (near < 0 || distance < Math.abs(near - i) || (distance === Math.abs(near - i) && j < near)) near = j;
+    }
+    if (near < 0) continue;
+    paired[near] = true;
+    const worseMs = samples[near]!.checkMs;
+    if (worseMs > 0) gains.push(1 - sample.checkMs / worseMs);
+  }
+  return gains;
+}
+
+/**
+ * How much faster `better` is than `worse`, from the gains of `pairedGains`: `0.11` for 11% faster, `undefined`
+ * where the record cannot show it. Two views must agree. The median paired gain must clear `marginFloor` and
+ * twice the standard error of the median of the gains, 2 × 1.2533 × 1.4826 × their median absolute deviation /
+ * √(the pairs): the spread two neighbouring runs do not share is what one pair is worth, and a median of several
+ * pairs is closer than that. The arms' medians must also differ by the floor, so a gain made up of a few lucky
+ * pairs cannot carry a comparison the record as a whole does not show. The comparison needs `comparisonSamples`
+ * pairs, and `pairedGains` pairs each baseline sample once, so that is three usable samples of each arm.
+ */
+export function beatsPaired(samples: readonly RecordSample[], better: CheckArm, worse: CheckArm): number | undefined {
+  const gains = pairedGains(samples, better, worse);
+  if (gains.length < comparisonSamples) return undefined;
+  return pairedBeat(samples, better, worse, gains);
+}
+
+/** `beatsPaired` over `gains`, which the caller has already found to be `comparisonSamples` or more. */
+function pairedBeat(
+  samples: readonly RecordSample[],
+  better: CheckArm,
+  worse: CheckArm,
+  gains: readonly number[],
+): number | undefined {
+  const median = medianOf(gains)!;
+  const spread = 1.4826 * (medianOf(gains.map((gain) => Math.abs(gain - median))) ?? 0);
+  if (median < Math.max(marginFloor, (2 * 1.2533 * spread) / Math.sqrt(gains.length))) return undefined;
+  const b = medianOf(checkTimes(samples, better.checkers, better.share, better.bounded));
+  const w = medianOf(checkTimes(samples, worse.checkers, worse.share, worse.bounded));
+  if (b === undefined || w === undefined || b <= 0 || w <= 0 || b > w * (1 - marginFloor)) return undefined;
+  return median;
+}
+
+/**
+ * How much faster `better` is than `worse` on the record's evidence: the median paired gain where the record has
+ * enough pairs of neighbouring samples (`beatsPaired`), and the arm medians by `marginOf` only where it has too
+ * few pairs to read one (`beatsBy`). A paired comparison that found the pairs and still could not show the gain
+ * is the record's verdict on the alternative, and the fallback does not overrule it.
+ *
+ * `considered` is the alternative's samples with the rejected configuration's left out; the static arm is
+ * compared over every sample the record kept.
+ */
+function beats(
+  samples: readonly RecordSample[],
+  considered: readonly RecordSample[],
+  better: CheckArm,
+  worse: CheckArm,
+): number | undefined {
+  const gains = pairedGains(considered, better, worse);
+  if (gains.length >= comparisonSamples) return pairedBeat(considered, better, worse, gains);
+  return beatsBy(
+    checkTimes(considered, better.checkers, better.share, better.bounded),
+    checkTimes(samples, worse.checkers, worse.share, worse.bounded),
+  );
+}
+
+/**
+ * The check times of the samples that checked with `checkers` checkers, sharing `share`, and cost-bounded posting
+ * `bounded`. Every comparison names all three arms: a sample without the field is an unbounded one.
+ */
+export function checkTimes(
+  samples: readonly RecordSample[],
+  checkers: number,
+  share: boolean,
+  bounded: boolean,
+): number[] {
   const times: number[] = [];
-  for (const sample of samples) if (sample.checkers === checkers && sample.share === share) times.push(sample.checkMs);
+  for (const sample of samples)
+    if (sample.checkers === checkers && sample.share === share && (sample.bounded === true) === bounded)
+      times.push(sample.checkMs);
   return times;
 }
 
@@ -344,10 +476,16 @@ function revertMargin(adopted: readonly number[], control: readonly number[]): n
  * control samples by more than the margin: the adopted choice has gone bad and reverts now, without
  * waiting for three new control samples (DESIGN 4.2).
  */
-export function fastRevert(samples: readonly RecordSample[], checkers: number, share: boolean): boolean {
+export function fastRevert(
+  samples: readonly RecordSample[],
+  checkers: number,
+  share: boolean,
+  bounded: boolean,
+): boolean {
   const adopted: number[] = [];
   for (const sample of samples)
-    if (sample.checkers === checkers && sample.share === share) adopted.push(sample.checkMs);
+    if (sample.checkers === checkers && sample.share === share && (sample.bounded === true) === bounded)
+      adopted.push(sample.checkMs);
   if (adopted.length < comparisonSamples) return false;
   const last = adopted.slice(-comparisonSamples);
   const control: number[] = [];
@@ -360,9 +498,18 @@ export function fastRevert(samples: readonly RecordSample[], checkers: number, s
 }
 
 /** The window a sharing run reads its counters in: a tenth of the recorded check, at least 200 ms. */
-export function shareWindowOf(record: RunRecord | undefined, checkers: number, share: boolean): number {
+export function shareWindowOf(
+  record: RunRecord | undefined,
+  checkers: number,
+  share: boolean,
+  bounded: boolean,
+): number {
   if (record === undefined) return shareWindow;
-  const times = checkTimes(usableSamples(record), checkers, share);
+  const samples = usableSamples(record);
+  const times =
+    checkTimes(samples, checkers, share, bounded).length > 0
+      ? checkTimes(samples, checkers, share, bounded)
+      : checkTimes(samples, checkers, share, !bounded);
   const median = medianOf(times);
   if (median === undefined) return shareWindow;
   return Math.max(200, Math.round(median / 10));
@@ -452,6 +599,11 @@ export function preParseConfig(
     config.share = pins.share;
     config.shareSource = Source.Pinned;
     config.sharePin = 'TSC_TS_SHARE';
+  }
+  if (pins.bounded !== undefined) {
+    config.bounded = pins.bounded;
+    config.boundedSource = Source.Pinned;
+    config.boundedPin = 'TSC_TS_SHARE_BOUNDED';
   }
   if (env.TSC_TS_CACHE === '0') {
     config.records = false;
@@ -545,9 +697,11 @@ export const memoryShare = 0.85;
  * Where the run read the project's record, the samples it holds decide more: an adopted configuration
  * stays until the static one beats it and reverts early when it stops paying (`learn`), a configuration
  * the signals leave uncertain is tried, and a run in every `controlRuns` re-measures the static choice.
+ * That includes bounded posting (`RunConfig.bounded`), which no signal decides and which a project learns
+ * from its own runs: T3 web's checks were 7% faster with it at 16 checkers and T3 server's 8-9% slower.
  *
- * Sharing is what `TSC_TS_SHARE` pins. The decisions are those of a run before this module existed, and
- * what `TSC_TS_AUTO=0` keeps.
+ * Sharing is what `TSC_TS_SHARE` pins, and bounded posting `TSC_TS_SHARE_BOUNDED`. The decisions are those
+ * of a run before this module existed, and what `TSC_TS_AUTO=0` keeps.
  */
 export function decideCheck(config: RunConfig, signals: CheckSignals, decision: CheckDecision = noSharing): number {
   const count = signals.count;
@@ -570,7 +724,7 @@ export function decideCheck(config: RunConfig, signals: CheckSignals, decision: 
   }
   config.shape = decision.shape;
   if (learns(config.automaticity) && config.record !== undefined) learn(config, signals, decision, cut);
-  config.shareWindowMs = shareWindowOf(config.record, config.checkers, config.share);
+  config.shareWindowMs = shareWindowOf(config.record, config.checkers, config.share, config.bounded);
   return config.checkers;
 }
 
@@ -583,7 +737,8 @@ export function decideCheck(config: RunConfig, signals: CheckSignals, decision: 
  * - one run in `controlRuns`, or the first after `controlAfterSeconds`, uses the static choice and is
  *   recorded with role `control`, so the baseline the keep rule reads stays current;
  * - a configuration with `comparisonSamples` usable samples that beats the static choice by the margin
- *   is adopted;
+ *   (`beats`) is adopted, one setting at a time: sharing, the checker count, then bounded posting at the
+ *   count and sharing adopted before it;
  * - where the signals leave a setting uncertain and the record has fewer than `comparisonSamples` of the
  *   alternative, one run in `exploreRuns` tries it, with role `explore`.
  *
@@ -607,6 +762,9 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
   const parseDefault = defaultParseThreads(signals.count);
   const checkersPinned = config.checkersSource === Source.Pinned;
   const sharePinned = config.shareSource === Source.Pinned;
+  const boundedPinned = config.boundedSource === Source.Pinned;
+  // The static choice is unbounded posting: a run with no record, or with `TSC_TS_AUTO=static`, never bounds it.
+  const staticBounded = boundedPinned ? config.bounded : false;
   const parsePinned = config.parseSource === Source.Pinned;
   const before = config.role;
   const exploredBefore = before === 'explore';
@@ -616,10 +774,18 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
   // the compiler cannot name at its call sites, which scriptc's native build reads as a dynamic store
   // and answers by storing every class's number fields as doubles (`scripts/check-int32-fields.mjs`).
   let chosen: RecordChoice = changed
-    ? { checkers: staticCheckers, share: staticShare, parseThreads: parseDefault, source: 'default', since: 0 }
+    ? {
+        checkers: staticCheckers,
+        share: staticShare,
+        bounded: staticBounded,
+        parseThreads: parseDefault,
+        source: 'default',
+        since: 0,
+      }
     : {
         checkers: record.chosen.checkers,
         share: record.chosen.share,
+        bounded: record.chosen.bounded,
         parseThreads: record.chosen.parseThreads,
         source: record.chosen.source,
         since: record.chosen.since,
@@ -627,10 +793,13 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
 
   let checkers = staticCheckers;
   let share = staticShare;
+  let bounded = staticBounded;
   let checkersLearned = false;
   let shareLearned = false;
+  let boundedLearned = false;
   let checkersGain: number | undefined = undefined;
   let shareGain: number | undefined = undefined;
+  let boundedGain: number | undefined = undefined;
   let parseChosen = parseDefault;
   let adopted = false;
   let role: 'chosen' | 'control' | 'explore' = before;
@@ -643,38 +812,44 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
     const learned = chosen.source === 'learned';
     const wantCheckers = checkersPinned ? staticCheckers : chosen.checkers;
     const wantShare = sharePinned ? staticShare : chosen.share;
+    const wantBounded = boundedPinned ? staticBounded : chosen.bounded === true;
     if (
       learned &&
-      (wantCheckers !== staticCheckers || wantShare !== staticShare) &&
+      (wantCheckers !== staticCheckers || wantShare !== staticShare || wantBounded !== staticBounded) &&
       fits(wantCheckers, wantShare, decision, cpus, samples, decision.memoryBytes)
     ) {
-      const own = checkTimes(samples, wantCheckers, wantShare);
-      const baseline = checkTimes(samples, staticCheckers, staticShare);
+      const own = checkTimes(samples, wantCheckers, wantShare, wantBounded);
+      const baseline = checkTimes(samples, staticCheckers, staticShare, staticBounded);
       const staticBeats = beatsBy(baseline, own) !== undefined;
-      const fellBehind = !staticBeats && fastRevert(samples, wantCheckers, wantShare);
+      const fellBehind = !staticBeats && fastRevert(samples, wantCheckers, wantShare, wantBounded);
       if (!staticBeats && !fellBehind) {
         checkers = wantCheckers;
         share = wantShare;
+        bounded = wantBounded;
         checkersLearned = wantCheckers !== staticCheckers;
         shareLearned = wantShare !== staticShare;
+        boundedLearned = wantBounded !== staticBounded;
         const gain = beatsBy(own, baseline);
         if (checkersLearned) checkersGain = gain;
         if (shareLearned) shareGain = gain;
+        if (boundedLearned) boundedGain = gain;
       }
-      if (fellBehind) rejection = { checkers: wantCheckers, share: wantShare, run: record.runs };
+      if (fellBehind) rejection = { checkers: wantCheckers, share: wantShare, bounded: wantBounded, run: record.runs };
     }
     // 2. A control run re-measures the static choice, and changes no choice.
     const learnedBefore =
       learned &&
-      (chosen.checkers !== staticCheckers || chosen.share !== staticShare || chosen.parseThreads !== parseDefault);
-    if (
-      learnedBefore &&
-      (record.runs - record.lastControl >= controlRuns || controlIsStale(record, samples, decision.now))
-    ) {
+      (chosen.checkers !== staticCheckers ||
+        chosen.share !== staticShare ||
+        (chosen.bounded === true) !== staticBounded ||
+        chosen.parseThreads !== parseDefault);
+    if (learnedBefore && (record.runs - record.lastControl >= controlRuns || controlIsStale(record, decision.now))) {
       checkers = staticCheckers;
       share = staticShare;
+      bounded = staticBounded;
       checkersLearned = false;
       shareLearned = false;
+      boundedLearned = false;
       parseChosen = parseDefault;
       role = 'control';
     } else {
@@ -682,8 +857,13 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
       if (!sharePinned && !shareLearned) {
         const alternative = !staticShare;
         if (fits(checkers, alternative, decision, cpus, samples, decision.memoryBytes)) {
-          const own = checkTimes(samplesFor(samples, rejection, checkers, alternative), checkers, alternative);
-          const gain = beatsBy(own, checkTimes(samples, checkers, staticShare));
+          const own = samplesFor(samples, rejection, checkers, alternative, bounded);
+          const gain = beats(
+            samples,
+            own,
+            { checkers, share: alternative, bounded },
+            { checkers, share: staticShare, bounded },
+          );
           if (gain !== undefined) {
             share = alternative;
             shareLearned = true;
@@ -696,8 +876,13 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
         for (const candidate of countCandidates(staticCheckers, cpus)) {
           if (candidate === checkers || !fits(candidate, share, decision, cpus, samples, decision.memoryBytes))
             continue;
-          const own = checkTimes(samplesFor(samples, rejection, candidate, share), candidate, share);
-          const gain = beatsBy(own, checkTimes(samples, staticCheckers, staticShare));
+          const own = samplesFor(samples, rejection, candidate, share, bounded);
+          const gain = beats(
+            samples,
+            own,
+            { checkers: candidate, share, bounded },
+            { checkers: staticCheckers, share: staticShare, bounded },
+          );
           if (gain !== undefined) {
             checkers = candidate;
             checkersLearned = true;
@@ -705,6 +890,20 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
             adopted = true;
             break;
           }
+        }
+      }
+      // 3b. Bounded posting is adopted where the project's runs measured it faster than Phase 1's posting at the
+      // count and sharing this run uses. It is the one setting no signal separates: T3 web gained 7% by it and T3
+      // server lost 8-9%, and both projects are library-bound at 16 checkers. A record with no bounded samples, or
+      // with samples that lose, leaves it off.
+      if (!boundedPinned && !boundedLearned && share && decision.possible) {
+        const own = samplesFor(samples, rejection, checkers, share, true);
+        const gain = beats(samples, own, { checkers, share, bounded: true }, { checkers, share, bounded: false });
+        if (gain !== undefined) {
+          bounded = true;
+          boundedLearned = true;
+          boundedGain = gain;
+          adopted = true;
         }
       }
       // 4. Parse threads are chosen for the next run here; this run parsed with the choice its record had.
@@ -730,27 +929,46 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
       // 5. A setting the signals leave uncertain is tried in this run, one dimension at a time, unless
       // a pin fixed it.
       if (role === 'chosen' && !adopted && config.explore && !changed) {
-        const checkMs = medianOf(checkTimes(samples, checkers, share));
+        const checkMs = medianOf(checkTimes(samples, checkers, share, bounded));
         if (record.runs - record.lastExplore >= exploreRuns && checkMs !== undefined && checkMs >= exploreCheckMs) {
           const shareAlt = !share;
+          // The dimensions are tried in order and the first with an alternative left takes the run: a band whose
+          // alternatives are all closed, such as a checker count whose candidates have measured, leaves the next
+          // one to be tried rather than ending exploration.
+          let exploring = false;
           if (
             !sharePinned &&
             sharingBand(signals) &&
             fits(checkers, shareAlt, decision, cpus, samples, decision.memoryBytes) &&
-            openCandidate(samples, checkers, shareAlt, checkers, share)
+            openCandidate(samples, checkers, shareAlt, bounded, checkers, share, bounded)
           ) {
             share = shareAlt;
             role = 'explore';
-          } else if (!checkersPinned && checkersBand(signals)) {
+            exploring = true;
+          }
+          if (!exploring && !checkersPinned && checkersBand(signals)) {
             for (const candidate of countCandidates(staticCheckers, cpus)) {
               if (candidate === checkers || !fits(candidate, share, decision, cpus, samples, decision.memoryBytes))
                 continue;
-              if (openCandidate(samples, candidate, share, checkers, share)) {
+              if (openCandidate(samples, candidate, share, bounded, checkers, share, bounded)) {
                 checkers = candidate;
                 role = 'explore';
+                exploring = true;
                 break;
               }
             }
+          }
+          if (
+            !exploring &&
+            !boundedPinned &&
+            share &&
+            decision.possible &&
+            openCandidate(samples, checkers, share, true, checkers, share, false)
+          ) {
+            // Bounded posting is the last dimension exploration tries: it changes no diagnostics and no other
+            // setting, and a run that tries it pays a few percent when it does not pay back.
+            bounded = true;
+            role = 'explore';
           }
         }
       }
@@ -760,17 +978,27 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
   // Apply what the run uses, and what the record keeps as chosen.
   config.checkers = checkers;
   config.share = share;
+  config.bounded = bounded;
   config.role = role;
   config.checkersSource = checkersLearned ? Source.Learned : config.checkersSource;
   if (checkersLearned)
-    config.checkersReasons.push(learnedReason('check', checkersGain, checkTimes(samples, checkers, share).length));
+    config.checkersReasons.push(
+      learnedReason('check', checkersGain, checkTimes(samples, checkers, share, bounded).length),
+    );
   if (shareLearned) {
     config.shareSource = Source.Learned;
     config.shareReasons.length = 0;
-    config.shareReasons.push(learnedReason('check', shareGain, checkTimes(samples, checkers, share).length));
+    config.shareReasons.push(learnedReason('check', shareGain, checkTimes(samples, checkers, share, bounded).length));
   } else if (!share && config.shareSource === Source.Static) {
     config.shareSource = Source.Default;
     config.shareReasons.length = 0;
+  }
+  if (boundedLearned) {
+    config.boundedSource = Source.Learned;
+    config.boundedReasons.length = 0;
+    config.boundedReasons.push(
+      learnedReason('bounded', boundedGain, checkTimes(samples, checkers, share, bounded).length),
+    );
   }
   if (role === 'explore') {
     // The run explores the dimension it changed: the parse threads where the block above did not run.
@@ -780,20 +1008,26 @@ function learn(config: RunConfig, signals: CheckSignals, decision: CheckDecision
     } else if (checkers !== staticCheckers) {
       config.checkersSource = Source.Explore;
       config.checkersReasons.length = 0;
+    } else if (bounded !== staticBounded) {
+      config.boundedSource = Source.Explore;
+      config.boundedReasons.length = 0;
     }
   } else if (role === 'control') {
     // A control run uses the static checker count and sharing; the parse threads were fixed before the
     // program was bound, and a run that parsed with learned ones says so.
     config.checkersSource = Source.Control;
     config.shareSource = Source.Control;
+    config.boundedSource = Source.Control;
     config.checkersReasons.length = 0;
     config.shareReasons.length = 0;
+    config.boundedReasons.length = 0;
   }
   const chosenNow: RecordChoice = {
     checkers,
     share,
+    bounded,
     parseThreads: parseChosen,
-    source: checkersLearned || shareLearned || parseChosen !== parseDefault ? 'learned' : 'default',
+    source: checkersLearned || shareLearned || boundedLearned || parseChosen !== parseDefault ? 'learned' : 'default',
     since: 0,
   };
   config.chosen = role === 'chosen' ? chosenNow : chosen;
@@ -810,8 +1044,15 @@ function samplesFor(
   rejection: RecordRejection | undefined,
   checkers: number,
   share: boolean,
+  bounded: boolean,
 ): readonly RecordSample[] {
-  if (rejection === undefined || rejection.checkers !== checkers || rejection.share !== share) return samples;
+  if (
+    rejection === undefined ||
+    rejection.checkers !== checkers ||
+    rejection.share !== share ||
+    (rejection.bounded === true) !== bounded
+  )
+    return samples;
   return samples.filter((sample) => sample.run > rejection.run);
 }
 
@@ -847,17 +1088,23 @@ function peakFits(
 function controlDue(record: RunRecord | undefined, automaticity: Automaticity, now: number): boolean {
   if (!learns(automaticity) || record === undefined || record.chosen.source !== 'learned') return false;
   if (record.runs - record.lastControl >= controlRuns) return true;
-  return controlIsStale(record, usableSamples(record), now);
+  return controlIsStale(record, now);
 }
 
-/** Whether a control run is due: none yet, or the last one is older than `controlAfterSeconds` (DESIGN 4.2). */
-function controlIsStale(record: RunRecord, samples: readonly RecordSample[], now: number | undefined): boolean {
+/**
+ * Whether a control run is due: none yet, or the last one is older than `controlAfterSeconds` (DESIGN 4.2).
+ * This reads every sample the record kept, not only the usable ones: when the run adopted a choice or last
+ * measured it is a fact about the record, and a busy run is still a run. Filtering by load here would date the
+ * adoption from nothing whenever that run's load was above the gate, and every run after it would be a control
+ * run.
+ */
+function controlIsStale(record: RunRecord, now: number | undefined): boolean {
   if (now === undefined) return false;
   let last: number | undefined = undefined;
-  for (const sample of samples)
+  for (const sample of record.samples)
     if (sample.role === 'control' && (last === undefined || sample.at > last)) last = sample.at;
   if (last === undefined) {
-    for (const sample of samples)
+    for (const sample of record.samples)
       if (sample.run === record.chosen.since && (last === undefined || sample.at > last)) last = sample.at;
   }
   return last === undefined || now - last >= controlAfterSeconds;
@@ -871,12 +1118,14 @@ function openCandidate(
   samples: readonly RecordSample[],
   checkers: number,
   share: boolean,
+  bounded: boolean,
   baselineCheckers: number,
   baselineShare: boolean,
+  baselineBounded: boolean,
 ): boolean {
-  const own = checkTimes(samples, checkers, share);
+  const own = checkTimes(samples, checkers, share, bounded);
   if (own.length >= comparisonSamples) return false;
-  return !loses(own, checkTimes(samples, baselineCheckers, baselineShare));
+  return !loses(own, checkTimes(samples, baselineCheckers, baselineShare, baselineBounded));
 }
 
 /** Whether an arm with at least two samples lost to `baseline` by the margin. */
@@ -945,11 +1194,10 @@ function recordSharingBand(record: RunRecord): boolean {
 }
 
 /** How a learned choice reads in the section: `check 21% faster over 5 runs`, `parse 4% faster over 3 runs`. */
-function learnedReason(dimension: 'check' | 'parse', gain: number | undefined, runs: number): string {
+function learnedReason(dimension: 'check' | 'parse' | 'bounded', gain: number | undefined, runs: number): string {
   const count = runs === 1 ? '1 run' : `${runs} runs`;
-  return gain === undefined
-    ? `${dimension} measured over ${count}`
-    : `${dimension} ${percent(gain)}% faster over ${count}`;
+  const label = dimension === 'parse' ? 'parse' : dimension === 'bounded' ? 'bounded posting' : 'check';
+  return gain === undefined ? `${label} measured over ${count}` : `${label} ${percent(gain)}% faster over ${count}`;
 }
 
 /** The parse threads the record adopted, and why, where this run may use them (`learnedParseThreads`). */
@@ -983,7 +1231,9 @@ function exploreParseThreads(
   if (!explore || record === undefined || record.chosen.source === 'learned') return undefined;
   if (record.runs - record.lastExplore < exploreRuns) return undefined;
   const samples = usableSamples(record);
-  const checkMs = medianOf(checkTimes(samples, record.chosen.checkers, record.chosen.share));
+  const checkMs = medianOf(
+    checkTimes(samples, record.chosen.checkers, record.chosen.share, record.chosen.bounded === true),
+  );
   if (checkMs === undefined || checkMs < exploreCheckMs) return undefined;
   if (openSetting(record, samples)) return undefined;
   for (const candidate of parseCandidates(parseDefault, availableCpus())) {
@@ -1000,9 +1250,10 @@ function exploreParseThreads(
  */
 function openSetting(record: RunRecord, samples: readonly RecordSample[]): boolean {
   const chosen = record.chosen;
+  const chosenBounded = chosen.bounded === true;
   const cpus = Math.min(availableCpus(), maxAutoCheckers);
   const open = (checkers: number, share: boolean) =>
-    openCandidate(samples, checkers, share, chosen.checkers, chosen.share);
+    openCandidate(samples, checkers, share, chosenBounded, chosen.checkers, chosen.share, chosenBounded);
   if (recordSharingBand(record) && open(chosen.checkers, !chosen.share)) return true;
   if (!bandOf(record.shape.library, record.shape.own)) return false;
   for (const candidate of countCandidates(chosen.checkers, cpus)) if (open(candidate, chosen.share)) return true;
@@ -1067,6 +1318,14 @@ export function reportRunConfig(out: RunConfigOutput, config: RunConfig, records
         config.sharePin,
         `TSC_TS_SHARE=${config.share ? '1' : '0'}`,
         config.shareReasons,
+      ) +
+      suggestion(
+        'Bounded posting',
+        config.bounded ? 'on' : 'off',
+        config.boundedSource,
+        config.boundedPin,
+        `TSC_TS_SHARE_BOUNDED=${config.bounded ? '1' : '0'}`,
+        config.boundedReasons,
       ) +
       suggestion(
         'Parse threads',

@@ -7,7 +7,7 @@
 // template, string mapping and substitution types), down to types every checker can get by itself (intrinsic types,
 // declared types of symbols, types of declarations and type nodes). Another checker translates the records through
 // its own interning caches, so each type still has one object in it.
-import { getSymbol, type Node, NodeVisitor, type SourceFile } from './ast.js';
+import { getSymbol, getType, type Node, NodeVisitor, type SourceFile } from './ast.js';
 import { getSourceFileOfNode } from './binder-utilities.js';
 import type { Checker } from './checker.js';
 import { getDeclaredTypeOfSymbol } from './checker-declared-types.js';
@@ -284,6 +284,9 @@ export function initialTypes(c: Checker): Type[] {
   ];
 }
 
+/** The reason an export stops at its budget (`Exporter.limit`), which `post` returns: the result is not posted. */
+export const budgetFailure = 'export budget';
+
 /** A checker's `Exporter.mergedOrigins`, kept while its merged symbols stay the same. */
 export class MergedOrigins {
   origins = new Map<Symbol, number>();
@@ -303,10 +306,16 @@ export class Exporter {
   /** The types and properties the export in progress gave indexes, which a failed export forgets again. */
   readonly addedTypes: Type[] = [];
   readonly addedProperties: Symbol[] = [];
+  /**
+   * The most records the export in progress may add (`ThreadSharing.post` prices it with `kappa`); past it the export
+   * fails and the result is not posted.
+   */
+  limit = Number.POSITIVE_INFINITY;
 
-  /** Appends `record`; its index. */
+  /** Appends `record`; its index, or -1 if the result is over its export budget. */
   push(record: PortableRecord): number {
     const index = this.base + this.records.length;
+    if (index >= this.limit) return this.fail(budgetFailure);
     this.records.push(record);
     return index;
   }
@@ -408,6 +417,7 @@ export class Exporter {
       for (const node of info.components) if (!this.sharedNode(node)) return -1;
     }
     const index = this.push(record);
+    if (index < 0) return index;
     this.indexes.set(t, index);
     this.addedTypes.push(t);
     return index;
@@ -1137,6 +1147,11 @@ export interface ThreadSharingData {
   readonly index: number;
   readonly count: number;
   /**
+   * Whether this run's posts are cost-bounded (`RunConfig.bounded`): it posts only results another checker demanded
+   * and its takes build a bounded number of records. A run with it off keeps Phase 1's rule.
+   */
+  readonly bounded: boolean;
+  /**
    * For each file, by file index: -2 if no checker checks it, -1 if checkers check it in statement ranges, 0 until a
    * checker takes it, and 1 + k once checker k took it.
    */
@@ -1146,6 +1161,12 @@ export interface ThreadSharingData {
    * checker took the file: they never check it, and hand its positions on (`handoff`).
    */
   readonly forbidden: SharedArrayBuffer;
+  /**
+   * For each file, by file index, the checkers (one bit each, the same shape as `forbidden`) that looked for a result
+   * for one of its declarations and found none. A checker posts a result only for a declaration whose file one of
+   * them reads (`ThreadSharing.demanded`).
+   */
+  readonly wanted: SharedArrayBuffer;
   /**
    * Positions of the order a checker handed on: a lock, their number, the number of checkers that may still hand
    * positions on, then the positions.
@@ -1240,6 +1261,11 @@ export function isForbidden(forbidden: Int32Array, count: number, file: number, 
   return (Atomics.load(forbidden, file * forbiddenWords(count) + (index >>> 5)) & (1 << (index & 31))) !== 0;
 }
 
+/** Whether checker `index` of `count` looked for a result for a declaration of file `file` and found none (`wanted`). */
+export function isWanted(wanted: Int32Array, count: number, file: number, index: number): boolean {
+  return (Atomics.load(wanted, file * forbiddenWords(count) + (index >>> 5)) & (1 << (index & 31))) !== 0;
+}
+
 /**
  * An open-addressing table in a SharedArrayBuffer, from a key (a symbol or node id) to a result's state: 0 until a
  * checker posts it, then `postedState`.
@@ -1292,8 +1318,110 @@ export class ResultTable {
   }
 }
 
-/** TSC_TS_SHARE_MIN_MS: the shortest computation a checker posts, in milliseconds (32 divided by the checkers by default). */
+/** TSC_TS_SHARE_MIN_MS: the shortest computation a checker posts, in milliseconds (`shareFloorTotalMs` split by the checkers by default). */
 const shareMinValue = process.env.TSC_TS_SHARE_MIN_MS;
+
+/**
+ * The floor, in milliseconds of checker time split over the checkers that share: 1 ms with 4 checkers, 0.25 ms with
+ * 16.
+ */
+const shareFloorTotalMs = 4;
+
+/** `TSC_TS_SHARE_<name>` as a number, or `fallback`. */
+function shareNumber(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/**
+ * The posting rule's cost model: a post appends at most `(kappa*T - p0)/e` records (`T` the computation's time), a
+ * take builds at most `lambda*T/c`, `p0` is what a post costs itself, `e` each record a post adds and `c` each record
+ * a take builds, all in microseconds. The price instrumentation's replay (`TSC_TS_SHARE_PRICE`) fits them; the
+ * `TSC_TS_SHARE_*` variables override them for measurement.
+ *
+ * Read where they are used, not once at module evaluation: this module is in an import cycle (it imports
+ * `checker-symbols.js`, which imports `checker.js`, which imports this module), and scriptc rejects code that runs at
+ * module evaluation there (SC1016: a class the cycle reaches can be accessed before its declaration runs), so a
+ * `const kappa = shareNumber(...)` at the top level does not build.
+ */
+function shareKappa(): number {
+  return shareNumber('TSC_TS_SHARE_KAPPA', 0.25);
+}
+function shareLambda(): number {
+  return shareNumber('TSC_TS_SHARE_LAMBDA', 0.3);
+}
+function sharePostUs(): number {
+  return shareNumber('TSC_TS_SHARE_P0_US', 0.3);
+}
+function shareExportRecordUs(): number {
+  return shareNumber('TSC_TS_SHARE_E_US', 1.2);
+}
+function shareBuildRecordUs(): number {
+  return shareNumber('TSC_TS_SHARE_C_US', 6.59);
+}
+/**
+ * Whether a run posts cost-bounded is its configuration's choice (`RunConfig.bounded`), not a rule here: off by
+ * default, because a bounded post costs a run that gains nothing by it (T3 server's c16 check was 8-9% slower),
+ * and turned on where the project's own runs measured it faster (`run-config.ts`). A bounded run keeps the 2-8 ms
+ * floor's sharing gate, posts only results another checker demanded, and budgets both the records a post adds and
+ * the records a take builds; an unbounded run keeps Phase 1's rule and posts every result over the floor.
+ */
+
+/** The floor's total in milliseconds before the cost-bounded rule (`shareFloorTotalMs`): 2 ms at 16, 8 ms at 4. */
+const shareFloorTotalMsPhase1 = 32;
+
+/**
+ * The rule that decides whether a checker posts a result it computed, and how much a consumer may build to take one.
+ * The conditions that keep a take exact (the result's diagnostics, `forbidsLast`, the resolution stack) are checked
+ * by the callers, as are the stop switch and the demand bits.
+ */
+export interface PostingRule {
+  /**
+   * Whether a checker that just computed the result keyed `key` of a declaration in file `fileIndex` may post it, in
+   * `ms`, with `diagnosticFiles` the files its diagnostics are in. The caller checks first that the computation met
+   * no resolution cycle, that the stop switch is off, that (when the run is cost-bounded) another checker demanded the
+   * file (`demanded`) and that no result for the key is posted.
+   */
+  posts(
+    sharing: ThreadSharing,
+    key: number,
+    ms: number,
+    diagnosticFiles: readonly string[],
+    fileIndex: number,
+  ): boolean;
+
+  /**
+   * The most records a consumer may build to take a posted result whose producer computed it in `ms` milliseconds: 0
+   * admits only takes that build nothing, because every record they need is in the consumer's caches already.
+   */
+  buildBudget(ms: number): number;
+}
+
+/**
+ * The rule of the design's Phase 2: a result is posted when it took at least the floor (`ThreadSharing.minMs`), and a
+ * consumer builds at most `lambda*T/c` records to take one, where `T` is the producer's time for it.
+ */
+export class CostBoundedRule implements PostingRule {
+  /** `bounded` false is Phase 1's rule: the same floor, and a take that may build any number of records. */
+  constructor(readonly bounded: boolean) {}
+
+  posts(
+    sharing: ThreadSharing,
+    _key: number,
+    ms: number,
+    _diagnosticFiles: readonly string[],
+    _fileIndex: number,
+  ): boolean {
+    return ms >= sharing.minMs;
+  }
+
+  buildBudget(ms: number): number {
+    return this.bounded ? Math.floor((shareLambda() * ms * 1000) / shareBuildRecordUs()) : Number.POSITIVE_INFINITY;
+  }
+}
+
 // Debugging: TSC_TS_SHARE_BLOCK and TSC_TS_SHARE_ALLOW name parts of file names (comma-separated, each optionally with
 // a range of declaration positions, `name@start-end`) whose results are never or only translated, and
 // TSC_TS_SHARE_TRACE=1 prints each translation.
@@ -1442,6 +1570,18 @@ export class ThreadSharing {
   readonly returns: ResultTable;
   /** TSC_TS_SHARE_MIN_MS: the shortest computation this checker posts. */
   readonly minMs: number;
+  /**
+   * Whether this run is cost-bounded, which the run's configuration chose (`RunConfig.bounded`, off by default and
+   * learned from the project's records). Without it the run keeps Phase 1's behavior: no demand bits, no export or
+   * take budget, the 2-8 ms floor.
+   */
+  readonly bounded: boolean;
+  /**
+   * The rule that decides which of this checker's results are posted, and how much a take may build. A small-result
+   * tier stacks on it by constructing its own rule here. Built per checker, not once at module evaluation, for the
+   * reason the cost model's functions give (`shareKappa`).
+   */
+  readonly rule: PostingRule;
   readonly initialIndexes = new Map<Type, number>();
   readonly initial: Type[];
   readonly numberLogs: Int32Array[] = [];
@@ -1450,6 +1590,10 @@ export class ThreadSharing {
   readonly used: Int32Array;
   readonly takers: Int32Array;
   readonly forbidden: Int32Array;
+  /** The checkers that missed on a key in each file (`ThreadSharingData.wanted`). */
+  readonly wanted: Int32Array;
+  /** The files this checker noted a miss on, so that each is marked in `wanted` once. */
+  private readonly wantedFiles = new IdBits();
   /** The stop switch of every checker (`ThreadSharingData.control`). */
   readonly control: Int32Array;
   /** This checker's row of the counters the main thread reads (`ThreadSharingData.stats`). */
@@ -1505,6 +1649,12 @@ export class ThreadSharing {
   verifiedIdentity = 0;
   belowMin = 0;
   belowMinMs = 0;
+  /** Results whose export passed the budget `kappa*T`, and translations that stopped at `lambda*T/c`. */
+  overBudget = 0;
+  overBudgetMs = 0;
+  stoppedTranslations = 0;
+  /** Results not posted because no checker that may take one missed on a key in the declaration's file. */
+  notDemanded = 0;
   exportFailed = 0;
   exportFailedMs = 0;
   readonly exportFailures = new Map<string, number>();
@@ -1618,17 +1768,24 @@ export class ThreadSharing {
     c.suggestionDiagnostics.added = [];
     c.deferredDiagnosticFiles = [];
     this.data = data;
+    this.bounded = data.bounded;
+    this.rule = new CostBoundedRule(this.bounded);
     this.used = new Int32Array(data.used);
     this.takers = new Int32Array(data.takers);
     this.forbidden = new Int32Array(data.forbidden);
+    this.wanted = new Int32Array(data.wanted);
     this.control = new Int32Array(data.control);
     this.stats = new Float64Array(data.stats);
     this.row = data.index * shareStatColumns;
     this.types = new ResultTable(data.typeTable);
     this.returns = new ResultTable(data.returnTable);
-    // A posted result pays when enough checkers need it, so the threshold falls as checkers are added: 8 ms with 4
-    // checkers, 2 ms with 16.
-    this.minMs = shareMinValue === undefined ? 32 / data.count : Number(shareMinValue);
+    // The floor, lowered with the rest of the 2-8 ms threshold band when posting is cost-bounded: a posted result pays
+    // when enough checkers need it, so it falls as checkers are added, to 0.25 ms with 16. Below the bounded count the
+    // run keeps the 2-8 ms band, where the posts the extra floor would add are what the c4 gate measured as a cost.
+    this.minMs =
+      shareMinValue === undefined
+        ? (this.bounded ? shareFloorTotalMs : shareFloorTotalMsPhase1) / data.count
+        : Number(shareMinValue);
     this.initial = initialTypes(c);
     for (let i = 0; i < this.initial.length; i++) this.initialIndexes.set(this.initial[i]!, i);
     for (let k = 0; k < data.count; k++) {
@@ -1674,7 +1831,15 @@ export class ThreadSharing {
       this.belowMin +
       ' (' +
       this.belowMinMs.toFixed(0) +
-      ' ms), not exported ' +
+      ' ms), not demanded ' +
+      this.notDemanded +
+      ', over the export budget ' +
+      this.overBudget +
+      ' (' +
+      this.overBudgetMs.toFixed(0) +
+      ' ms), takes stopped at their budget ' +
+      this.stoppedTranslations +
+      ', not exported ' +
       this.exportFailed +
       ' (' +
       this.exportFailedMs.toFixed(0) +
@@ -1708,6 +1873,38 @@ export class ThreadSharing {
     const taker = Atomics.load(this.takers, index);
     if (taker === 0) return false;
     return taker !== -2 && (taker < 0 || taker === this.data.index + 1);
+  }
+
+  /**
+   * Notes that this checker looked for a result for a declaration in `file` and found none: a checker posts results
+   * for that file only then (`demanded`). One `Atomics.or` per file and checker.
+   */
+  want(file: SourceFile): void {
+    if (!this.bounded) return;
+    const index = this.c.fileIndex.get(file);
+    if (index === undefined || this.wantedFiles.has(index)) return;
+    this.wantedFiles.add(index);
+    const me = this.data.index;
+    Atomics.or(this.wanted, index * forbiddenWords(this.data.count) + (me >>> 5), 1 << (me & 31));
+  }
+
+  /**
+   * Whether a checker other than this one and the file's taker missed on a key in file `index`: someone other than
+   * the checkers that already compute its declarations would take a result for one of them.
+   */
+  demanded(index: number): boolean {
+    const count = this.data.count;
+    const me = this.data.index;
+    const words = forbiddenWords(count);
+    const taker = Atomics.load(this.takers, index);
+    const base = index * words;
+    for (let w = 0; w < words; w++) {
+      let bits = Atomics.load(this.wanted, base + w);
+      if (w === me >>> 5) bits &= ~(1 << (me & 31));
+      if (taker > 0 && w === (taker - 1) >>> 5) bits &= ~(1 << ((taker - 1) & 31));
+      if (bits !== 0) return true;
+    }
+    return false;
   }
 
   /** After taking a result for a declaration in `file`: if no checker took the file yet, this one never will. */
@@ -1795,6 +1992,13 @@ export class ThreadSharing {
       exporter.originsCache = this.origins;
       this.storeExporter = exporter;
     }
+    // The export budget: a post appends at most `(kappa*T - p0)/e` records, so it costs at most `kappa*T` even when
+    // the result is over it, and an over-budget result is not posted.
+    if (this.bounded) {
+      const maxRecords = Math.floor((shareKappa() * computeMs * 1000 - sharePostUs()) / shareExportRecordUs());
+      if (maxRecords < 0) return budgetFailure;
+      exporter.limit = exporter.base + maxRecords;
+    } else exporter.limit = Number.POSITIVE_INFINITY;
     exporter.failure = undefined;
     exporter.mergedOrigins = undefined;
     const root = exporter.type(t);
@@ -1874,7 +2078,11 @@ export class ThreadSharing {
       reader = new StoreReader(this, producer);
       this.readers[producer] = reader;
     }
-    const t = reader.translate(posted.root);
+    // The translation budget: building more records than the rule allows costs more than computing the result again,
+    // where `T` is the time the producer's computation took (`StoredResult.computeMs`). The walk stops at the bound
+    // before anything is built.
+    const t = reader.translate(posted.root, this.rule.buildBudget(posted.computeMs));
+    if (t === undefined && reader.stopped) this.stoppedTranslations++;
     this.translationMs += performance.now() - start;
     if (t !== undefined) {
       this.translated++;
@@ -1933,6 +2141,7 @@ function computeAndPost(
   key: number,
   symbol: Symbol | undefined,
   sig: Signature | undefined,
+  declarationFile: SourceFile,
 ): Type {
   const t = sharing.computeShared(files, key, symbol, sig);
   const ms = sharing.lastMs;
@@ -1941,24 +2150,51 @@ function computeAndPost(
     sharing.notShareableMs += ms;
     return t;
   }
-  // A quick computation is cheaper to repeat than to export, post and translate.
-  if (ms < sharing.minMs) {
-    sharing.belowMin++;
-    sharing.belowMinMs += ms;
-    return t;
-  }
-  // The main thread stopped sharing at its window (control 1 or 2): this result is the checker's own,
-  // and the others compute theirs, as they do when they find none posted.
-  if (Atomics.load(sharing.control, 0) !== 0) {
-    sharing.stopped++;
-    return t;
+  let diagnosticFiles: readonly string[] | undefined;
+  if (sharing.bounded) {
+    // The main thread stopped sharing at its window (control 1 or 2): this result is the checker's own,
+    // and the others compute theirs, as they do when they find none posted.
+    if (Atomics.load(sharing.control, 0) !== 0) {
+      sharing.stopped++;
+      return t;
+    }
+    const index = sharing.c.fileIndex.get(declarationFile);
+    if (index === undefined) return t;
+    // The rule priced this result: a quick computation is cheaper to repeat than to export, post and translate.
+    diagnosticFiles = files.get(key) ?? [];
+    if (!sharing.rule.posts(sharing, key, ms, diagnosticFiles, index)) {
+      sharing.belowMin++;
+      sharing.belowMinMs += ms;
+      return t;
+    }
+    // A result is posted only for a declaration whose file another checker that may take it missed on: a file only
+    // its own checkers read has nobody to take it.
+    if (!sharing.demanded(index)) {
+      sharing.notDemanded++;
+      return t;
+    }
+  } else {
+    // Below the bounded count the run is Phase 1's, and takes the same path: the floor first, then the stop switch,
+    // and none of the bounded path's lookups (the file index and the diagnostics) is made.
+    if (ms < sharing.minMs) {
+      sharing.belowMin++;
+      sharing.belowMinMs += ms;
+      return t;
+    }
+    if (Atomics.load(sharing.control, 0) !== 0) {
+      sharing.stopped++;
+      return t;
+    }
   }
   const slot = table.slot(key);
   if (slot < 0 || table.state(slot) !== 0) return t;
   const start = performance.now();
   // Diagnostics stay with this checker; the others only learn which files they are in.
-  const state = sharing.post(t, files.get(key) ?? [], ms);
-  if (typeof state === 'string') {
+  const state = sharing.post(t, diagnosticFiles ?? files.get(key) ?? [], ms);
+  if (state === budgetFailure) {
+    sharing.overBudget++;
+    sharing.overBudgetMs += ms;
+  } else if (typeof state === 'string') {
     sharing.exportFailed++;
     sharing.exportFailedMs += ms;
     sharing.exportFailures.set(state, (sharing.exportFailures.get(state) ?? 0) + ms);
@@ -1995,25 +2231,31 @@ function threadTypeOfSymbolWorker(c: Checker, symbol: Symbol): Type {
     return cached;
   }
   if (id > sharing.data.symbolIds) return sharing.tracked(sharing.typeFiles, id, symbol, undefined);
+  const declaration = symbol.valueDeclaration!;
+  const file = getSourceFileOfNode(declaration);
+  // A declaration with a type annotation: computing its type resolves the annotation, and translating the records
+  // does too (`NodeType` resolves the node), so sharing saves nothing on it and costs a lookup. Below the bounded
+  // count the exclusion is off, as it is in Phase 1.
+  if (sharing.bounded && getType(declaration) !== undefined)
+    return sharing.tracked(sharing.typeFiles, id, symbol, undefined);
   const table = sharing.types;
-  if (!sharing.owns(getSourceFileOfNode(symbol.valueDeclaration!))) {
+  if (!sharing.owns(file)) {
     // The stop switch is read before the table: a checker that stops translating computes the result itself.
     const slot = sharing.stoppedTranslating() ? -1 : table.find(id);
     const state = slot < 0 ? 0 : table.state(slot);
     if (
       state <= -2 &&
       findResolutionCycleStartIndex(c, symbol, TypeSystemPropertyName.Type) < 0 &&
-      !translationBlocked(symbol.valueDeclaration!)
+      !translationBlocked(declaration)
     ) {
       const producer = postedProducer(sharing.data.count, state);
       const posted = sharing.result(producer, postedOffset(sharing.data.count, state));
-      const file = getSourceFileOfNode(symbol.valueDeclaration!);
       if (shareVerifyValue === '1') {
         const own = sharing.tracked(sharing.typeFiles, id, symbol, undefined);
         verifyTranslation(
           c,
           'types',
-          symbol.valueDeclaration!,
+          declaration,
           own,
           sharing.translatePosted(producer, posted, sharing.typeFiles, id, file),
         );
@@ -2021,9 +2263,9 @@ function threadTypeOfSymbolWorker(c: Checker, symbol: Symbol): Type {
       }
       const t = sharing.translatePosted(producer, posted, sharing.typeFiles, id, file);
       if (t !== undefined) {
-        traceTranslation(c, 'types', symbol.valueDeclaration!, producer);
+        traceTranslation(c, 'types', declaration, producer);
         if (sharing.depth === 1) sharing.kind = 2;
-        sharing.forbid(getSourceFileOfNode(symbol.valueDeclaration!));
+        sharing.forbid(file);
         const again = c.symbolTypes.get(id);
         if (again !== undefined) return again;
         c.symbolTypes.set(id, t);
@@ -2031,13 +2273,16 @@ function threadTypeOfSymbolWorker(c: Checker, symbol: Symbol): Type {
       }
       sharing.sawDoneUnusable++;
     }
+    // This checker needed a result for one of the file's declarations and has none: the others post its results only
+    // then.
+    sharing.want(file);
     sharing.computedPrivately++;
     if (sharing.depth === 1) sharing.kind = 1;
   } else {
     sharing.owned++;
     if (sharing.depth === 1) sharing.kind = 0;
   }
-  return computeAndPost(sharing, table, sharing.typeFiles, id, symbol, undefined);
+  return computeAndPost(sharing, table, sharing.typeFiles, id, symbol, undefined, file);
 }
 
 /** Notes that the computation in progress used the cached return type of `sig` (see `ThreadSharing.typeFiles`). */
@@ -2066,8 +2311,14 @@ function threadReturnTypeWorker(c: Checker, sig: Signature): Type {
   const declaration = sig.declaration!;
   const key = declaration.id;
   if (key > sharing.data.nodeIds) return sharing.tracked(sharing.returnFiles, key, undefined, sig);
+  const file = getSourceFileOfNode(declaration);
+  // A declaration with a return type annotation: computing the return type resolves the annotation, and translating
+  // the records does too, so sharing saves nothing on it and costs a lookup. Below the bounded count the exclusion is
+  // off, as it is in Phase 1.
+  if (sharing.bounded && getType(declaration) !== undefined)
+    return sharing.tracked(sharing.returnFiles, key, undefined, sig);
   const table = sharing.returns;
-  if (!sharing.owns(getSourceFileOfNode(declaration))) {
+  if (!sharing.owns(file)) {
     const slot = sharing.stoppedTranslating() ? -1 : table.find(key);
     const state = slot < 0 ? 0 : table.state(slot);
     if (
@@ -2077,7 +2328,6 @@ function threadReturnTypeWorker(c: Checker, sig: Signature): Type {
     ) {
       const producer = postedProducer(sharing.data.count, state);
       const posted = sharing.result(producer, postedOffset(sharing.data.count, state));
-      const file = getSourceFileOfNode(declaration);
       if (shareVerifyValue === '1') {
         const own = sharing.tracked(sharing.returnFiles, key, undefined, sig);
         verifyTranslation(
@@ -2093,18 +2343,19 @@ function threadReturnTypeWorker(c: Checker, sig: Signature): Type {
       if (t !== undefined) {
         traceTranslation(c, 'returns', declaration, producer);
         if (sharing.depth === 1) sharing.kind = 2;
-        sharing.forbid(getSourceFileOfNode(declaration));
+        sharing.forbid(file);
         return t;
       }
       sharing.sawDoneUnusable++;
     }
+    sharing.want(file);
     sharing.computedPrivately++;
     if (sharing.depth === 1) sharing.kind = 1;
   } else {
     sharing.owned++;
     if (sharing.depth === 1) sharing.kind = 0;
   }
-  return computeAndPost(sharing, table, sharing.returnFiles, key, undefined, sig);
+  return computeAndPost(sharing, table, sharing.returnFiles, key, undefined, sig, file);
 }
 
 // ---- Records in a checker's store
@@ -2383,6 +2634,8 @@ class StoreReader {
   readonly translator: Translator;
   readonly table: Int32Array;
   readonly unpacker: RecordUnpacker;
+  /** Whether the last `translate` stopped at its budget, having built nothing. */
+  stopped = false;
   /** By record: the record, its translation and whether it is translated. */
   readonly records: (PortableRecord | undefined)[] = [];
   readonly types: Type[] = [];
@@ -2428,17 +2681,25 @@ class StoreReader {
     return record;
   }
 
-  /** The translation of record `root` and the records it needs; undefined if one can't be translated here. */
-  translate(root: number): Type | undefined {
+  /**
+   * The translation of record `root` and the records it needs; undefined if one can't be translated here, or if the
+   * records it would build pass `budget`.
+   */
+  translate(root: number, budget: number = Number.POSITIVE_INFINITY): Type | undefined {
     const c = this.sharing.c;
     const translator = this.translator;
     const needed = new Set<number>();
     const stack = [root];
+    this.stopped = false;
     while (stack.length > 0) {
       const i = stack.pop()!;
       if (needed.has(i)) continue;
       this.ensure(i);
       if (this.built[i] === 1) continue;
+      if (needed.size >= budget) {
+        this.stopped = true;
+        return undefined;
+      }
       const r = this.record(i);
       if (r === undefined) return undefined;
       if (
