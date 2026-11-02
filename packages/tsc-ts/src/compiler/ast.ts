@@ -8437,9 +8437,7 @@ export class PatternAmbientModule {
 
   matches(candidate: string): boolean {
     return (
-      candidate.length >= this.text.length - 1 &&
-      candidate.startsWith(this.prefix) &&
-      candidate.endsWith(this.suffix)
+      candidate.length >= this.text.length - 1 && candidate.startsWith(this.prefix) && candidate.endsWith(this.suffix)
     );
   }
 }
