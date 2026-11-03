@@ -1474,10 +1474,13 @@ export function planSchedule(
   }
   let all = 0;
   for (const i of order) all += cost[i]!;
-  // Files that cost more than a 32nd of a checker's share go first, costliest first: at the end of
-  // a range they would make its checker finish last.
+  // Files that cost more than a 128th of the program go first, costliest first: at the end of a range
+  // they would make its checker finish last. A fixed fraction of the program, rather than of a
+  // checker's share, keeps the cut in proportion to how many checkers drain the shared queue: it is a
+  // 32nd of a share at 4 checkers and an eighth at 16, where a range is shorter and a file of the
+  // same size would otherwise sit in it.
   let heavyCount = count;
-  while (heavyCount < order.length && cost[order[heavyCount]!]! * count * 32 >= all) heavyCount++;
+  while (heavyCount < order.length && cost[order[heavyCount]!]! * 128 >= all) heavyCount++;
   // The groups go to the shared queue as one entry each, among the costliest files, by total cost.
   const groups = checkGroups(checked, count, groupLoad, costs);
   const grouped = new Set<number>();
