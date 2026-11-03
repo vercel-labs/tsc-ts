@@ -5,6 +5,12 @@
 // SCRIPTC_TARGET that scriptc links for, and links it through native/listen-posix.ffi.json. Then it checks that the
 // number fields of Node, Type and Symbol are 32-bit integers in the build (scripts/check-int32-fields.mjs).
 //
+// Optimized Linux builds compile with `scriptc build --exceptions=rare` (a scriptc with a second profile phase knows
+// the option): the check's recursive functions propagate an exception by native unwinding instead of testing a flag
+// after each of their calls, and the exceptions tsc-ts throws, in the configuration, record and watch drivers, travel
+// a few frames. A profile describes the code of a build with a given setting, so the committed profiles are collected
+// from builds with the same option (refresh-profile.mjs passes it to every instrumented build).
+//
 // Optimized builds use a committed profile (profile-phases.mjs): profiles/tsc-ts.cs.profdata, collected in two phases,
 // when the scriptc accepts a second profile phase, and profiles/tsc-ts.profdata, collected in one phase, otherwise.
 // They check how well the profile matches the code they compile (profile-match.mjs): below 95% of the functions the
@@ -74,6 +80,9 @@ const scriptc =
 
 const generate = values['profile-generate'];
 const useProfile = !values.dev && generate === undefined;
+// scriptc gained --exceptions=rare with the second profile phase; an older scriptc does not know the option. The
+// probe builds a one-line program, so it runs once.
+let secondPhase;
 const profile = values['profile-use'] ?? (useProfile ? committedProfile() : undefined);
 const info = profile === undefined ? undefined : profileInfoPath(profile);
 const profileInfo = info === undefined ? undefined : join(root, info);
@@ -83,6 +92,7 @@ const args = ['build', entry];
 if (values.dev) args.push('--optimization=dev');
 else {
   args.push('--optimization=speed', '--detached-exit');
+  if (process.platform === 'linux' && hasSecondProfilePhase()) args.push('--exceptions=rare');
   if (generate === undefined) args.push(`--profile-use=${profile}`);
   else args.push(...(profile === undefined ? [] : [`--profile-use=${profile}`]), `--profile-generate=${generate}`);
 }
@@ -124,9 +134,11 @@ if (!passed.includes('--no-keep-llvm'))
 // The committed profile for this scriptc: the two-phase one when scriptc accepts a second profile phase.
 function committedProfile() {
   const twoPhase = existsSync(join(root, TWO_PHASE_PROFILE));
-  return twoPhase && supportsSecondProfilePhase(scriptc, join(root, SINGLE_PHASE_PROFILE))
-    ? TWO_PHASE_PROFILE
-    : SINGLE_PHASE_PROFILE;
+  return twoPhase && hasSecondProfilePhase() ? TWO_PHASE_PROFILE : SINGLE_PHASE_PROFILE;
+}
+
+function hasSecondProfilePhase() {
+  return (secondPhase ??= supportsSecondProfilePhase(scriptc, join(root, SINGLE_PHASE_PROFILE)));
 }
 
 function checkProfile(report) {
