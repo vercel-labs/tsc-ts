@@ -238,7 +238,11 @@ import {
   getNarrowedTypeOfSymbol,
 } from './checker-narrowing.js';
 import { getFlowTypeOfAutoTypedProperty, getThisTypeOfAssignedFunction } from './checker-javascript.js';
-import { checkExpressionWithContextualType, getThisTypeOfObjectLiteralMember } from './checker-contextual.js';
+import {
+  checkExpressionWithContextualType,
+  getThisTypeOfObjectLiteralMember,
+  isCheckedWithoutContextualType,
+} from './checker-contextual.js';
 
 import {
   ContextFlags,
@@ -264,6 +268,17 @@ export function checkExpression(c: Checker, node: Node): Type {
 }
 
 export function checkExpressionEx(c: Checker, node: Node, checkMode: CheckMode): Type {
+  // A completed check of this node under this mode answers this one when the check has no
+  // contextual type and no inference context: the checker's state only grew since, so this check
+  // would produce the type the completed one produced, report the diagnostics it reported and
+  // defer the nodes it deferred. Those diagnostics are equal to ones already reported and a node
+  // is deferred at most once, so serving the completed type changes neither.
+  const record = c.exprCheckRecord;
+  const recordable = record !== undefined && isCheckedWithoutContextualType(c, node);
+  if (recordable) {
+    const recorded = record.get(node.id, checkMode);
+    if (recorded !== undefined) return recorded;
+  }
   const saveCurrentNode = c.currentNode;
   c.currentNode = node;
   c.instantiationCount = 0;
@@ -275,6 +290,7 @@ export function checkExpressionEx(c: Checker, node: Node, checkMode: CheckMode):
   );
   if (isConstEnumObjectTypeLocal(t)) checkConstEnumAccess(c, node, t);
   c.currentNode = saveCurrentNode;
+  if (recordable) record.set(node.id, checkMode, t);
   return t;
 }
 

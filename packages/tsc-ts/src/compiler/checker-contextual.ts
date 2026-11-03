@@ -7,6 +7,7 @@ import {
   type Node,
   type ParameterDeclaration,
   type PropertyAssignment,
+  getArguments,
   getInitializer,
   getName,
   getParameters,
@@ -222,6 +223,106 @@ export function findContextualNode(c: Checker, node: Node, includeCaches: boolea
   const depth = caches.contextualDepth;
   for (let i = 0; i < depth; i++) if (nodes[i]! === node && (includeCaches || !caches.contextualIsCache[i])) return i;
   return -1;
+}
+
+/**
+ * The id of the contextual type in force for `node`, or -1 if the node's contextual type is not on
+ * the stack. A key built from -1 can't tell a check under a contextual type that was not pushed from
+ * a check with no contextual type, so callers record nothing under -1.
+ */
+export function getContextualTypeId(c: Checker, node: Node): number {
+  const index = findContextualNode(c, node, true);
+  if (index < 0) return -1;
+  const t = c.inferenceCaches.contextualTypes[index];
+  return t === undefined ? -1 : t.id;
+}
+
+/**
+ * Whether a check of `node` has no contextual type and no inference context, so its type is a
+ * function of the node and the check mode alone: the node is not on the contextual stack, no
+ * inference context contains it, and its parent gives it no contextual type. The parents answered
+ * here are the ones `getContextualTypeEx` returns `undefined` for without computing anything; a
+ * parent it computes a type for is not answered, so the result is never "yes" for a check that
+ * could have a contextual type.
+ *
+ * Types computed inside a flow loop are provisional (the checker does not cache them either), so a
+ * check in a loop is not context-free.
+ */
+export function isCheckedWithoutContextualType(c: Checker, node: Node): boolean {
+  if (c.flowLoopStack.length !== 0) return false;
+  if (findContextualNode(c, node, true) >= 0) return false;
+  if (getInferenceContext(c, node) !== undefined) return false;
+  const parent = node.parent;
+  if (parent === undefined) return true;
+  switch (parent.kind) {
+    case SyntaxKind.VariableDeclaration:
+    case SyntaxKind.Parameter:
+    case SyntaxKind.PropertyDeclaration:
+    case SyntaxKind.PropertySignature:
+    case SyntaxKind.BindingElement:
+      // Only the initializer is contextually typed by the declaration.
+      return getInitializer(parent) !== node;
+    case SyntaxKind.CallExpression:
+    case SyntaxKind.NewExpression: {
+      // Only the arguments are contextually typed by the parameters; the callee is not.
+      const args = getArguments(parent);
+      if (args !== undefined) {
+        for (const arg of args.nodes) if (arg === node) return false;
+      }
+      return true;
+    }
+    case SyntaxKind.ObjectLiteralExpression:
+      // Only a method takes the property's contextual type.
+      return node.kind !== SyntaxKind.MethodDeclaration;
+    case SyntaxKind.BinaryExpression: {
+      const binary = parent as BinaryExpression;
+      if (binary.type !== undefined) return false;
+      switch (binary.operatorToken.kind) {
+        case SyntaxKind.EqualsToken:
+        case SyntaxKind.AmpersandAmpersandEqualsToken:
+        case SyntaxKind.BarBarEqualsToken:
+        case SyntaxKind.QuestionQuestionEqualsToken:
+          return node !== binary.right;
+        case SyntaxKind.BarBarToken:
+        case SyntaxKind.QuestionQuestionToken:
+        case SyntaxKind.AmpersandAmpersandToken:
+        case SyntaxKind.CommaToken:
+          return false;
+      }
+      return true;
+    }
+    case SyntaxKind.ConditionalExpression: {
+      const conditional = parent as ConditionalExpression;
+      return node !== conditional.whenTrue && node !== conditional.whenFalse;
+    }
+    case SyntaxKind.TemplateSpan: {
+      // Only a tagged template types its spans.
+      const template = parent.parent!;
+      return template.parent === undefined || template.parent.kind !== SyntaxKind.TaggedTemplateExpression;
+    }
+    case SyntaxKind.ArrowFunction:
+    case SyntaxKind.ReturnStatement:
+    case SyntaxKind.YieldExpression:
+    case SyntaxKind.AwaitExpression:
+    case SyntaxKind.Decorator:
+    case SyntaxKind.AsExpression:
+    case SyntaxKind.TypeAssertionExpression:
+    case SyntaxKind.SatisfiesExpression:
+    case SyntaxKind.ExportAssignment:
+    case SyntaxKind.PropertyAssignment:
+    case SyntaxKind.ShorthandPropertyAssignment:
+    case SyntaxKind.SpreadAssignment:
+    case SyntaxKind.ArrayLiteralExpression:
+    case SyntaxKind.ParenthesizedExpression:
+    case SyntaxKind.NonNullExpression:
+    case SyntaxKind.JsxExpression:
+    case SyntaxKind.JsxAttribute:
+    case SyntaxKind.JsxSpreadAttribute:
+    case SyntaxKind.JsxOpeningElement:
+    case SyntaxKind.JsxSelfClosingElement:
+      return false;
+  }
+  return true;
 }
 
 export function pushInferenceContext(c: Checker, node: Node, context: InferenceContext | undefined): void {
