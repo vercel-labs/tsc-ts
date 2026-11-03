@@ -281,6 +281,9 @@ const cases = [
     // A check inside a `finally` block sees the antecedents of every path out of the try block.
     // Flow analysis visits the block again with the normal-completion antecedents when it walks
     // past the try statement, so the assignment there must narrow `dst` by that later check.
+    // tsc 7.0.2, the oracle, keeps `dst` at `string | number` after the statement and reports both
+    // assignments, where this checker narrows `dst` to the `string` the assignment gives on the
+    // path that reaches the statement.
     name: 'a finally block revisited with reduced antecedents does not reuse its earlier checks',
     source: [
       'declare let src: { v: string } | { v: number };',
@@ -297,6 +300,7 @@ const cases = [
       '}',
     ],
     expected: ["/input.ts 2322 230 1 Type 'string' is not assignable to type 'number'."],
+    differsFromOracle: true,
   },
   {
     // More than 128 conditions on `x` and `k`: the walks for each are indexed, and so are walks for
