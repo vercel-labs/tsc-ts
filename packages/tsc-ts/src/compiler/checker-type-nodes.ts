@@ -882,7 +882,7 @@ function getTypeFromTypeQueryNode(c: Checker, node: Node): Type {
   return type;
 }
 
-export function getTupleElementFlags(c: Checker, node: Node): ElementFlags {
+export function getTupleElementFlags(node: Node): ElementFlags {
   switch (node.kind) {
     case SyntaxKind.OptionalType:
       return ElementFlags.Optional;
@@ -901,9 +901,9 @@ export function getTupleElementFlags(c: Checker, node: Node): ElementFlags {
   return ElementFlags.Required;
 }
 
-function getTupleElementInfo(c: Checker, node: Node): TupleElementInfo {
+function getTupleElementInfo(node: Node): TupleElementInfo {
   return new TupleElementInfo(
-    getTupleElementFlags(c, node),
+    getTupleElementFlags(node),
     node.kind === SyntaxKind.NamedTupleMember || node.kind === SyntaxKind.Parameter ? node : undefined,
   );
 }
@@ -934,7 +934,7 @@ function getArrayOrTupleTargetType(c: Checker, node: Node): Type {
     parent.kind === SyntaxKind.TypeOperator && (parent as TypeOperatorNode).operator === SyntaxKind.ReadonlyKeyword;
   if (getArrayElementTypeNode(node) !== undefined) return readonly ? c.globalReadonlyArrayType : c.globalArrayType;
   const elementInfos: TupleElementInfo[] = [];
-  for (const e of (node as TupleTypeNode).elements.nodes) elementInfos.push(getTupleElementInfo(c, e));
+  for (const e of (node as TupleTypeNode).elements.nodes) elementInfos.push(getTupleElementInfo(e));
   return getTupleTargetType(c, elementInfos, readonly);
 }
 
@@ -969,7 +969,7 @@ function getTypeFromArrayOrTupleTypeNode(c: Checker, node: Node): Type {
 }
 
 function hasVariadicTupleElement(c: Checker, node: TupleTypeNode): boolean {
-  for (const e of node.elements.nodes) if ((getTupleElementFlags(c, e) & ElementFlags.Variadic) !== 0) return true;
+  for (const e of node.elements.nodes) if ((getTupleElementFlags(e) & ElementFlags.Variadic) !== 0) return true;
   return false;
 }
 

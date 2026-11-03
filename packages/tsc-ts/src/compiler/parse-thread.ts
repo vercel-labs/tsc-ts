@@ -6,10 +6,12 @@
 import { publish } from '@scriptc/threads';
 import { type ExternalModuleIndicatorOptions, ParseOptions, ScriptKind, type SourceFile } from './ast.js';
 import { bindSourceFile } from './binder.js';
+import { checkGrammarSourceFileInParseThread } from './checker-grammar.js';
 import { useThreadTextCaches } from './diagnostics.js';
-import { CompilerHost, FileLoader } from './file-loader.js';
+import { CompilerHost, FileLoader, sourceFileMetadataOf } from './file-loader.js';
 import { computeHash } from './incremental.js';
-import { isIncremental } from './options.js';
+import { type CompilerOptions, isIncremental } from './options.js';
+import type { Resolver } from './module-resolution.js';
 import type { FileSystem } from './file-system.js';
 import {
   fileSize,
@@ -29,6 +31,20 @@ class PreparingHost extends CompilerHost {
   prepared: PreparedFile[] = [];
   /** Whether the files' build info versions are computed (an incremental program). */
   computesVersions = false;
+  /**
+   * Whether the files the loader parses here run their grammar checks before they are published. The
+   * walk is the checker's, run off the checking threads (checker-grammar.ts).
+   */
+  grammarChecks = true;
+  /** The loader's resolver, for the file metadata the grammar checks read. */
+  resolver: Resolver | undefined = undefined;
+  /** The program's options, which the grammar checks of a file are given. */
+  readonly options: CompilerOptions;
+
+  constructor(fs: FileSystem, currentDirectory: string, defaultLibraryPath: string, options: CompilerOptions) {
+    super(fs, currentDirectory, defaultLibraryPath);
+    this.options = options;
+  }
   readMs = 0;
   parseMs = 0;
   bindMs = 0;
@@ -49,6 +65,11 @@ class PreparingHost extends CompilerHost {
     );
     const t2 = timeline ? performance.now() : 0;
     bindSourceFile(file);
+    // The checker does not check the declaration files `skipLibCheck` names, so it does not walk their
+    // grammar either.
+    const resolver = this.resolver;
+    if (this.grammarChecks && resolver !== undefined && !(this.options.skipLibCheck === true && file.isDeclarationFile))
+      checkGrammarSourceFileInParseThread(file, this.options, sourceFileMetadataOf(resolver, this.options, fileName));
     // Published now, while its nodes are in cache: the chunk's publish (`ParseThread.load`) then skips
     // them, where walking the whole chunk's files at once reads each node from memory again.
     publish(file);
@@ -85,11 +106,15 @@ export class ParseThread {
   private sentPackageJsons = 0;
 
   constructor(config: ParsedCommandLine, fs: FileSystem, currentDirectory: string, defaultLibraryPath: string) {
-    this.host = new PreparingHost(fs, currentDirectory, defaultLibraryPath);
+    this.host = new PreparingHost(fs, currentDirectory, defaultLibraryPath, config.options);
     // The versions of an incremental program's files are computed here rather than one after another
     // on the main thread (programToSnapshot, incremental.ts).
     this.host.computesVersions = isIncremental(config.options);
     this.loader = new FileLoader(this.host, config);
+    this.host.resolver = this.loader.resolver;
+    // A program that does not check has no grammar diagnostics to report. An incremental program checks
+    // the files a change affects and parses all of them, so the walk stays with the checker there.
+    this.host.grammarChecks = config.options.noCheck !== true && !isIncremental(config.options);
     // The files this thread loads are published with their chunk: text caches it computes later (of
     // declaration files, which the parser leaves out) go to copies.
     useThreadTextCaches();

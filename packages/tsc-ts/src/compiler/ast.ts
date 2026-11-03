@@ -8244,6 +8244,7 @@ export const emptyCommentDirectives: readonly CommentDirective[] = [];
 export const emptyPragmas: readonly Pragma[] = [];
 export const emptyFileReferences: readonly FileReference[] = [];
 export const emptyPatternAmbientModules: readonly PatternAmbientModule[] = [];
+const emptyNumbers: readonly number[] = [];
 
 /** `list` with `item` appended: a new array when `list` is empty (it may be shared), else `list` itself. */
 export function appendToList<T>(list: readonly T[], item: T): readonly T[] {
@@ -8320,6 +8321,14 @@ export class SourceFile extends Node {
   /** UMD exports from `export as namespace N`. */
   globalExports: SymbolTable | undefined;
 
+  // Set by the grammar checks of a parse thread (checker-grammar.ts).
+  /** The diagnostics the parse thread's grammar walk reported for this file. */
+  grammarDiagnostics: Diagnostic[] | undefined;
+  /** The nodes of this file whose grammar check needs the checker, in tree order. */
+  grammarResidualNodes: Node[] | undefined;
+  /** The blocks and statements that reported a statement in an ambient context. */
+  grammarAmbientReports: readonly number[];
+
   constructor(
     fileName: string,
     path: string,
@@ -8373,6 +8382,9 @@ export class SourceFile extends Node {
     this.symbolCount = 0;
     this.patternAmbientModules = emptyPatternAmbientModules;
     this.globalExports = undefined;
+    this.grammarDiagnostics = undefined;
+    this.grammarResidualNodes = undefined;
+    this.grammarAmbientReports = emptyNumbers;
   }
 
   forEachChild(v: NodeVisitor): boolean {
