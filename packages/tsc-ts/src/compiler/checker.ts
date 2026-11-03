@@ -41,6 +41,7 @@ import {
   PagedIdSet,
   SparseLinkTable,
 } from './link-tables.js';
+import { ExprCheckRecord } from './expr-record.js';
 import { getErrorRangeForNode, getSourceFileOfNode } from './binder-utilities.js';
 import {
   Diagnostic,
@@ -489,6 +490,8 @@ export class Checker implements TypeChecking {
   readonly resolvedSymbols = new CompactLinkTable<Symbol>();
   /** The resolved type of a type node or expression. */
   readonly resolvedTypes = new CompactLinkTable<Type>();
+  /** The type the last completed check of each expression key produced (expr-record.ts). */
+  readonly exprCheckRecord = new ExprCheckRecord();
   /** The resolved signature of a call-like node or a signature declaration. */
   readonly resolvedSignatures = new CompactLinkTable<Signature>();
   /** Merged symbols, indexed by the id of the symbol merged into them. */
