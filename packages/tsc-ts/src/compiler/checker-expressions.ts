@@ -273,10 +273,9 @@ export function checkExpressionEx(c: Checker, node: Node, checkMode: CheckMode):
   // would produce the type the completed one produced, report the diagnostics it reported and
   // defer the nodes it deferred. Those diagnostics are equal to ones already reported and a node
   // is deferred at most once, so serving the completed type changes neither.
-  const record = c.exprCheckRecord;
-  const recordable = record !== undefined && isCheckedWithoutContextualType(c, node);
+  const recordable = isCheckedWithoutContextualType(c, node);
   if (recordable) {
-    const recorded = record.get(node.id, checkMode);
+    const recorded = c.exprCheckRecord.get(node.id, checkMode);
     if (recorded !== undefined) return recorded;
   }
   const saveCurrentNode = c.currentNode;
@@ -290,7 +289,7 @@ export function checkExpressionEx(c: Checker, node: Node, checkMode: CheckMode):
   );
   if (isConstEnumObjectTypeLocal(t)) checkConstEnumAccess(c, node, t);
   c.currentNode = saveCurrentNode;
-  if (recordable) record.set(node.id, checkMode, t);
+  if (recordable) c.exprCheckRecord.set(node.id, checkMode, t);
   return t;
 }
 

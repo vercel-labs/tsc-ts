@@ -17,15 +17,9 @@
 // on another node reads the entry as a miss. Its size bounds the memory and the cache the lookups
 // use: an entry is a node id, a mode and a type slot, the whole table takes about 200 KB, and 2^14
 // entries serve nearly all repeats (2^14 against 2^20 loses 0.1% of the check on the largest
-// program measured). The checker constructs the record only when `TSC_TS_EXPR_RECORD` is not `0`.
+// program measured).
 
 import type { Type } from './checker-types.js';
-
-/**
- * Whether a checker keeps and consults the record. A process started with `TSC_TS_EXPR_RECORD=0`
- * constructs no record, and every expression check runs as it does without one.
- */
-export const exprRecordEnabled: boolean = process.env.TSC_TS_EXPR_RECORD !== '0';
 
 /** Entries in the record; a power of two. */
 const EntryCount = 1 << 14;
