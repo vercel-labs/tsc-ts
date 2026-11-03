@@ -1198,7 +1198,10 @@ export function getUnionTypeEx(
   if (types.length === 1) return types[0]!;
   // Unioning two types is the common case, both a union with some other type, like `undefined`, and
   // two constituents of a list, and the same pairs recur. The union is a function of the two types,
-  // the reduction and the alias, so the result is cached by the pair.
+  // the reduction and the alias, so the result is cached by the pair. A union that exceeded the
+  // complexity limit was reported at the expression that needed it and comes back as the error
+  // type: caching that would silence the report at the next expression with the same input list, so
+  // an error result is not cached.
   if (types.length === 2 && origin === undefined) {
     const t0 = types[0]!;
     const t1 = types[1]!;
@@ -1222,7 +1225,7 @@ export function getUnionTypeEx(
       let result = c.unionOfUnionTypesById.get(id);
       if (result === undefined) {
         result = getUnionTypeWorker(c, types, unionReduction, alias, undefined);
-        c.unionOfUnionTypesById.set(id, result);
+        if (result !== c.errorType) c.unionOfUnionTypesById.set(id, result);
       }
       return result;
     }
@@ -1231,7 +1234,7 @@ export function getUnionTypeEx(
       let result = c.unionOfUnionTypes.get(key);
       if (result === undefined) {
         result = getUnionTypeWorker(c, types, unionReduction, alias, undefined);
-        c.unionOfUnionTypes.set(key, result);
+        if (result !== c.errorType) c.unionOfUnionTypes.set(key, result);
       }
       return result;
     }
@@ -1244,7 +1247,7 @@ export function getUnionTypeEx(
     let result = c.unionTypesByInputList.get(hash, types, alias, unionReduction);
     if (result === undefined) {
       result = getUnionTypeWorker(c, types, unionReduction, alias, undefined);
-      if (!hasConstrainedIntersection(types))
+      if (result !== c.errorType && !hasConstrainedIntersection(types))
         c.unionTypesByInputList.set(hash, types.slice(), alias, unionReduction, result);
     }
     return result;

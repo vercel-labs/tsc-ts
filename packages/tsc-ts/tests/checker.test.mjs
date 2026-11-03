@@ -14,6 +14,13 @@ const oracle = join(repo, 'packages/tsgo/dist/check-oracle');
 const filler = (prefix, n = 40, indent = '') =>
   Array.from({ length: n }, (_, i) => `${indent}const _${prefix}${i} = ${i};`);
 
+// A union of `n` object types that differ in one literal-typed property, by which subtype reduction
+// disqualifies their pairs, so the union exceeds its complexity limit after a cheap scan.
+const wideUnion = (n) => [
+  'type U =',
+  ...Array.from({ length: n }, (_, i) => `  | { k: "s${i}"; v: ${i} }${i === n - 1 ? ';' : ''}`),
+];
+
 // `options` lists options for TSC_TS_CHECK_OPTIONS, separated by commas: boolean options, module, moduleResolution
 // and target as name=value, and the strict family, allowUnreachableCode and allowUnusedLabels as name=true or
 // name=false. A case with `corpus` checks that test case of TypeScript's corpus instead of `source`, and compares only
@@ -621,6 +628,24 @@ const cases = [
     ],
     expected: [
       "/input.js 2810 83 7 Expected 1 argument, but got 0. 'new Promise()' needs a JSDoc hint to produce a 'resolve' that can be called without arguments.",
+    ],
+  },
+  {
+    // Both array literals pass the same list of element types to subtype reduction, which exceeds
+    // its complexity limit on the first; the second reports it again rather than taking the first
+    // expression's error type from a cache.
+    name: 'a union too complex to represent is reported at each expression',
+    source: [
+      ...wideUnion(1200),
+      'declare const a: U;',
+      'declare const b: U;',
+      'declare const s: string;',
+      'export const x = [a, b, s];',
+      'export const y = [a, b, s];',
+    ],
+    expected: [
+      '/input.ts 2590 31472 9 Expression produces a union type that is too complex to represent.',
+      '/input.ts 2590 31500 9 Expression produces a union type that is too complex to represent.',
     ],
   },
 ];
