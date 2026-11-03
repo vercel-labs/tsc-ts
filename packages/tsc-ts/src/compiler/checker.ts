@@ -542,6 +542,7 @@ export class Checker implements TypeChecking {
   readonly unionOfUnionTypes = new Map<string, Type>();
   /** `unionOfUnionTypes` without an alias, by both ids and the reduction packed into one number. */
   readonly unionOfUnionTypesById = new Map<number, Type>();
+  readonly unionTypesByInputList = new TypeListCache<Type>();
   readonly intersectionTypes = new TypeListCache<Type>();
   readonly tupleTypes = new Map<string, Type>();
   readonly indexedAccessTypes = new Map<string, Type>();
@@ -1273,6 +1274,7 @@ export function disposeChecker(c: Checker): void {
   c.unionTypes.clear();
   c.unionOfUnionTypes.clear();
   c.unionOfUnionTypesById.clear();
+  c.unionTypesByInputList.clear();
   c.intersectionTypes.clear();
   c.tupleTypes.clear();
   c.indexedAccessTypes.clear();

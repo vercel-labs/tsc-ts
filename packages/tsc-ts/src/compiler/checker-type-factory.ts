@@ -1196,38 +1196,77 @@ export function getUnionTypeEx(
 ): Type {
   if (types.length === 0) return c.neverType;
   if (types.length === 1) return types[0]!;
-  // Optimize the common case of unioning a union with some other type, like `undefined`.
-  if (
-    types.length === 2 &&
-    origin === undefined &&
-    ((types[0]!.flags & TypeFlags.Union) !== 0 || (types[1]!.flags & TypeFlags.Union) !== 0)
-  ) {
-    let id1 = types[0]!.id;
-    let id2 = types[1]!.id;
+  // Unioning two types is the common case, both a union with some other type, like `undefined`, and
+  // two constituents of a list, and the same pairs recur. The union is a function of the two types,
+  // the reduction and the alias, so the result is cached by the pair. A union that exceeded the
+  // complexity limit was reported at the expression that needed it and comes back as the error
+  // type: caching that would silence the report at the next expression with the same input list, so
+  // an error result is not cached.
+  if (types.length === 2 && origin === undefined) {
+    const t0 = types[0]!;
+    const t1 = types[1]!;
+    let id1 = t0.id;
+    let id2 = t1.id;
     if (id1 > id2) {
       const t = id1;
       id1 = id2;
       id2 = t;
     }
-    // Without an alias, both ids and the reduction pack into one exact number.
-    if (alias === undefined && id2 < UnionPairIdLimit) {
+    // Without an alias or a constrained intersection, both ids and the reduction pack into one
+    // exact number. A constrained intersection's reduction resolves a type variable's constraint
+    // (`addTypeToUnion`), so those pairs take the general path.
+    if (
+      alias === undefined &&
+      id2 < UnionPairIdLimit &&
+      !isConstrainedIntersection(t0) &&
+      !isConstrainedIntersection(t1)
+    ) {
       const id = (id1 * UnionPairIdLimit + id2) * 4 + unionReduction;
       let result = c.unionOfUnionTypesById.get(id);
       if (result === undefined) {
         result = getUnionTypeWorker(c, types, unionReduction, alias, undefined);
-        c.unionOfUnionTypesById.set(id, result);
+        if (result !== c.errorType) c.unionOfUnionTypesById.set(id, result);
       }
       return result;
     }
-    const key = id1 + ',' + id2 + ',' + unionReduction + aliasKey(alias);
-    let result = c.unionOfUnionTypes.get(key);
+    if ((t0.flags & TypeFlags.Union) !== 0 || (t1.flags & TypeFlags.Union) !== 0) {
+      const key = id1 + ',' + id2 + ',' + unionReduction + aliasKey(alias);
+      let result = c.unionOfUnionTypes.get(key);
+      if (result === undefined) {
+        result = getUnionTypeWorker(c, types, unionReduction, alias, undefined);
+        if (result !== c.errorType) c.unionOfUnionTypes.set(key, result);
+      }
+      return result;
+    }
+  }
+  // Longer lists recur too, from nested unions and from constituents mapped in the same order.
+  // Normalizing a list costs a sort of its constituents and the reductions, and the union is a
+  // function of the list as given, the reduction and the alias, so the result is cached by the list.
+  if (origin === undefined) {
+    const hash = typeListHash(types, alias, unionReduction);
+    let result = c.unionTypesByInputList.get(hash, types, alias, unionReduction);
     if (result === undefined) {
       result = getUnionTypeWorker(c, types, unionReduction, alias, undefined);
-      c.unionOfUnionTypes.set(key, result);
+      if (result !== c.errorType && !hasConstrainedIntersection(types))
+        c.unionTypesByInputList.set(hash, types.slice(), alias, unionReduction, result);
     }
     return result;
   }
   return getUnionTypeWorker(c, types, unionReduction, alias, origin);
+}
+
+/** An intersection that `addTypeToUnion` reduces by resolving a type variable's constraint. */
+function isConstrainedIntersection(t: Type): boolean {
+  return (t.flags & TypeFlags.Intersection) !== 0 && (t.objectFlags & ObjectFlags.IsConstrainedTypeVariable) !== 0;
+}
+
+/** Whether `addTypesToUnion` would set `IncludesConstrainedTypeVariable` for `types`. */
+function hasConstrainedIntersection(types: readonly Type[]): boolean {
+  for (const t of types) {
+    if (isConstrainedIntersection(t)) return true;
+    if ((t.flags & TypeFlags.Union) !== 0 && hasConstrainedIntersection((t as UnionType).types)) return true;
+  }
+  return false;
 }
 
 class TypeSet {
