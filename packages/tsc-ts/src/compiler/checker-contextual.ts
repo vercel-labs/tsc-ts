@@ -246,10 +246,13 @@ export function getContextualTypeId(c: Checker, node: Node): number {
  * could have a contextual type.
  *
  * Types computed inside a flow loop are provisional (the checker does not cache them either), so a
- * check in a loop is not context-free.
+ * check in a loop is not context-free. The same holds while a reduce label is in force, as when
+ * flow analysis revisits a `finally` block with the antecedents of one outgoing path: the flow
+ * state differs from the one the earlier check of the block saw.
  */
 export function isCheckedWithoutContextualType(c: Checker, node: Node): boolean {
   if (c.flowLoopStack.length !== 0) return false;
+  if (c.flowReduceLabels.length !== 0) return false;
   if (findContextualNode(c, node, true) >= 0) return false;
   if (getInferenceContext(c, node) !== undefined) return false;
   const parent = node.parent;
