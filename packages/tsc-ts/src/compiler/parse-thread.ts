@@ -8,10 +8,9 @@ import { type ExternalModuleIndicatorOptions, ParseOptions, ScriptKind, type Sou
 import { bindSourceFile } from './binder.js';
 import { checkGrammarSourceFileInParseThread } from './checker-grammar.js';
 import { useThreadTextCaches } from './diagnostics.js';
-import { CompilerHost, FileLoader, sourceFileMetadataOf } from './file-loader.js';
+import { CompilerHost, FileLoader } from './file-loader.js';
 import { computeHash } from './incremental.js';
 import { type CompilerOptions, isIncremental } from './options.js';
-import type { Resolver } from './module-resolution.js';
 import type { FileSystem } from './file-system.js';
 import {
   fileSize,
@@ -36,8 +35,6 @@ class PreparingHost extends CompilerHost {
    * walk is the checker's, run off the checking threads (checker-grammar.ts).
    */
   grammarChecks = true;
-  /** The loader's resolver, for the file metadata the grammar checks read. */
-  resolver: Resolver | undefined = undefined;
   /** The program's options, which the grammar checks of a file are given. */
   readonly options: CompilerOptions;
 
@@ -66,10 +63,11 @@ class PreparingHost extends CompilerHost {
     const t2 = timeline ? performance.now() : 0;
     bindSourceFile(file);
     // The checker does not check the declaration files `skipLibCheck` names, so it does not walk their
-    // grammar either.
-    const resolver = this.resolver;
-    if (this.grammarChecks && resolver !== undefined && !(this.options.skipLibCheck === true && file.isDeclarationFile))
-      checkGrammarSourceFileInParseThread(file, this.options, sourceFileMetadataOf(resolver, this.options, fileName));
+    // grammar either. The walk reads the metadata the loader computed for the file, which is the one the
+    // checking thread reads it with, so it looks up no package.json the load has not looked up.
+    const metadata = this.loadingSourceFileMetadata;
+    if (this.grammarChecks && metadata !== undefined && !(this.options.skipLibCheck === true && file.isDeclarationFile))
+      checkGrammarSourceFileInParseThread(file, this.options, metadata);
     // Published now, while its nodes are in cache: the chunk's publish (`ParseThread.load`) then skips
     // them, where walking the whole chunk's files at once reads each node from memory again.
     publish(file);
@@ -111,7 +109,6 @@ export class ParseThread {
     // on the main thread (programToSnapshot, incremental.ts).
     this.host.computesVersions = isIncremental(config.options);
     this.loader = new FileLoader(this.host, config);
-    this.host.resolver = this.loader.resolver;
     // A program that does not check has no grammar diagnostics to report. An incremental program checks
     // the files a change affects and parses all of them, so the walk stays with the checker there.
     this.host.grammarChecks = config.options.noCheck !== true && !isIncremental(config.options);

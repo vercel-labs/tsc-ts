@@ -255,6 +255,12 @@ export class GrammarChecker extends NodeVisitor {
   /** Blocks and statements that already reported a statement in an ambient context. */
   reportedAmbientStatements: Set<number>;
   /**
+   * The IDs `reportedAmbientStatements` gained in a parse thread's walk, in the order it gained them, so
+   * that the reports of a node whose check the checker runs are undone without copying the set.
+   * Undefined in the checker thread, where no check is undone.
+   */
+  private readonly ambientReportLog: number[] | undefined;
+  /**
    * The diagnostics of a walk in a parse thread, which has no checker, for the checker to add to its
    * collection; undefined in the checker thread, where they are reported as they are found.
    */
@@ -283,6 +289,7 @@ export class GrammarChecker extends NodeVisitor {
     this.metadata = metadata ?? c!.host.getSourceFileMetadata(file) ?? new SourceFileMetadata('', '', ModuleKind.None);
     this.legacyDecorators = options.experimentalDecorators === true;
     this.reportedAmbientStatements = new Set(ambientReports);
+    this.ambientReportLog = c === undefined ? [] : undefined;
     this.diagnostics = c === undefined ? [] : undefined;
     this.residualNodes = c === undefined ? [] : undefined;
   }
@@ -297,17 +304,31 @@ export class GrammarChecker extends NodeVisitor {
     // diagnostics and the ambient-context reports it made undone, and its children are left to the
     // checker as well.
     const start = diagnostics.length;
-    const reports = this.reportedAmbientStatements.size === 0 ? undefined : [...this.reportedAmbientStatements];
+    const reportsMark = this.ambientReportLog!.length;
     const descend = checkGrammarNode(this, node);
     if (this.needsChecker) {
       this.needsChecker = false;
       diagnostics.length = start;
-      if (reports !== undefined) this.reportedAmbientStatements = new Set(reports);
+      this.undoAmbientReports(reportsMark);
       this.residualNodes!.push(node);
       return false;
     }
     if (descend) node.forEachChild(this);
     return false;
+  }
+
+  /** Records that `id` reported a statement in an ambient context. */
+  reportAmbientStatement(id: number): void {
+    if (this.reportedAmbientStatements.has(id)) return;
+    this.reportedAmbientStatements.add(id);
+    this.ambientReportLog?.push(id);
+  }
+
+  /** Undoes the ambient-context reports added since the log had `mark` entries. */
+  private undoAmbientReports(mark: number): void {
+    const log = this.ambientReportLog!;
+    for (let i = mark; i < log.length; i++) this.reportedAmbientStatements.delete(log[i]!);
+    log.length = mark;
   }
 
   /** Reports an error at `node`, as `Checker.error`; returns the diagnostic. */
@@ -2178,7 +2199,7 @@ function checkGrammarStatementInAmbientContext(g: GrammarChecker, node: Node): b
       node,
       Diagnostics.An_implementation_cannot_be_declared_in_ambient_contexts,
     );
-    if (reported) g.reportedAmbientStatements.add(id);
+    if (reported) g.reportAmbientStatement(id);
     return reported;
   }
   // Report once per block; statements nested in other statements are covered by their parent.
@@ -2190,7 +2211,7 @@ function checkGrammarStatementInAmbientContext(g: GrammarChecker, node: Node): b
     const parentId = getNodeId(parent);
     if (!g.reportedAmbientStatements.has(parentId)) {
       const reported = grammarErrorOnFirstToken(g, node, Diagnostics.Statements_are_not_allowed_in_ambient_contexts);
-      if (reported) g.reportedAmbientStatements.add(parentId);
+      if (reported) g.reportAmbientStatement(parentId);
       return reported;
     }
   }

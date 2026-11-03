@@ -131,6 +131,12 @@ export class CompilerHost extends ModuleResolutionHost {
     return this.fs.getAccessibleEntries(path).directories;
   }
 
+  /**
+   * The metadata of the file `FileLoader` is parsing, which it computes from the file's package scope
+   * before it parses it; a host that walks the grammar of the parsed file reads it (parse-thread.ts).
+   */
+  loadingSourceFileMetadata: SourceFileMetadata | undefined = undefined;
+
   /** Parses a file, or returns `undefined` if it can't be read. */
   getSourceFile(
     fileName: string,
@@ -1222,6 +1228,8 @@ export class FileLoader {
         ? libFileMetadata
         : (loaded?.metadata ?? this.loadSourceFileMetadata(task.normalizedFilePath));
     const options = this.mapper.getCompilerOptionsForFile(task.path, task.normalizedFilePath);
+    // For the host that walks the grammar of the file as it parses it (parse-thread.ts).
+    this.host.loadingSourceFileMetadata = task.metadata;
     const file = this.host.getSourceFile(
       task.normalizedFilePath,
       task.path,
