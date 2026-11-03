@@ -4,6 +4,26 @@
 
 <!-- release:start -->
 
+## 0.1.1
+
+### Highlights
+
+- **scriptc 0.4.8:** tsc-ts now builds with scriptc 0.4.8 and the two-phase profile collected with it; the build checks 1.6% faster on VS Code and 3.3% faster on the T3 web project at `--checkers 1`.
+- **Faster checking:** on Linux the optimized build passes `--exceptions=rare` to scriptc, so the check's recursive functions propagate an exception by native unwinding instead of testing a status after each of their calls, and the profile is collected from builds with the same option. The union a list of types was reduced to is looked up instead of created again on every call, which makes a Sentry check 2.6% faster at `--checkers 1`. An expression check that repeats a node and mode with no contextual type returns the type its completed check produced, which makes checking tsc-ts itself 2.1% faster at `--checkers 1`. Matching a wildcard module pattern computes the pattern's prefix and suffix once instead of on every call. An identifier refers to an interned name instead of holding its text, so identifiers with the same text share one name and one string.
+- **Run configuration:** a run's checker count, result sharing, parse threads and bounded sharing are recorded in one configuration with the source of each value. `--extendedDiagnostics` prints a `Suggestions:` section after the statistics table with each value, where it came from (`pinned: --checkers`, `default`, `automatic: ...`, `learned: check 14% faster over 3 runs`, `exploring`, `control`) and how to pin it, and `--build` prints one section per project. Every count a run decides comes from the whole CPUs the process's cgroup CPU quota allows, so a container is configured as the machine it is.
+- **Run records:** a run that checks a program writes one JSON file per project under `~/.cache/tsc-ts/runs-v1/` (`TSC_TS_CACHE_DIR` sets the directory, `TSC_TS_CACHE=0` turns records off) with the program's shape, the configuration the run chose, and the run's parse, check and wall time, CPU time, peak memory and load; the section names the file under `Records:`. A later run adopts a configuration its record's samples show faster than the static choice: by 3% or twice the standard error of the gains each sample makes against the nearest run of the other arm, on three samples of each taken while the machine was not busy. It re-measures the static choice as a control every sixteenth run and in the first run after two weeks, and reverts an adopted configuration whose last three samples all fall behind the controls. A program whose shape changed by more than 15% discards the record's samples.
+- **`tsc-ts doctor`:** `tsc-ts doctor [-p <tsconfig>] [--runs N] [--budget SECONDS] [--emit] [--json] [--no-save]` runs the project's check as a child process under the default configuration, with sharing on, with up to 16 checkers, with both, and with half the parse threads, compares the phase times by the rule automatic selection uses, and prints what it recommends with the evidence for it. A configuration that prints other diagnostics or exits otherwise ends the run with status 2 and the first differing lines. Each measured run is a child process and writes what it measured to the file named by `TSC_TS_DOCTOR_REPORT`; unless `--no-save` is given, its samples go into the project's record with role `doctor`. The command is experimental.
+- **Automatic result sharing:** at 12 or more checkers a run turns sharing on by itself when 40% of the program's files are declarations or come from `node_modules`, the checkers' ranges mostly resolve the same large libraries, and the count fits memory with the peak sharing adds. A sharing run reads its checkers' counters 300 ms in and stops posting, or posting and translating, when sharing saved less than 1.5 times what it cost or took almost none of the posted results; a stopped run computes what it did not take, so its diagnostics do not change. A checker thread writes a result's records into a shared store and publishes the cursor, and another thread reads a result in place, translating the records it needs, rather than building a record graph on both sides. The heavy cut that feeds the shared queue takes a 128th of the program's estimated cost at every checker count, so at 16 checkers the files that cost between a 32nd and an eighth of a share are checked by whichever checker frees up first.
+- **`TSC_TS_SHARE_PRICE`:** `TSC_TS_SHARE_PRICE=<prefix>` writes one log per checker thread with the results it computed, took or could have taken, its translations, the uncached type-operator evaluations a shared evaluation cache would cover, and the interval it checked in; `TSC_TS_SHARE_SUMMARY=1` adds per-kind counters to the summary line. `build-native.mjs --with-share-price` writes the log's code into a copy of the sources and builds that copy; a build without the flag compiles the sources as they are.
+
+### Behavior changes
+
+- `--extendedDiagnostics` prints a `Suggestions:` section after the statistics table, and names the run's record under `Records:`.
+- A run keeps no record in watch mode, in a `--build` of several projects at once, with `--singleThreaded`, under Node.js, and with `TSC_TS_AUTO=0` or `static`; with `CI` set it reads and adopts a record but never explores.
+- `TSC_TS_AUTO=explore` adds an experimental alternative in which one run in eight tries a setting the signals leave uncertain; such a run is slower than the configuration it would have used.
+
+<!-- release:end -->
+
 ## 0.1.0
 
 ### Highlights
@@ -31,8 +51,6 @@
   - Completions and auto-import fixes no longer insert declaration or package text as code: exports whose names are not identifiers are not imported, and the exhaustive `switch` snippet is not offered for such names.
   - An opening tag's completions list only names that can be written as tag names.
   - Wildcard export targets of a package are not searched outside it.
-
-<!-- release:end -->
 
 ## 0.0.10
 
