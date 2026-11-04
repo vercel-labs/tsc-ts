@@ -137,15 +137,27 @@ function committedProfile() {
   return twoPhase && hasSecondProfilePhase() ? TWO_PHASE_PROFILE : SINGLE_PHASE_PROFILE;
 }
 
+// The installed scriptc has a second profile phase when it is the one that collected the two-phase profile, as
+// profiles/tsc-ts.cs.json records. The probe needs --profile-generate, which scriptc supports only for Linux
+// executables, so on macOS and Windows it always fails; it decides only for another scriptc (SCRIPTC).
 function hasSecondProfilePhase() {
-  return (secondPhase ??= supportsSecondProfilePhase(scriptc, join(root, SINGLE_PHASE_PROFILE)));
+  return (secondPhase ??=
+    collectedTwoPhaseProfile() || supportsSecondProfilePhase(scriptc, join(root, SINGLE_PHASE_PROFILE)));
+}
+
+function collectedTwoPhaseProfile() {
+  if (process.env.SCRIPTC !== undefined) return false;
+  const recorded = join(root, profileInfoPath(TWO_PHASE_PROFILE));
+  if (!existsSync(recorded)) return false;
+  const { scriptc: collectedWith, secondProfilePhase } = JSON.parse(readFileSync(recorded, 'utf8'));
+  return secondProfilePhase === true && collectedWith === JSON.parse(readFileSync(scriptcPackage, 'utf8')).version;
 }
 
 function checkProfile(report) {
   const info = profileInfo === undefined ? {} : JSON.parse(readFileSync(profileInfo, 'utf8'));
   const verdict = judgeProfileMatch(report, info.functions ?? undefined, {
     ci: Boolean(process.env.CI),
-    checked: !windows,
+    checked: process.platform === 'linux',
     profile,
   });
   const prefix = { ok: 'tsc-ts:', note: 'tsc-ts: note:', warn: 'tsc-ts: warning:', fail: 'tsc-ts: error:' }[
