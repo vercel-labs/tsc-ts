@@ -639,7 +639,7 @@ function checkTypeMemberAccessor(c: Checker, node: Node): void {
 /** Variadic tuple elements must be array-like. */
 function checkTupleRestElements(c: Checker, node: TupleTypeNode): void {
   for (const e of node.elements.nodes) {
-    if ((getTupleElementFlags(c, e) & ElementFlags.Variadic) === 0) continue;
+    if ((getTupleElementFlags(e) & ElementFlags.Variadic) === 0) continue;
     if (!isArrayLikeType(c, getTypeFromTypeNode(c, getType(e)!))) {
       c.error(e, Diagnostics.A_rest_element_type_must_be_an_array_type);
       return;
