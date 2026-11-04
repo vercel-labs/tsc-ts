@@ -965,16 +965,25 @@ const enum MemberKind {
  * (with `checkPrivateNames`) private names shared by static and instance members.
  */
 export function checkObjectTypeForDuplicateDeclarations(c: Checker, node: Node, checkPrivateNames: boolean): void {
-  const instanceNames = new Map<string, MemberKind>();
-  const staticNames = new Map<string, MemberKind>();
-  const privateNames = new Map<string, number>();
+  // Only a symbol with several declarations can be a duplicate, so the maps are created for the first one.
+  let instanceNames: Map<string, MemberKind> | undefined;
+  let staticNames: Map<string, MemberKind> | undefined;
+  let privateNames: Map<string, number> | undefined;
   const nodeInAmbientContext = (node.flags & NodeFlags.Ambient) !== 0;
   for (const member of getMembers(node)!.nodes) {
     if (member.kind === SyntaxKind.Constructor) {
       for (const param of getParameters(member)!.nodes)
         if (isParameterPropertyDeclaration(param, member) && !isBindingPattern(getName(param))) {
           const symbol = getSymbolOfDeclaration(c, param);
-          if (symbol !== undefined) checkPropertyOrAccessor(c, node, instanceNames, symbol, MemberKind.Property, false);
+          if (symbol !== undefined && declarationCount(symbol) > 1)
+            checkPropertyOrAccessor(
+              c,
+              node,
+              (instanceNames ??= new Map<string, MemberKind>()),
+              symbol,
+              MemberKind.Property,
+              false,
+            );
         }
       continue;
     }
@@ -988,21 +997,26 @@ export function checkObjectTypeForDuplicateDeclarations(c: Checker, node: Node, 
         symbol.name,
         symbolToString(c, getSymbolOfDeclaration(c, node)!),
       );
-    const names = memberIsStatic ? staticNames : instanceNames;
-    const hasAccessorModifier = hasSyntacticModifier(member, ModifierFlags.Accessor);
-    if (
-      (member.kind === SyntaxKind.PropertyDeclaration && !hasAccessorModifier) ||
-      member.kind === SyntaxKind.PropertySignature
-    )
-      checkPropertyOrAccessor(c, node, names, symbol, MemberKind.Property, memberIsStatic);
-    else if (
-      member.kind === SyntaxKind.GetAccessor ||
-      member.kind === SyntaxKind.SetAccessor ||
-      (member.kind === SyntaxKind.PropertyDeclaration && hasAccessorModifier)
-    )
-      checkPropertyOrAccessor(c, node, names, symbol, MemberKind.Accessor, memberIsStatic);
+    if (declarationCount(symbol) > 1) {
+      const names = memberIsStatic
+        ? (staticNames ??= new Map<string, MemberKind>())
+        : (instanceNames ??= new Map<string, MemberKind>());
+      const hasAccessorModifier = hasSyntacticModifier(member, ModifierFlags.Accessor);
+      if (
+        (member.kind === SyntaxKind.PropertyDeclaration && !hasAccessorModifier) ||
+        member.kind === SyntaxKind.PropertySignature
+      )
+        checkPropertyOrAccessor(c, node, names, symbol, MemberKind.Property, memberIsStatic);
+      else if (
+        member.kind === SyntaxKind.GetAccessor ||
+        member.kind === SyntaxKind.SetAccessor ||
+        (member.kind === SyntaxKind.PropertyDeclaration && hasAccessorModifier)
+      )
+        checkPropertyOrAccessor(c, node, names, symbol, MemberKind.Accessor, memberIsStatic);
+    }
     const name = getName(member);
     if (checkPrivateNames && name !== undefined && name.kind === SyntaxKind.PrivateIdentifier) {
+      privateNames ??= new Map<string, number>();
       let flags = privateNames.get(symbol.name) ?? 0;
       if (flags === 3) continue;
       flags |= isStatic(member) ? 2 : 1;
