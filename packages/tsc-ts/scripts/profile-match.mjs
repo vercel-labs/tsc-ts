@@ -28,8 +28,9 @@ export function parseProfileReport(stderr) {
 // The verdict on a build's profile match: { level: 'ok' | 'note' | 'warn' | 'fail', message }. `functions` is the
 // number recorded beside `profile`. A partition that scriptc reused from its cache without the match counts
 // leaves the share undefined, as does a missing report or count; those builds get a note.
-// `checked: false` reports the share as a note: refresh-profile.mjs collects the profile on Linux, and Windows builds
-// generate different control flow for most functions, so they annotate fewer of them however fresh the profile is.
+// `checked: false` reports the share as a note: refresh-profile.mjs collects the profile on Linux, with
+// --exceptions=rare, and macOS and Windows builds generate different control flow for most functions, so they annotate
+// fewer of them however fresh the profile is.
 export function judgeProfileMatch(report, functions, { ci, checked = true, profile = 'profiles/tsc-ts.profdata' }) {
   if (report === undefined)
     return { level: 'note', message: 'scriptc printed no profile report, so the profile match is not checked' };
@@ -46,7 +47,7 @@ export function judgeProfileMatch(report, functions, { ci, checked = true, profi
   const share = report.annotated / functions;
   const percent = (Math.floor(share * 1000) / 10).toFixed(1);
   const summary = `the build annotates ${report.annotated} of the ${functions} functions ${profile} describes (${percent}%)`;
-  if (!checked) return { level: 'note', message: `${summary}; the match is checked on Linux and macOS builds` };
+  if (!checked) return { level: 'note', message: `${summary}; the match is checked on Linux builds` };
   if (share >= WARN_BELOW) return { level: 'ok', message: summary };
   const advice = 'run `npm run refresh-profile -w tsc-ts` to collect it again';
   if (share >= FAIL_BELOW) return { level: 'warn', message: `${summary}; ${advice}` };

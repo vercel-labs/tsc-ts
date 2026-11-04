@@ -1,0 +1,2 @@
+# Profile block counts are read byte for byte; a CRLF checkout on Windows makes scriptc reject them.
+packages/tsc-ts/profiles/*.blocks -text
