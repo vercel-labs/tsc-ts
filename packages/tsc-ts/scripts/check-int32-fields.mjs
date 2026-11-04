@@ -20,7 +20,12 @@ export const storedFields = new Map([['Node', ['kind', 'flags', 'pos', 'end', 'p
 /** The fields the struct type of `line` stores, from the class comment scriptc writes after it. */
 function fieldsOf(line) {
   const comment = /}\s*;\s*class\s+%\S+\s*(?:\([^)]*\)\s*)?\{([^}]*)\}/.exec(line);
-  return comment === null ? [] : comment[1].split(';').map((field) => field.trim()).filter((field) => field !== '');
+  return comment === null
+    ? []
+    : comment[1]
+        .split(';')
+        .map((field) => field.trim())
+        .filter((field) => field !== '');
 }
 
 /**
