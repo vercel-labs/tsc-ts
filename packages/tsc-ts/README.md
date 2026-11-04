@@ -84,3 +84,9 @@ The program's diagnostics, with their text and positions, are those `tsc --api` 
 An exception the compiler throws while answering a call reaches the caller as an `InternalCompilerError`, with the exception as its `cause`; the program's checker may be inconsistent after one, so dispose of the program. `program.dispose()` frees the program's checkers; calls on the program or its checker after it throw a `DisposedProgramError`.
 
 The package has a JavaScript build with declaration files for Node.js, and the TypeScript sources of the API and the compiler (the `source` export condition) for compilers that build it from source. The sources compile with scriptc: a test builds a program on `tsc-ts/api` natively and checks that it answers as the Node build.
+
+The API imports `@scriptc/threads`, an optional peer dependency that the command line doesn't use. Install it next to `tsc-ts` to use `tsc-ts/api`:
+
+```bash
+npm install -D tsc-ts @scriptc/threads
+```
