@@ -411,6 +411,8 @@ export class Checker implements TypeChecking {
   // Counters for type and signature ids.
   typeCount = 0;
   signatureCount = 0;
+  /** Transient symbols the checker created (statistics), as tsgo's `Checker.SymbolCount`. */
+  symbolCount = 0;
   /** Positions of members by name in the tables and lists that lazily instantiated members come from. */
   readonly memberPositionsInLists = new Map<Symbol[], Map<string, number>>();
   /** The property names of the last instantiation of each such list whose table is built on demand. */
@@ -1173,11 +1175,13 @@ export class Checker implements TypeChecking {
   }
 
   newSymbol(flags: SymbolFlags, name: string): Symbol {
+    this.symbolCount++;
     const symbol = new Symbol(flags | SymbolFlags.Transient, name);
     return symbol;
   }
 
   newSymbolWithCheckFlags(flags: SymbolFlags, name: string, checkFlags: CheckFlags): Symbol {
+    this.symbolCount++;
     const symbol = new Symbol(flags | SymbolFlags.Transient, name);
     symbol.checkFlags = checkFlags;
     return symbol;

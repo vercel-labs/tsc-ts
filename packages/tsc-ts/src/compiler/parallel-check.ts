@@ -199,6 +199,11 @@ export class CheckerResult {
     readonly units: number[] = [],
     /** Those of `units` after which its checker had diagnostics in their file (`checkSourceFileRange`). */
     readonly reportingUnits: number[] = [],
+    /**
+     * The types, instantiations and transient symbols its checker created, which `--diagnostics` adds to
+     * the main thread's (`CheckedProgram.addCheckerCounts`); empty for a result without a checker of its own.
+     */
+    readonly counts: number[] = [],
   ) {}
 }
 
@@ -243,6 +248,7 @@ export type PackedResult = {
   readonly reserved: number[];
   readonly units: Int32Array;
   readonly reportingUnits: Int32Array;
+  readonly counts: number[];
 };
 
 class ResultPacker {
@@ -346,6 +352,7 @@ export function packResult(result: CheckerResult, program: Program): PackedResul
     reserved: result.reserved,
     units: Int32Array.from(result.units),
     reportingUnits: Int32Array.from(result.reportingUnits),
+    counts: result.counts,
   };
 }
 
@@ -475,6 +482,7 @@ export function unpackResult(
     emits,
     Array.from(packed.units),
     Array.from(packed.reportingUnits),
+    packed.counts,
   );
 }
 
@@ -1928,6 +1936,7 @@ export function checkFromQueue(
     emits,
     unitsDone,
     reportingUnits,
+    onMainThread ? [] : [checked.checker.typeCount, checked.checker.totalInstantiations, checked.checker.symbolCount],
   );
 }
 
@@ -2326,6 +2335,7 @@ export function startParallelCheck(
     done(performance.now() - start);
   };
   const record = (result: CheckerResult): void => {
+    checked.addCheckerCounts(result.counts);
     if (declarationsTo !== undefined) {
       for (let k = 0; k < result.declarations.length; k++) declarationsTo[result.files[k]!] = result.declarations[k]!;
       if (trace)
@@ -2569,6 +2579,7 @@ class Revival {
       copy.emits.map((emit) => this.emit(emit)),
       copy.units,
       copy.reportingUnits,
+      copy.counts,
     );
   }
 

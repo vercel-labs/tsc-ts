@@ -248,6 +248,28 @@ export class CheckedProgram {
     this.reportingChecker = undefined;
   }
 
+  /** Adds the counts a checker thread sent (`CheckerResult.counts`): types, instantiations, symbols. */
+  addCheckerCounts(counts: readonly number[]): void {
+    if (counts.length < 3) return;
+    this.threadTypeCount += counts[0]!;
+    this.threadInstantiations += counts[1]!;
+    this.threadSymbolCount += counts[2]!;
+  }
+
+  /**
+   * The types, instantiations and transient symbols of every checker of the program: this thread's and
+   * the checker threads', as tsgo's `Program.TypeCount`, `InstantiationCount` and `SymbolCount` add them up.
+   * Reading them doesn't create this thread's checker.
+   */
+  checkerCounts(): { types: number; instantiations: number; symbols: number } {
+    const own = this.reportingChecker;
+    return {
+      types: (own === undefined ? 0 : own.typeCount) + this.threadTypeCount,
+      instantiations: (own === undefined ? 0 : own.totalInstantiations) + this.threadInstantiations,
+      symbols: (own === undefined ? 0 : own.symbolCount) + this.threadSymbolCount,
+    };
+  }
+
   getBindDiagnostics(file: SourceFile | undefined): Diagnostic[] {
     return this.collect(file, (f) => f.bindDiagnostics);
   }
@@ -272,6 +294,12 @@ export class CheckedProgram {
    */
   referenceThreads = 1;
   readonly parallelGlobalDiagnostics: Diagnostic[] = [];
+  /** The types checker threads created (`CheckerResult.counts`), which `--diagnostics` adds to `checker`'s. */
+  threadTypeCount = 0;
+  /** The instantiations checker threads made. */
+  threadInstantiations = 0;
+  /** The transient symbols checker threads created. */
+  threadSymbolCount = 0;
   /**
    * Whether the semantic diagnostics of a file include the global diagnostics its checker found while
    * checking it, as an incremental program caches them (IncrementalProgram). Such a program doesn't report

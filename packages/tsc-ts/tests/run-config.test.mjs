@@ -1565,6 +1565,47 @@ test('--extendedDiagnostics prints the section, after the statistics', { skip },
   assert.deepEqual(lines.slice(at + 6), ['']);
 });
 
+test('--extendedDiagnostics counts the types, instantiations and symbols of every checker', { skip }, () => {
+  const dir = tempDir('tsc-ts-run-config-counts-');
+  const names = [];
+  for (let i = 0; i < 8; i++) {
+    names.push(`f${i}.ts`);
+    writeFileSync(
+      join(dir, `f${i}.ts`),
+      `export type Box${i}<T> = { value: T; map<U>(f: (t: T) => U): Box${i}<U> };\n` +
+        `export function box${i}<T>(value: T): Box${i}<T> { return { value, map: (f) => box${i}(f(value)) }; }\n` +
+        `export const n${i} = box${i}(${i}).map((x) => ({ x, s: String(x) })).map((o) => [o.s, o.x] as const);\n`,
+    );
+  }
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [] }, files: names }) + '\n',
+  );
+  const table = (checkers) => {
+    const { output, status } = run(dir, ['-p', '.', '--extendedDiagnostics', '--checkers', String(checkers)]);
+    assert.equal(status, 0, output);
+    const rows = new Map();
+    for (const line of output.split('\n')) {
+      const m = /^([A-Za-z ]+):\s+(\d+)K?$/.exec(line);
+      if (m !== null) rows.set(m[1], Number(m[2]));
+    }
+    return { output, rows };
+  };
+  const one = table(1);
+  const four = table(4);
+  for (const { output, rows } of [one, four]) {
+    // Each checker creates the intrinsic and global types, so a program has hundreds of them.
+    assert.ok(rows.get('Types') > 100, `Types in:\n${output}`);
+    assert.ok(rows.get('Instantiations') > 0, `Instantiations in:\n${output}`);
+    assert.ok(rows.get('Memory used') > 0, `Memory used in:\n${output}`);
+    // The table keeps tsgo's rows, the allocation count's included.
+    assert.ok(rows.has('Memory allocs'), output);
+  }
+  // The checker threads' types are added to the main thread's, so more checkers count at least as many.
+  assert.ok(four.rows.get('Types') >= one.rows.get('Types'), `${one.output}\n${four.output}`);
+  assert.ok(four.rows.get('Symbols') >= one.rows.get('Symbols'), `${one.output}\n${four.output}`);
+});
+
 test('--extendedDiagnostics reports the pins of sharing and the parse threads', { skip }, () => {
   const dir = project();
   const { output } = run(dir, ['-p', '.', '--extendedDiagnostics'], {
