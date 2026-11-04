@@ -878,9 +878,9 @@ export class Statistics {
     rows.push([prefix + 'Types', String(this.types)]);
     rows.push([prefix + 'Instantiations', String(this.instantiations)]);
     rows.push([prefix + 'Memory used', `${Math.floor(this.memoryUsed / 1024)}K`]);
-    // No runtime counter matches tsgo's allocation count (runtime.MemStats.Mallocs): the row is left out
-    // rather than printing 0.
-    if (this.memoryAllocs !== 0) rows.push([prefix + 'Memory allocs', String(this.memoryAllocs)]);
+    // The table has tsgo's rows. No runtime counter matches its allocation count (runtime.MemStats.Mallocs),
+    // so this one stays 0.
+    rows.push([prefix + 'Memory allocs', String(this.memoryAllocs)]);
     const t = this.times;
     if (t.configTime !== 0) rows.push([prefix + 'Config time', formatDuration(t.configTime)]);
     if (t.buildInfoReadTime !== 0) rows.push([prefix + 'BuildInfo read time', formatDuration(t.buildInfoReadTime)]);

@@ -1598,8 +1598,8 @@ test('--extendedDiagnostics counts the types, instantiations and symbols of ever
     assert.ok(rows.get('Types') > 100, `Types in:\n${output}`);
     assert.ok(rows.get('Instantiations') > 0, `Instantiations in:\n${output}`);
     assert.ok(rows.get('Memory used') > 0, `Memory used in:\n${output}`);
-    // No runtime counter matches tsgo's allocation count: the row is left out instead of printing 0.
-    assert.equal(rows.has('Memory allocs'), false, output);
+    // The table keeps tsgo's rows, the allocation count's included.
+    assert.ok(rows.has('Memory allocs'), output);
   }
   // The checker threads' types are added to the main thread's, so more checkers count at least as many.
   assert.ok(four.rows.get('Types') >= one.rows.get('Types'), `${one.output}\n${four.output}`);
