@@ -209,55 +209,31 @@ export abstract class NodeVisitor {
   }
 }
 
-// Native builds store number fields as 32-bit integers when every write provably stores an int32,
-// so writes of values the compiler can't bound (parameters, the id counter) are coerced with
-// `| 0`; the values are always int32.
+// Native builds store `pos`, `end` and `id` as 32-bit integers when every write provably stores
+// an int32, so writes of values the compiler can't bound (parameters, the id counter) are
+// coerced with `| 0`; the values are always int32.
 //
-// A node keeps five 32-bit words instead of six: `kindFlags` holds kind and the low 23 bits of
-// flags, `flagsPos` the top 6 bits of flags and `pos + 1`, and `end`, `id` and `parent` have a
-// word each. Nodes are the program's most numerous objects, and the fifth word takes 4 bytes off
-// every node record; because records are allocated on 8 bytes, a class whose own fields take an
-// even number of words gets 8 bytes smaller and one whose fields take an odd number does not.
-// `pos` keeps 26 bits, a script of 128 MiB of UTF-16 (-1 stores as 0); the other fields keep
-// their full range.
+// The fields of a node that the public API's node types declare are stored fields, not values
+// computed from or packed into another field: a native build copies the stored fields of a node
+// into a record when API code narrows one (`node as StringLiteralLike`), and a field behind an
+// accessor is not copied.
 export abstract class Node implements ProgramLifetime {
-  /** kind in the low 9 bits, the low 23 bits of flags above them. */
-  private kindFlags: number;
-  /** The top 6 bits of flags in the low 6 bits, `pos + 1` above them. */
-  private flagsPos: number;
+  readonly kind: SyntaxKind;
+  flags: NodeFlags;
+  /** Start including leading trivia, as a UTF-16 offset. */
+  pos: number;
   end: number;
   parent: Node | undefined;
   /** A program-wide id, unique among all nodes, in construction order. */
   readonly id: number;
 
   constructor(kind: SyntaxKind) {
-    this.kindFlags = kind & 0x1ff;
-    this.flagsPos = 0;
+    this.kind = kind;
+    this.flags = NodeFlags.None;
+    this.pos = -1;
     this.end = -1;
     this.parent = undefined;
     this.id = (lastNodeId < nodeIdLimit ? ++lastNodeId : takeNodeIdChunk()) | 0;
-  }
-
-  get kind(): SyntaxKind {
-    return (this.kindFlags & 0x1ff) as SyntaxKind;
-  }
-
-  get flags(): NodeFlags {
-    return (((this.kindFlags >>> 9) | (this.flagsPos << 23)) & 0x1fffffff) as NodeFlags;
-  }
-
-  set flags(value: NodeFlags) {
-    this.kindFlags = (this.kindFlags & 0x1ff) | ((value & 0x7fffff) << 9);
-    this.flagsPos = (this.flagsPos & ~0x3f) | ((value >>> 23) & 0x3f);
-  }
-
-  /** Start including leading trivia, as a UTF-16 offset. */
-  get pos(): number {
-    return (this.flagsPos >>> 6) - 1;
-  }
-
-  set pos(value: number) {
-    this.flagsPos = (this.flagsPos & 0x3f) | (((value + 1) & 0x3ffffff) << 6);
   }
 
   /** Calls `visitor` for each child in order; returns `true` if the visitor stopped. */

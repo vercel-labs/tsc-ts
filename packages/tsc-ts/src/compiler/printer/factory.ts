@@ -319,7 +319,7 @@ export abstract class NodeFactory extends NodeFactoryBase {
   createExpressionFromEntityName(node: Node): Node {
     if (node instanceof QualifiedName) {
       const left = this.createExpressionFromEntityName(node.left);
-      const right: Node =
+      const right =
         node.right instanceof PrivateIdentifier
           ? this.cloneNode(node.right, new PrivateIdentifier(node.right.text))
           : this.cloneIdentifier(node.right as Identifier);
