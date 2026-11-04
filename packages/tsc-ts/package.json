@@ -39,6 +39,11 @@
     "bench": "node scripts/bench.mjs",
     "refresh-profile": "node scripts/refresh-profile.mjs"
   },
+  "devDependencies": {
+    "@scriptc/threads": "0.4.8",
+    "@scriptc/types": "^0.4.8",
+    "@tsc-ts/tsgo": "*"
+  },
   "peerDependencies": {
     "@scriptc/threads": "0.4.8"
   },
@@ -46,11 +51,6 @@
     "@scriptc/threads": {
       "optional": true
     }
-  },
-  "devDependencies": {
-    "@scriptc/threads": "0.4.8",
-    "@scriptc/types": "^0.4.8",
-    "@tsc-ts/tsgo": "*"
   },
   "engines": {
     "node": ">=20"
