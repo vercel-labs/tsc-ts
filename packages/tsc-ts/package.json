@@ -40,10 +40,10 @@
     "refresh-profile": "node scripts/refresh-profile.mjs"
   },
   "dependencies": {
-    "@scriptc/threads": "0.4.7"
+    "@scriptc/threads": "0.4.8"
   },
   "devDependencies": {
-    "@scriptc/types": "^0.4.7",
+    "@scriptc/types": "^0.4.8",
     "@tsc-ts/tsgo": "*"
   },
   "engines": {
