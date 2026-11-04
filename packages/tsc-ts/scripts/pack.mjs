@@ -184,6 +184,13 @@ function check({ main, platform }) {
     console.log('npx tsc-ts -p .: ok');
 
     rmSync(join(dir, 'src/error.ts'));
+    // The command line runs without the API's optional peer dependency; the API needs it installed.
+    if (existsSync(join(dir, 'node_modules', '@scriptc', 'threads'))) {
+      throw new Error('installing tsc-ts also installed @scriptc/threads, which only tsc-ts/api needs');
+    }
+    console.log('installed without @scriptc/threads: ok');
+    const threads = `@scriptc/threads@${manifest.peerDependencies['@scriptc/threads']}`;
+    run('npm', ['install', '--no-audit', '--no-fund', threads], { cwd: dir });
     writeFileSync(join(dir, 'checked/error.ts'), 'export const count: number = "one";\n');
     // The platform package's lib files serve as the default libraries of a program.
     const lib = join(dir, 'node_modules', packageName(hostPlatform()), 'lib');
