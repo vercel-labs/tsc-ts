@@ -421,8 +421,9 @@ function checkUnusedClassMembers(c: Checker, node: Node): void {
 function checkUnusedLocalsAndParameters(c: Checker, node: Node): void {
   const locals = getLocals(node);
   if (locals === undefined) return;
-  const variableParents = new Set<Node>();
-  const importClauses = new Map<Node, Node[]>();
+  // Created on the first unused declaration: most scopes have none.
+  let variableParents: Set<Node> | undefined;
+  let importClauses: Map<Node, Node[]> | undefined;
   for (const local of locals.values()) {
     const referenceKinds = c.symbolReferenceKinds.get(getSymbolId(local));
     if ((local.flags & SymbolFlags.TypeParameter) !== 0) {
@@ -438,6 +439,7 @@ function checkUnusedLocalsAndParameters(c: Checker, node: Node): void {
         case SyntaxKind.VariableDeclaration:
         case SyntaxKind.Parameter:
         case SyntaxKind.BindingElement:
+          variableParents ??= new Set<Node>();
           variableParents.add(getRootDeclaration(declaration).parent!);
           break;
         case SyntaxKind.ImportClause:
@@ -445,6 +447,7 @@ function checkUnusedLocalsAndParameters(c: Checker, node: Node): void {
         case SyntaxKind.NamespaceImport:
           if (!isIdentifierThatStartsWithUnderscore(getName(declaration))) {
             const importClause = importClauseFromImported(declaration);
+            importClauses ??= new Map<Node, Node[]>();
             const unuseds = importClauses.get(importClause);
             if (unuseds === undefined) importClauses.set(importClause, [declaration]);
             else unuseds.push(declaration);
@@ -456,12 +459,14 @@ function checkUnusedLocalsAndParameters(c: Checker, node: Node): void {
       }
     }
   }
-  for (const declaration of variableParents) {
-    if (declaration.kind === SyntaxKind.VariableDeclarationList)
-      reportUnusedVariables(c, declaration, (declaration as VariableDeclarationList).declarations.nodes);
-    else reportUnusedVariableDeclarations(c, getParameters(declaration)!.nodes);
-  }
-  for (const [declaration, unuseds] of importClauses) reportUnusedImports(c, declaration as ImportClause, unuseds);
+  if (variableParents !== undefined)
+    for (const declaration of variableParents) {
+      if (declaration.kind === SyntaxKind.VariableDeclarationList)
+        reportUnusedVariables(c, declaration, (declaration as VariableDeclarationList).declarations.nodes);
+      else reportUnusedVariableDeclarations(c, getParameters(declaration)!.nodes);
+    }
+  if (importClauses !== undefined)
+    for (const [declaration, unuseds] of importClauses) reportUnusedImports(c, declaration as ImportClause, unuseds);
 }
 
 function reportUnusedLocal(c: Checker, node: Node, name: string): void {

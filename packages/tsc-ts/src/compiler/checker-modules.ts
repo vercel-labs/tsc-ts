@@ -2167,14 +2167,16 @@ function getSymbolFlagsEx(
   excludeTypeOnlyMeanings: boolean,
   excludeLocalMeanings: boolean,
 ): SymbolFlags {
-  const seen = new Set<Symbol>();
+  // Only a chain of aliases needs the set, so most calls never create it.
+  let seen: Set<Symbol> | undefined;
   let flags = excludeLocalMeanings ? SymbolFlags.None : symbol.flags;
   while ((symbol.flags & SymbolFlags.Alias) !== 0) {
     if (excludeTypeOnlyMeanings && getTypeOnlyAliasDeclaration(c, symbol) !== undefined) break;
     const target = getExportSymbolOfValueSymbolIfExported(c, resolveAlias(c, symbol));
     if (target === c.unknownSymbol) return SymbolFlags.All;
     if ((target.flags & SymbolFlags.Alias) !== 0) {
-      if (target === symbol || seen.has(target)) break;
+      if (target === symbol || seen?.has(target)) break;
+      seen ??= new Set<Symbol>();
       seen.add(symbol);
       seen.add(target);
     }
