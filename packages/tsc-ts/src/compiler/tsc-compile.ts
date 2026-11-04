@@ -878,7 +878,9 @@ export class Statistics {
     rows.push([prefix + 'Types', String(this.types)]);
     rows.push([prefix + 'Instantiations', String(this.instantiations)]);
     rows.push([prefix + 'Memory used', `${Math.floor(this.memoryUsed / 1024)}K`]);
-    rows.push([prefix + 'Memory allocs', String(this.memoryAllocs)]);
+    // No runtime counter matches tsgo's allocation count (runtime.MemStats.Mallocs): the row is left out
+    // rather than printing 0.
+    if (this.memoryAllocs !== 0) rows.push([prefix + 'Memory allocs', String(this.memoryAllocs)]);
     const t = this.times;
     if (t.configTime !== 0) rows.push([prefix + 'Config time', formatDuration(t.configTime)]);
     if (t.buildInfoReadTime !== 0) rows.push([prefix + 'BuildInfo read time', formatDuration(t.buildInfoReadTime)]);
@@ -916,7 +918,14 @@ export function statisticsOf(compilerProgram: CompilerProgram): Statistics {
     statistics.identifiers += file.identifierCount;
     statistics.symbols += file.symbolCount;
   }
-  statistics.types = compilerProgram.checked.checker.typeCount;
+  // Every checker's counts, the checker threads' included, as tsgo's statisticsFromProgram reports them.
+  const counts = compilerProgram.checked.checkerCounts();
+  statistics.symbols += counts.symbols;
+  statistics.types = counts.types;
+  statistics.instantiations = counts.instantiations;
+  // tsgo reports the Go heap in use (runtime.MemStats.Alloc); the closest this runtime has is the
+  // process's resident set, which includes the checker threads' heaps.
+  statistics.memoryUsed = process.memoryUsage.rss();
   const t = statistics.times;
   const source = compilerProgram.times;
   t.configTime = source.configTime;
