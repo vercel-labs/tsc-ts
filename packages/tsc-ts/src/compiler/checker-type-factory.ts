@@ -1765,20 +1765,26 @@ export function getIntersectionType(c: Checker, types: Type[]): Type {
   return getIntersectionTypeEx(c, types, IntersectionFlags.None, undefined);
 }
 
+/**
+ * The distinct types of an intersection, in the order they were added. Most intersections have a few
+ * types, which a scan of `values` finds faster than a `Set` costs to build, so the set is created only
+ * once the list grows past `INDEX_AFTER`.
+ */
 class OrderedTypeSet {
+  private static readonly INDEX_AFTER = 8;
   readonly values: Type[] = [];
-  private readonly seen = new Set<Type>();
+  private index: Set<Type> | undefined;
   includes = 0;
 
   has(t: Type): boolean {
-    return this.seen.has(t);
+    return this.index !== undefined ? this.index.has(t) : this.values.includes(t);
   }
 
   add(t: Type): void {
-    if (!this.seen.has(t)) {
-      this.seen.add(t);
-      this.values.push(t);
-    }
+    if (this.has(t)) return;
+    this.values.push(t);
+    if (this.index !== undefined) this.index.add(t);
+    else if (this.values.length > OrderedTypeSet.INDEX_AFTER) this.index = new Set(this.values);
   }
 }
 
@@ -2153,7 +2159,8 @@ function addCrossProductIntersections(
   intersections: Type[],
 ): void {
   if (index === types.length) {
-    const t = getIntersectionTypeEx(c, constituents.slice(), flags, undefined);
+    // getIntersectionTypeEx copies the types it keeps, so the buffer is reused for the next combination.
+    const t = getIntersectionTypeEx(c, constituents, flags, undefined);
     if ((t.flags & TypeFlags.Never) === 0) intersections.push(t);
     return;
   }
