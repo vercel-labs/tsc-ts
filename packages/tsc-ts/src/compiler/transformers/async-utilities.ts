@@ -80,7 +80,7 @@ export function isFunctionLikeDeclaration(node: Node): boolean {
 }
 
 /** Whether every parameter is a plain identifier without an initializer. */
-export function isSimpleParameterList(parameters: Node[]): boolean {
+export function isSimpleParameterList(parameters: readonly Node[]): boolean {
   for (let i = 0; i < parameters.length; i++) {
     const parameter = parameters[i];
     if (!(parameter instanceof ParameterDeclaration)) continue;

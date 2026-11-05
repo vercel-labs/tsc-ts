@@ -187,7 +187,8 @@ function namedImportsOf(statement: Node): readonly Node[] | undefined {
   const bindings = statement.importClause?.namedBindings;
   if (!(bindings instanceof NamedImports)) return undefined;
   const elements = bindings.elements.nodes;
-  return elements.length === 0 ? undefined : elements;
+  // A copy: the callers pass the lists to callbacks.
+  return elements.length === 0 ? undefined : elements.slice();
 }
 
 // The specifier order of named imports in import declarations: comparer, type order, and whether they are sorted.

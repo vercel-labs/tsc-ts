@@ -170,7 +170,7 @@ function hasConstructSignature(resolver: ReferenceResolver, type: Node, location
   return false;
 }
 
-function hasMember(members: Node[], kind: SyntaxKind): boolean {
+function hasMember(members: readonly Node[], kind: SyntaxKind): boolean {
   for (let i = 0; i < members.length; i++) if (members[i]!.kind === kind) return true;
   return false;
 }
@@ -299,7 +299,7 @@ class TypeClassifier {
   }
 
   /** A union is of a kind when all its members are; without strict null checks, `null` and `undefined` fit any kind. */
-  private ofUnion(types: Node[], location: Node, depth: number): TypeReferenceSerializationKind {
+  private ofUnion(types: readonly Node[], location: Node, depth: number): TypeReferenceSerializationKind {
     let kind = TypeReferenceSerializationKind.Unknown;
     let nullable = false;
     for (let i = 0; i < types.length; i++) {

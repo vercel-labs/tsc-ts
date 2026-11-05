@@ -112,11 +112,11 @@ export abstract class NodeFactory extends NodeFactoryBase {
     return this.cloneNode(node, new Identifier(node.identifierName));
   }
 
-  createNodeList(nodes: Node[]): NodeList {
+  createNodeList(nodes: readonly Node[]): NodeList {
     return new NodeList(-1, -1, nodes);
   }
 
-  createModifierList(nodes: Node[]): ModifierList {
+  createModifierList(nodes: readonly Node[]): ModifierList {
     let flags = 0;
     for (let i = 0; i < nodes.length; i++) flags |= modifierToFlag(nodes[i].kind);
     return new ModifierList(-1, -1, nodes, flags);
@@ -155,7 +155,7 @@ export abstract class NodeFactory extends NodeFactoryBase {
     return node;
   }
 
-  createSyntaxList(children: Node[]): SyntaxList {
+  createSyntaxList(children: readonly Node[]): SyntaxList {
     return this.created(new SyntaxList(children));
   }
 
@@ -210,7 +210,7 @@ export abstract class NodeFactory extends NodeFactoryBase {
     );
   }
 
-  createBlock(statements: Node[], multiLine: boolean): Block {
+  createBlock(statements: readonly Node[], multiLine: boolean): Block {
     return this.created(new Block(this.createNodeList(statements), multiLine));
   }
 
@@ -561,7 +561,7 @@ export abstract class NodeFactory extends NodeFactoryBase {
   }
 
   /** `target.call(thisArg, ...args)` */
-  createFunctionCallCall(target: Node, thisArg: Node, args: Node[]): CallExpression {
+  createFunctionCallCall(target: Node, thisArg: Node, args: readonly Node[]): CallExpression {
     const all: Node[] = [thisArg];
     for (const arg of args) all.push(arg);
     return this.createMethodCall(target, 'call', all);
@@ -668,7 +668,7 @@ export abstract class NodeFactory extends NodeFactoryBase {
   }
 
   /** `(() => { ...statements })()` */
-  createImmediatelyInvokedArrowFunction(statements: Node[]): CallExpression {
+  createImmediatelyInvokedArrowFunction(statements: readonly Node[]): CallExpression {
     const arrow = this.createArrowFunction([], this.createBlock(statements, true));
     return this.createCallExpression(this.createParenthesizedExpression(arrow), []);
   }

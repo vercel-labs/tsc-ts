@@ -2,6 +2,7 @@
 //
 // Every node extends `Node`. Child fields are typed by category (`Expression`, `TypeNode`, …),
 // which are aliases of `Node`; narrow with the `is*` guards in ast-utilities.ts or `instanceof`.
+import type { InlineArray } from '@scriptc/experimental';
 import type { ProgramLifetime } from '@scriptc/types';
 import { IdentifierName } from './identifier-name.js';
 import { SyntaxKind } from './syntax-kind.js';
@@ -256,6 +257,16 @@ export abstract class Node implements ProgramLifetime {
   }
 }
 
+/**
+ * Whether two node arrays hold the same nodes in the same order. A list's `nodes` is an InlineArray, so two
+ * reads of it need not give the same array: whether a visit changed a list compares the elements.
+ */
+export function sameNodeArray(a: readonly Node[], b: readonly Node[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 /** A program-wide id, unique among all nodes. */
 export function getNodeId(node: Node): number {
   return node.id;
@@ -265,9 +276,9 @@ export function getNodeId(node: Node): number {
 export class NodeList implements ProgramLifetime {
   pos: number;
   end: number;
-  nodes: Node[];
+  readonly nodes: InlineArray<Node>;
 
-  constructor(pos: number, end: number, nodes: Node[]) {
+  constructor(pos: number, end: number, nodes: readonly Node[]) {
     this.pos = pos | 0;
     this.end = end | 0;
     this.nodes = nodes;
@@ -290,7 +301,7 @@ export class MissingNodeList extends NodeList {}
 export class ModifierList extends NodeList {
   modifierFlags: ModifierFlags;
 
-  constructor(pos: number, end: number, nodes: Node[], modifierFlags: ModifierFlags) {
+  constructor(pos: number, end: number, nodes: readonly Node[], modifierFlags: ModifierFlags) {
     super(pos, end, nodes);
     this.modifierFlags = modifierFlags;
   }
@@ -301,7 +312,7 @@ function setParents(nodes: readonly Node[], parent: Node): void {
   for (let i = 0; i < nodes.length; i++) nodes[i]!.parent = parent;
 }
 
-function cloneNodes(nodes: Node[]): Node[] {
+function cloneNodes(nodes: readonly Node[]): Node[] {
   const result: Node[] = [];
   for (let i = 0; i < nodes.length; i++) result.push(nodes[i]!.deepClone());
   return result;
@@ -6448,9 +6459,9 @@ export class JsxText extends Node {
 }
 
 export class SyntaxList extends Node {
-  children: Node[];
+  children: readonly Node[];
 
-  constructor(children: Node[]) {
+  constructor(children: readonly Node[]) {
     super(SyntaxKind.SyntaxList);
     this.children = children;
   }

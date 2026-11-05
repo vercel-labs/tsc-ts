@@ -376,7 +376,7 @@ class Flattener {
       }
     }
     if (bindingElements.length > 0)
-      this.emitBindingOrAssignment(this.createPattern(true, bindingElements), value, pos, end, pattern);
+      this.emitBindingOrAssignment(this.createPattern(true, bindingElements.slice()), value, pos, end, pattern);
     return true;
   }
 
@@ -430,7 +430,7 @@ class Flattener {
   }
 
   /** `__rest(value, ["a", "b"])`, excluding the properties named before the rest element. */
-  private createRestHelper(value: Node, elements: Node[], computed: Node[], pos: number, end: number): Node {
+  private createRestHelper(value: Node, elements: readonly Node[], computed: Node[], pos: number, end: number): Node {
     const factory = this.visitor.factory;
     this.visitor.context.requestEmitHelper(restHelper);
     const names: Node[] = [];
@@ -519,7 +519,7 @@ function isSimpleBindingOrAssignmentElement(element: Node): boolean {
   return target instanceof Identifier;
 }
 
-export function getElementsOfBindingOrAssignmentPattern(node: Node): Node[] {
+export function getElementsOfBindingOrAssignmentPattern(node: Node): readonly Node[] {
   if (node instanceof BindingPattern) return node.elements.nodes;
   if (node instanceof ArrayLiteralExpression) return node.elements.nodes;
   if (node instanceof ObjectLiteralExpression) return node.properties.nodes;
