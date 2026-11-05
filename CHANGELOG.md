@@ -36,7 +36,6 @@
 - A run keeps no record in watch mode, in a `--build` of several projects at once, with `--singleThreaded`, under Node.js, and with `TSC_TS_AUTO=0` or `static`; with `CI` set it reads and adopts a record but never explores.
 - `TSC_TS_AUTO=explore` adds an experimental alternative in which one run in eight tries a setting the signals leave uncertain; such a run is slower than the configuration it would have used.
 
-
 ## 0.1.0
 
 ### Highlights
