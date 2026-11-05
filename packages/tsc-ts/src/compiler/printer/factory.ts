@@ -156,7 +156,7 @@ export abstract class NodeFactory extends NodeFactoryBase {
   }
 
   createSyntaxList(children: readonly Node[]): SyntaxList {
-    return this.created(new SyntaxList(children));
+    return this.created(new SyntaxList(children.slice()));
   }
 
   createParenthesizedExpression(expression: Node): ParenthesizedExpression {

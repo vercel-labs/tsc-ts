@@ -6459,9 +6459,9 @@ export class JsxText extends Node {
 }
 
 export class SyntaxList extends Node {
-  children: readonly Node[];
+  children: Node[];
 
-  constructor(children: readonly Node[]) {
+  constructor(children: Node[]) {
     super(SyntaxKind.SyntaxList);
     this.children = children;
   }
