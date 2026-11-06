@@ -2161,7 +2161,8 @@ function checkSignals(
   }
   signals.library = library / ranges;
   signals.own = own / ranges;
-  signals.redundancy = (library - unionChars) / (library + own);
+  // Every range can be empty (all of a program's files in the shared queue), so `library + own` can be 0.
+  signals.redundancy = library + own === 0 ? 0 : (library - unionChars) / (library + own);
   signals.declarationShare = declarationFiles / files.length;
   signals.nodeModulesShare = nodeModulesFiles / files.length;
   if (config !== undefined) config.signals = signals;

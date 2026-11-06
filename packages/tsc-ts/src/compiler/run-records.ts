@@ -282,10 +282,17 @@ export function readRecord(file: string, now: number = Math.floor(Date.now() / 1
   return dropOldSamples(record, now);
 }
 
+/**
+ * A parsed value whose fields are read as `unknown` until they are checked. A native build checks a
+ * cast to a record type such as `Partial<RunRecord>` when it converts the value, and throws on a field
+ * of the wrong type, so a malformed record file would end the run instead of being ignored.
+ */
+type Unchecked<T> = { [K in keyof T]?: unknown };
+
 /** `parsed` as a record, or `undefined` where it is not one this build writes. */
 function recordOf(parsed: unknown): RunRecord | undefined {
   if (typeof parsed !== 'object' || parsed === null) return undefined;
-  const r = parsed as Partial<RunRecord>;
+  const r = parsed as Unchecked<RunRecord>;
   if (r.format !== recordFormat || typeof r.runs !== 'number' || !isShape(r.shape) || !isChoice(r.chosen))
     return undefined;
   const samples = Array.isArray(r.samples) ? r.samples.filter(isSample) : [];
@@ -304,7 +311,7 @@ function recordOf(parsed: unknown): RunRecord | undefined {
 
 function isShape(value: unknown): value is RecordShape {
   if (typeof value !== 'object' || value === null) return false;
-  const s = value as Partial<RecordShape>;
+  const s = value as Unchecked<RecordShape>;
   return (
     isNumber(s.files) &&
     isNumber(s.chars) &&
@@ -318,7 +325,7 @@ function isShape(value: unknown): value is RecordShape {
 
 function isChoice(value: unknown): value is RecordChoice {
   if (typeof value !== 'object' || value === null) return false;
-  const c = value as Partial<RecordChoice>;
+  const c = value as Unchecked<RecordChoice>;
   return (
     isNumber(c.checkers) &&
     typeof c.share === 'boolean' &&
@@ -331,7 +338,7 @@ function isChoice(value: unknown): value is RecordChoice {
 
 function isRejection(value: unknown): value is RecordRejection {
   if (typeof value !== 'object' || value === null) return false;
-  const r = value as Partial<RecordRejection>;
+  const r = value as Unchecked<RecordRejection>;
   return (
     isNumber(r.checkers) &&
     typeof r.share === 'boolean' &&
@@ -342,7 +349,7 @@ function isRejection(value: unknown): value is RecordRejection {
 
 function isSample(value: unknown): value is RecordSample {
   if (typeof value !== 'object' || value === null) return false;
-  const s = value as Partial<RecordSample>;
+  const s = value as Unchecked<RecordSample>;
   return (
     isNumber(s.run) &&
     isNumber(s.at) &&

@@ -1807,6 +1807,30 @@ test(
 );
 
 test(
+  'a native run ignores a record with a field of the wrong type',
+  { skip: !native && 'needs a native build (TSC_TS_BIN)' },
+  () => {
+    const dir = project();
+    const cache = tempDir('tsc-ts-run-config-cache-');
+    const env = { TSC_TS_CACHE: '1', TSC_TS_CACHE_DIR: cache };
+    const first = run(dir, ['-p', '.', '--extendedDiagnostics'], env);
+    assert.equal(first.status, 0, first.output);
+    const line = first.output.split('\n').find((text) => text.startsWith('  Records: '));
+    assert.ok(line !== undefined, `no Records line in:\n${first.output}`);
+    const path = line.slice('  Records: '.length);
+    // JSON writes NaN as null: a record from a run whose redundancy divided zero by zero.
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    record.shape.redundancy = null;
+    writeFileSync(path, JSON.stringify(record));
+    const second = run(dir, ['-p', '.'], env);
+    assert.equal(second.status, 0, second.output);
+    assert.doesNotMatch(second.output, /TypeError/);
+    // The run writes a record again, with a number in place of the null.
+    assert.equal(typeof JSON.parse(readFileSync(path, 'utf8')).shape.redundancy, 'number');
+  },
+);
+
+test(
   'a native run writes its record and the section names it',
   { skip: !native && 'needs a native build (TSC_TS_BIN)' },
   () => {
