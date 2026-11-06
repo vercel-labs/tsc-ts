@@ -450,7 +450,7 @@ export class RuntimeSyntax extends Transformer {
     this.currentNamespace = node;
     this.firstDeclarations = undefined;
     context.startVariableEnvironment();
-    let statements: Node[] = [];
+    let statements: readonly Node[] = [];
     let statementsPos = 0;
     let statementsEnd = 0;
     let blockPos = -1;
@@ -777,7 +777,9 @@ export class RuntimeSyntax extends Transformer {
       appendAll(statements, this.visitArray(rest));
     }
     const merged = context.mergeEnvironment(statements, context.endVariableEnvironment());
-    const updated = factory.created(new Block(new NodeList(body.statements.pos, body.statements.end, merged), true));
+    const updated = factory.created(
+      new Block(new NodeList(body.statements.pos, body.statements.end, merged.slice()), true),
+    );
     context.setOriginal(updated, body);
     updated.pos = body.pos;
     updated.end = body.end;
@@ -785,13 +787,14 @@ export class RuntimeSyntax extends Transformer {
   }
 
   private withInitializersAfterSuper(
-    statements: Node[],
+    statements: readonly Node[],
     superPath: number[],
     depth: number,
-    initializers: Node[],
+    initializers: readonly Node[],
   ): Node[] {
     const index = superPath[depth] | 0;
-    const result = this.visitArray(statements.slice(0, index));
+    // A copy: the visited statements may be the array a node list holds.
+    const result = [...this.visitArray(statements.slice(0, index))];
     const superStatement: Node | undefined = statements[index];
     if (superStatement === undefined) return result;
     if (superStatement instanceof TryStatement) {
@@ -804,7 +807,7 @@ export class RuntimeSyntax extends Transformer {
         tryStatement,
         this.factory.updateBlock(
           tryBlock,
-          new NodeList(tryBlock.statements.pos, tryBlock.statements.end, inner),
+          new NodeList(tryBlock.statements.pos, tryBlock.statements.end, inner.slice()),
           tryBlock.multiLine,
         ),
         visitedCatch instanceof CatchClause ? (visitedCatch as CatchClause) : undefined,

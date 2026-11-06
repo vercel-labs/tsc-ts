@@ -426,7 +426,7 @@ export class CommonJSModuleTransformer extends Transformer {
     const merged = context.mergeEnvironment(statements, context.endVariableEnvironment());
     let result = factory.updateSourceFile(
       node,
-      new NodeList(node.statements.pos, node.statements.end, merged),
+      new NodeList(node.statements.pos, node.statements.end, merged.slice()),
       node.endOfFileToken,
     );
     const helpers = context.readEmitHelpers();
@@ -447,7 +447,7 @@ export class CommonJSModuleTransformer extends Transformer {
       appendAll(withImport, current.slice(end));
       result = factory.updateSourceFile(
         result,
-        new NodeList(result.statements.pos, result.statements.end, withImport),
+        new NodeList(result.statements.pos, result.statements.end, withImport.slice()),
         node.endOfFileToken,
       );
     }
@@ -1545,7 +1545,7 @@ class ExportedVariableSplitter {
     const statement = factory.updateVariableStatement(
       this.node,
       this.modifiers,
-      factory.updateVariableDeclarationList(list, factory.createNodeList(this.variables), list.flags),
+      factory.updateVariableDeclarationList(list, factory.createNodeList(this.variables.slice()), list.flags),
     );
     if (this.statements.length > 0) this.owner.context.addEmitFlags(statement, EmitFlags.NoComments);
     this.statements.push(statement as Node);
@@ -1576,7 +1576,7 @@ function standardPrologueEnd(statements: readonly Node[]): number {
   return i;
 }
 
-function bindingElementsOf(node: Node): Node[] {
+function bindingElementsOf(node: Node): readonly Node[] {
   const elements = getElements(node);
   return elements === undefined ? [] : elements.nodes;
 }

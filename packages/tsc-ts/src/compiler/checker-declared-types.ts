@@ -183,7 +183,7 @@ export function isEntityNameExpression(node: Node): boolean {
   return false;
 }
 
-export function getHeritageClauseElements(node: Node, token: SyntaxKind): Node[] {
+export function getHeritageClauseElements(node: Node, token: SyntaxKind): readonly Node[] {
   const clauses = getHeritageClauses(node);
   if (clauses === undefined) return emptyNodes;
   for (const clause of clauses.nodes)
@@ -193,7 +193,7 @@ export function getHeritageClauseElements(node: Node, token: SyntaxKind): Node[]
 
 const emptyNodes: Node[] = [];
 
-export function getExtendsHeritageClauseElements(node: Node): Node[] {
+export function getExtendsHeritageClauseElements(node: Node): readonly Node[] {
   return getHeritageClauseElements(node, SyntaxKind.ExtendsKeyword);
 }
 
@@ -325,7 +325,7 @@ function appendLocalTypeParameters(c: Checker, types: Type[], symbol: Symbol): T
   return types;
 }
 
-function appendTypeParameters(c: Checker, types: Type[], declarations: Node[] | undefined): void {
+function appendTypeParameters(c: Checker, types: Type[], declarations: readonly Node[] | undefined): void {
   if (declarations === undefined) return;
   for (const declaration of declarations) {
     const t = getDeclaredTypeOfTypeParameter(c, getSymbolOfDeclaration(c, declaration)!);
@@ -640,7 +640,7 @@ function resolveBaseTypesOfClass(c: Checker, t: InterfaceType): void {
 export function getInstantiatedConstructorsForTypeArguments(
   c: Checker,
   t: Type,
-  typeArgumentNodes: Node[] | undefined,
+  typeArgumentNodes: readonly Node[] | undefined,
   location: Node,
 ): Signature[] {
   const nodes = typeArgumentNodes ?? emptyNodes;

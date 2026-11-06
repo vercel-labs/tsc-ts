@@ -1531,7 +1531,7 @@ function hasLiteralOrUniqueSymbolType(declaration: Node): boolean {
 }
 
 /** The properties of an object literal, through `as const`. */
-function objectLiteralProperties(node: Node): Node[] {
+function objectLiteralProperties(node: Node): readonly Node[] {
   let current = skipParentheses(node);
   if (current instanceof AsExpression && isConstTypeReference(current.type))
     current = skipParentheses(current.expression);

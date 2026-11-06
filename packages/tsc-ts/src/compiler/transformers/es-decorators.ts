@@ -1215,7 +1215,7 @@ export class ESDecorators extends Transformer {
   /** Visits constructor statements, adding the initializers after the `super()` call `superPath` leads to. */
   private transformConstructorBody(
     statementsOut: Node[],
-    statementsIn: Node[],
+    statementsIn: readonly Node[],
     statementOffset: number,
     superPath: number[],
     superPathDepth: number,
@@ -1277,7 +1277,7 @@ export class ESDecorators extends Transformer {
           appendAll(statements, initializerStatements);
           appendAll(statements, this.visitArray(rest));
         }
-        body = this.factory.createBlock(statements, true);
+        body = this.factory.createBlock(statements.slice(), true);
         this.context.setOriginal(body, originalBody);
         body.pos = originalBody.pos;
         body.end = originalBody.end;
@@ -2676,7 +2676,7 @@ function pushVisited(statements: Node[], visited: Node | undefined): boolean {
   return true;
 }
 
-function appendAll(target: Node[], nodes: Node[]): boolean {
+function appendAll(target: Node[], nodes: readonly Node[]): boolean {
   for (let i = 0; i < nodes.length; i++) target.push(nodes[i]);
   return true;
 }

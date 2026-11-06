@@ -1761,7 +1761,7 @@ function getResolvedMembersOrExports(c: Checker, symbol: Symbol, isStatic: boole
   return result;
 }
 
-function getMembersOfDeclaration(decl: Node): Node[] | undefined {
+function getMembersOfDeclaration(decl: Node): readonly Node[] | undefined {
   switch (decl.kind) {
     case SyntaxKind.ClassDeclaration:
     case SyntaxKind.ClassExpression:

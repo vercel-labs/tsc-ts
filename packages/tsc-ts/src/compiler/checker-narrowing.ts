@@ -2190,7 +2190,7 @@ function narrowTypeBySwitchOnDiscriminantProperty(c: Checker, t: Type, access: N
   return narrowTypeByDiscriminant(c, t, access, (u) => narrowTypeBySwitchOnDiscriminant(c, u, flow));
 }
 
-function getClauses(statement: Node): Node[] {
+function getClauses(statement: Node): readonly Node[] {
   return (statement as SwitchStatement).caseBlock.clauses.nodes;
 }
 
@@ -3291,7 +3291,7 @@ function isThisParameter(parameter: Node): boolean {
   return name !== undefined && name.kind === SyntaxKind.Identifier && getText(name) === 'this';
 }
 
-function someParameterAssigned(c: Checker, parameters: Node[]): boolean {
+function someParameterAssigned(c: Checker, parameters: readonly Node[]): boolean {
   for (const p of parameters) if (isSomeSymbolAssigned(c, getName(p)!)) return true;
   return false;
 }

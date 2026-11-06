@@ -150,10 +150,10 @@ export class PseudoParameter {
 export class SignatureType extends PseudoType {
   readonly signature: Node;
   readonly parameters: PseudoParameter[];
-  readonly typeParameters: Node[];
+  readonly typeParameters: readonly Node[];
   readonly returnType: PseudoType;
 
-  constructor(signature: Node, parameters: PseudoParameter[], typeParameters: Node[], returnType: PseudoType) {
+  constructor(signature: Node, parameters: PseudoParameter[], typeParameters: readonly Node[], returnType: PseudoType) {
     super(PseudoTypeKind.SingleCallSignature);
     this.signature = signature;
     this.parameters = parameters;
@@ -186,7 +186,7 @@ export class PseudoMember {
   readonly readonly: boolean;
   /** The method or accessor declaration; undefined for properties. */
   readonly signature: Node | undefined;
-  readonly typeParameters: Node[];
+  readonly typeParameters: readonly Node[];
   readonly parameters: PseudoParameter[];
   /** The property or get accessor type, or the method's return type. */
   readonly type: PseudoType;
@@ -197,7 +197,7 @@ export class PseudoMember {
     optional: boolean,
     readonly: boolean,
     signature: Node | undefined,
-    typeParameters: Node[],
+    typeParameters: readonly Node[],
     parameters: PseudoParameter[],
     type: PseudoType,
   ) {
@@ -663,7 +663,7 @@ export class PseudoChecker {
     return new NoResultType(node);
   }
 
-  cloneParameters(nodes: Node[]): PseudoParameter[] {
+  cloneParameters(nodes: readonly Node[]): PseudoParameter[] {
     const result: PseudoParameter[] = [];
     const lastRequired = lastRequiredParameterIndex(nodes);
     for (let i = 0; i < nodes.length; i++) {
@@ -684,7 +684,7 @@ export class PseudoChecker {
   }
 }
 
-function nodesOf(list: NodeList | undefined): Node[] {
+function nodesOf(list: NodeList | undefined): readonly Node[] {
   return list === undefined ? [] : list.nodes;
 }
 
@@ -869,7 +869,7 @@ function isPrimitiveLiteral(node: Node): boolean {
 }
 
 /** The index just past the last parameter without `?`, initializer or `...`. */
-export function lastRequiredParameterIndex(parameters: Node[]): number {
+export function lastRequiredParameterIndex(parameters: readonly Node[]): number {
   for (let i = parameters.length - 1; i >= 0; i--) {
     const parameter = parameters[i]! as ParameterDeclaration;
     if (
@@ -953,7 +953,7 @@ function addUndefinedIfDefinitelyRequired(type: PseudoType): PseudoType {
 }
 
 /** The members of a union or intersection type node. */
-export function typesOf(node: Node): Node[] {
+export function typesOf(node: Node): readonly Node[] {
   if (node instanceof UnionTypeNode) return node.types.nodes;
   if (node instanceof IntersectionTypeNode) return node.types.nodes;
   return [];

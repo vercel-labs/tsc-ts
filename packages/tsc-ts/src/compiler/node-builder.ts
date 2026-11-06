@@ -590,11 +590,11 @@ export class NodeBuilder {
     return this.factory.created(node);
   }
 
-  list(nodes: Node[]): NodeList {
+  list(nodes: readonly Node[]): NodeList {
     return this.factory.createNodeList(nodes);
   }
 
-  modifierList(nodes: Node[]): ModifierList | undefined {
+  modifierList(nodes: readonly Node[]): ModifierList | undefined {
     return nodes.length === 0 ? undefined : this.factory.createModifierList(nodes);
   }
 
@@ -1403,7 +1403,8 @@ export class NodeBuilder {
         const arity = getTypeReferenceArity(t);
         const nodes = this.mapToTypeNodes(typeArguments.slice(0, arity), false);
         if (nodes !== undefined) {
-          const elements = nodes.nodes;
+          // Labeled, rest and optional elements replace the mapped ones in a new list.
+          const elements = [...nodes.nodes];
           for (let i = 0; i < elements.length; i++) {
             const flags = elementInfos[i].flags;
             const labeledDeclaration = elementInfos[i].labeledDeclaration;
@@ -1425,7 +1426,7 @@ export class NodeBuilder {
               );
             else if ((flags & ElementFlags.Optional) !== 0) elements[i] = this.created(new OptionalTypeNode(element));
           }
-          const tupleTypeNode = this.created(new TupleTypeNode(nodes));
+          const tupleTypeNode = this.created(new TupleTypeNode(new NodeList(nodes.pos, nodes.end, elements)));
           this.context.setEmitFlags(tupleTypeNode, EmitFlags.SingleLine);
           return tuple.readonly
             ? this.created(new TypeOperatorNode(SyntaxKind.ReadonlyKeyword, tupleTypeNode))
@@ -2355,7 +2356,7 @@ export class NodeBuilder {
       parameters.push(this.symbolToParameterDeclaration(parameter, kind === SyntaxKind.Constructor));
     this.flags = savedFlags;
     let returnTypeNode = this.serializeReturnTypeForSignature(signature);
-    let modifiers = options !== undefined ? options.modifiers : [];
+    let modifiers: readonly Node[] = options !== undefined ? options.modifiers : [];
     if (kind === SyntaxKind.ConstructorType && (signature.flags & SignatureFlags.Abstract) !== 0) {
       let flags = ModifierFlags.Abstract;
       for (const m of modifiers) flags |= modifierToFlag(m.kind);
@@ -2363,7 +2364,7 @@ export class NodeBuilder {
     }
     const paramList = this.list(parameters);
     const typeParamList = typeParameters.length !== 0 ? this.list(typeParameters) : undefined;
-    const modifierList = this.modifierList(modifiers);
+    const modifierList = this.modifierList(modifiers.slice());
     const name = (options !== undefined ? options.name : undefined) ?? this.identifier('');
     let node: Node;
     switch (kind) {
