@@ -135,8 +135,8 @@ export function checkSourceFile(c: Checker, file: SourceFile, checkUnused = fals
   // A source file is a module body: narrowing stopped by a body too large for control flow analysis
   // (flowAnalysisDisabled, checker-narrowing.ts) starts over in the next check. A checker checks many files
   // (parallel-check.ts), so its diagnostics of a file must not depend on the files it checked before it.
-  const flowAnalysisDisabled = c.flowAnalysisDisabled;
   c.flowAnalysisDisabled = false;
+  c.flowAnalysisDisabledBody = undefined;
   const links = c.nodeLinks(file);
   if ((links.flags & NodeCheckFlags.TypeChecked) === 0) {
     links.flags |= NodeCheckFlags.TypeChecked;
@@ -146,7 +146,9 @@ export function checkSourceFile(c: Checker, file: SourceFile, checkUnused = fals
     links.flags |= NodeCheckFlags.UnusedChecked;
     checkUnusedIdentifiers(c, file);
   }
-  c.flowAnalysisDisabled = flowAnalysisDisabled;
+  // Every body of the file has finished its checks; a stop recorded for one of them ends with the file.
+  c.flowAnalysisDisabled = false;
+  c.flowAnalysisDisabledBody = undefined;
 }
 
 function checkSourceFileWorker(c: Checker, file: SourceFile): void {
@@ -184,8 +186,8 @@ export function checkSourceFileRange(c: Checker, file: SourceFile, start: number
   const statements = getStatements(file)!.nodes;
   // A range of a file's statements is part of its module body: narrowing stopped by a body too large for
   // control flow analysis (flowAnalysisDisabled, checker-narrowing.ts) starts over in the next range.
-  const flowAnalysisDisabled = c.flowAnalysisDisabled;
   c.flowAnalysisDisabled = false;
+  c.flowAnalysisDisabledBody = undefined;
   c.fileBeingChecked = file;
   for (let i = start; i < end; i++) checkSourceElement(c, statements[i]!);
   checkDeferredNodes(c, file);
@@ -201,9 +203,10 @@ export function checkSourceFileRange(c: Checker, file: SourceFile, start: number
   produceDeferredDiagnostics(c);
   // Deferred nodes of a later range are queued again (checkNodeDeferred).
   c.nodeLinks(file).deferredNodes = undefined;
-  const found = c.diagnostics.forFile(file.fileName).length > 0;
-  c.flowAnalysisDisabled = flowAnalysisDisabled;
-  return found;
+  // The range's bodies have finished their checks; a stop recorded for one of them ends with the range.
+  c.flowAnalysisDisabled = false;
+  c.flowAnalysisDisabledBody = undefined;
+  return c.diagnostics.forFile(file.fileName).length > 0;
 }
 
 /**

@@ -114,6 +114,7 @@ import {
 } from './checker-jsdoc.js';
 import { getEffectiveCheckNode, isFunctionLike, nodeIsMissing } from './ast-utilities.js';
 import {
+  endFlowAnalysisStop,
   getFlowTypeOfReferenceAt,
   isConstantReference,
   isReachableFlowNode,
@@ -428,11 +429,7 @@ export function checkFunctionLikeBody(c: Checker, node: Node): void {
   )
     getReturnTypeOfSignature(c, getSignatureFromDeclaration(c, node));
   if (body.kind === SyntaxKind.Block) {
-    // A body too large for control flow analysis stops narrowing in the rest of that body only
-    // (flowAnalysisDisabled, checker-narrowing.ts); what follows the body starts over.
-    const flowAnalysisDisabled = c.flowAnalysisDisabled;
     for (const s of getStatements(body)!.nodes) checkSourceElement(c, s);
-    c.flowAnalysisDisabled = flowAnalysisDisabled;
     if (node.kind !== SyntaxKind.Constructor && node.kind !== SyntaxKind.SetAccessor)
       checkAllCodePathsInNonVoidFunctionReturnOrThrow(c, node, returnType);
   } else {
@@ -441,6 +438,10 @@ export function checkFunctionLikeBody(c: Checker, node: Node): void {
     if (returnType !== undefined)
       checkReturnExpression(c, node, unwrapReturnType(c, returnType, functionFlags), body, body, exprType, false);
   }
+  // A body too large for control flow analysis stops narrowing in the rest of that body only
+  // (flowAnalysisDisabled, checker-narrowing.ts); what follows the body starts over. Inferring the
+  // return type above checks the body's return expressions, which can reach the limit.
+  endFlowAnalysisStop(c, body);
 }
 
 /** Checks a generator's or async function's return type annotation. */
