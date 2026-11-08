@@ -3165,7 +3165,8 @@ function reportFlowControlError(c: Checker, node: Node): void {
   );
 }
 
-function isFunctionOrModuleBlock(node: Node): boolean {
+/** Whether `node` is the body of a function or a module, where flow analysis starts over (flowAnalysisDisabled). */
+export function isFunctionOrModuleBlock(node: Node): boolean {
   return (
     node.kind === SyntaxKind.SourceFile ||
     node.kind === SyntaxKind.ModuleBlock ||

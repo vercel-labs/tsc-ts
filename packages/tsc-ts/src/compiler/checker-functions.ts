@@ -428,7 +428,11 @@ export function checkFunctionLikeBody(c: Checker, node: Node): void {
   )
     getReturnTypeOfSignature(c, getSignatureFromDeclaration(c, node));
   if (body.kind === SyntaxKind.Block) {
+    // A body too large for control flow analysis stops narrowing in the rest of that body only
+    // (flowAnalysisDisabled, checker-narrowing.ts); what follows the body starts over.
+    const flowAnalysisDisabled = c.flowAnalysisDisabled;
     for (const s of getStatements(body)!.nodes) checkSourceElement(c, s);
+    c.flowAnalysisDisabled = flowAnalysisDisabled;
     if (node.kind !== SyntaxKind.Constructor && node.kind !== SyntaxKind.SetAccessor)
       checkAllCodePathsInNonVoidFunctionReturnOrThrow(c, node, returnType);
   } else {
