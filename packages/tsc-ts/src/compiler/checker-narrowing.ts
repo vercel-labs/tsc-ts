@@ -369,7 +369,7 @@ export function getFlowTypeOfReferenceAt(
   flowContainer: Node | undefined,
   flowNode: FlowNode | undefined,
 ): Type {
-  if (c.flowAnalysisDisabled) return c.errorType;
+  if (c.flowAnalysisDisabled && isInFlowAnalysisStop(c, reference)) return c.errorType;
   if (flowNode === undefined) return declaredType;
   let f: FlowState;
   const stateDepth = c.flowStateDepth;
@@ -396,7 +396,7 @@ export function getFlowTypeOfReferenceAt(
     f.steps >= minFlowWalkSteps &&
     !f.incomplete &&
     !f.positional &&
-    !c.flowAnalysisDisabled &&
+    !(c.flowAnalysisDisabled && isInFlowAnalysisStop(c, reference)) &&
     c.resolutionCycleCount === cycles
   ) {
     const walk = f.walk;
@@ -438,6 +438,7 @@ function complete(f: FlowState, t: Type): Type {
 export function getTypeAtFlowNode(c: Checker, f: FlowState, start: FlowNode): Type {
   if (f.depth === 2000) {
     c.flowAnalysisDisabled = true;
+    c.flowAnalysisDisabledBody = getContainingFlowBody(f.reference);
     reportFlowControlError(c, f.reference);
     return complete(f, c.errorType);
   }
@@ -3148,9 +3149,33 @@ function getContextFreeTypeOfExpression(c: Checker, node: Node): Type {
   return t;
 }
 
-function reportFlowControlError(c: Checker, node: Node): void {
+/** The body whose walk reached the flow limit, or undefined when no body is stopped. */
+function getContainingFlowBody(node: Node): Node | undefined {
   let block: Node | undefined = node;
   while (block !== undefined && !isFunctionOrModuleBlock(block)) block = block.parent;
+  return block;
+}
+
+/** Whether `node` is in the body whose walk reached the flow limit, or in a body it contains. */
+function isInFlowAnalysisStop(c: Checker, node: Node): boolean {
+  const stop = c.flowAnalysisDisabledBody;
+  if (stop === undefined) return false;
+  for (let n: Node | undefined = node; n !== undefined; n = n.parent) if (n === stop) return true;
+  return false;
+}
+
+/**
+ * Ends the narrowing stopped in `body`, whose checks have finished: what follows the body starts over.
+ * A walk that stopped in another body keeps its body's narrowing stopped.
+ */
+export function endFlowAnalysisStop(c: Checker, body: Node): void {
+  if (c.flowAnalysisDisabledBody !== body) return;
+  c.flowAnalysisDisabled = false;
+  c.flowAnalysisDisabledBody = undefined;
+}
+
+function reportFlowControlError(c: Checker, node: Node): void {
+  const block = getContainingFlowBody(node);
   if (block === undefined) return;
   const file = getSourceFileOfNode(node);
   const span = getRangeOfTokenAtPosition(file, getStatements(block)!.pos);
@@ -3165,7 +3190,8 @@ function reportFlowControlError(c: Checker, node: Node): void {
   );
 }
 
-function isFunctionOrModuleBlock(node: Node): boolean {
+/** Whether `node` is the body of a function or a module, where flow analysis starts over (flowAnalysisDisabled). */
+export function isFunctionOrModuleBlock(node: Node): boolean {
   return (
     node.kind === SyntaxKind.SourceFile ||
     node.kind === SyntaxKind.ModuleBlock ||
