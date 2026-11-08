@@ -4,6 +4,19 @@
 
 <!-- release:start -->
 
+## 0.1.3
+
+### Fixes
+
+- **Flow analysis:** a check that reaches the flow walk's depth limit reports TS2563 there and stops narrowing in the rest of that body, but the stop stayed set for the files the checker checked next, so those files could miss flow diagnostics such as TS2454 (a variable used before it is assigned). The stop now ends with the body, so a file's diagnostics no longer depend on the files checked before it.
+- **Run records:** a run whose check ranges were all empty recorded a redundancy of 0/0, which JSON writes as null, and the next native run that read the record ended with a TypeError. The run now records 0, and a record whose fields have the wrong type is ignored instead of ending the run that reads it.
+
+### Behavior changes
+
+- The diagnostics a check reports when a type instantiation reaches the depth limit (TS5115, and TS2344 on the constraint check that stops there) are best effort with more than one checker: they can appear in different files between runs, and a run with one checker can report them where a run with several does not.
+
+<!-- release:end -->
+
 ## 0.1.2
 
 ### Highlights
@@ -15,8 +28,6 @@
 ### Behavior changes
 
 - `@scriptc/threads` is an optional peer dependency: the command line installs without it, and `tsc-ts/api` needs it installed.
-
-<!-- release:end -->
 
 ## 0.1.1
 
