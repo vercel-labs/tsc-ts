@@ -1180,6 +1180,17 @@ projects.push(
     },
     ['-p', 'apps/server'],
   ],
+  [
+    // `declare module 'foo';` comes first, so it is the module symbol's value declaration, and the default
+    // import still resolves to the `default` export of the declaration with a body (issue #417).
+    'a default import of a shorthand ambient module merged with a declaration with a body',
+    {
+      'a.d.ts': "declare module 'foo';\n",
+      'b.d.ts': "declare module 'foo' {\n  const foo: number;\n  export default foo;\n}\n",
+      'main.ts': "import foo from 'foo';\nexport const s: string = foo;\n",
+      'tsconfig.json': JSON.stringify({ compilerOptions: base, files: ['a.d.ts', 'b.d.ts', 'main.ts'] }),
+    },
+  ],
 );
 
 // Emit on checker threads: each checker emits the files it checks; the main thread emits the files no
