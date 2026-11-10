@@ -4,6 +4,31 @@
 
 <!-- release:start -->
 
+## 0.1.3
+
+### Fixes
+
+- **Flow analysis:** a check that reaches the flow walk's depth limit reports TS2563 there and stops narrowing in the rest of that body, but the stop stayed set for the files the checker checked next, so those files could miss flow diagnostics such as TS2454 (a variable used before it is assigned). The stop now ends with the body, so a file's diagnostics no longer depend on the files checked before it.
+- **Run records:** a run whose check ranges were all empty recorded a redundancy of 0/0, which JSON writes as null, and the next native run that read the record ended with a TypeError. The run now records 0, and a record whose fields have the wrong type is ignored instead of ending the run that reads it.
+
+### Behavior changes
+
+- The diagnostics a check reports when a type instantiation reaches the depth limit (TS5115, and TS2344 on the constraint check that stops there) are best effort with more than one checker: they can appear in different files between runs, and a run with one checker can report them where a run with several does not.
+
+<!-- release:end -->
+
+## 0.1.2
+
+### Highlights
+
+- **Faster checking:** the grammar checks that need no types run in each file's parse thread, and the checking thread replays the recorded nodes in tree order with the same diagnostics. An intersection finds duplicate types by scanning its list and builds a set only past eight types, and the cross product of an intersection's constituents is no longer copied for each combination. Three checker collections are created only when they get their first entry. On Linux the release build checks 1.2% faster than 0.1.1 at `--checkers 1` and `--checkers 4` and 0.9% faster at `--checkers 16`, measured over nine projects; at `--checkers 1` the T3 server project checks 3.5% faster and VS Code 2.4% faster.
+- **macOS and Windows profiles:** `build:native` uses the two-phase profile when the installed scriptc is the version `profiles/tsc-ts.cs.json` records, so macOS and Windows builds are optimized with the same profile as Linux builds instead of the older one-phase profile.
+- **`--extendedDiagnostics` counts:** the types, instantiations and transient symbols of every checker thread are added to the main thread's counts, and the resident set is reported as `Memory used`.
+
+### Behavior changes
+
+- `@scriptc/threads` is an optional peer dependency: the command line installs without it, and `tsc-ts/api` needs it installed.
+
 ## 0.1.1
 
 ### Highlights
@@ -21,8 +46,6 @@
 - `--extendedDiagnostics` prints a `Suggestions:` section after the statistics table, and names the run's record under `Records:`.
 - A run keeps no record in watch mode, in a `--build` of several projects at once, with `--singleThreaded`, under Node.js, and with `TSC_TS_AUTO=0` or `static`; with `CI` set it reads and adopts a record but never explores.
 - `TSC_TS_AUTO=explore` adds an experimental alternative in which one run in eight tries a setting the signals leave uncertain; such a run is slower than the configuration it would have used.
-
-<!-- release:end -->
 
 ## 0.1.0
 

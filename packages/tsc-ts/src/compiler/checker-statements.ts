@@ -42,7 +42,7 @@ import {
   isTypeEqualityComparableTo,
 } from './checker-operators.js';
 import { checkTypeComparableTo, isTypeAssignableTo } from './relations.js';
-import { isReachableFlowNode } from './checker-narrowing.js';
+import { endFlowAnalysisStop, isFunctionOrModuleBlock, isReachableFlowNode } from './checker-narrowing.js';
 import { getIndexType, isTypeAssignableToKindEx as isTypeAssignableToKind } from './checker-type-operators.js';
 import { getExtractStringType } from './checker-symbol-types.js';
 import { checkSourceElement } from './checker-source-file.js';
@@ -57,7 +57,15 @@ import { typeToString } from './type-printer.js';
 import { TypeFacts, getNonNullableType, hasTypeFacts } from './checker-flow.js';
 
 export function checkBlock(c: Checker, node: Node): void {
-  for (const s of getStatements(node)!.nodes) checkSourceElement(c, s);
+  const statements = getStatements(node)!.nodes;
+  if (!isFunctionOrModuleBlock(node)) {
+    for (const s of statements) checkSourceElement(c, s);
+    return;
+  }
+  // A body too large for control flow analysis stops narrowing in the rest of that body only
+  // (flowAnalysisDisabled, checker-narrowing.ts); what follows the body starts over.
+  for (const s of statements) checkSourceElement(c, s);
+  endFlowAnalysisStop(c, node);
 }
 
 export function checkExpressionStatement(c: Checker, node: Node): void {

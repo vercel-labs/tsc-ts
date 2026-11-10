@@ -755,6 +755,8 @@ export class Checker implements TypeChecking {
 
   // Control flow analysis
   flowAnalysisDisabled = false;
+  /** The body whose walk reached the flow limit (flowAnalysisDisabled), until its checks finish. */
+  flowAnalysisDisabledBody: Node | undefined = undefined;
   inlineLevel = 0;
   /**
    * Shared flow nodes cached by the walks in progress, with their types: the first
