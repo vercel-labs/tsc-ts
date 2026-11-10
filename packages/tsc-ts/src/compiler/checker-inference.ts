@@ -853,9 +853,13 @@ class InferenceState {
     const sourceAlias = source.alias;
     const targetAlias = target.alias;
     if (sourceAlias !== undefined && targetAlias !== undefined && sourceAlias.symbol === targetAlias.symbol) {
-      // Instantiations of the same alias infer between their type arguments, once for each pair of types, as tsc does.
+      // Instantiations of the same alias infer between their type arguments, once for each pair of types, as tsc
+      // does. The pair is memoized, which keeps inference from type arguments from repeating exponentially (tsgo
+      // #64378), but it does not take part in invokeOnce's recursion-identity check: the identities of a recursive
+      // alias repeat through its properties, and below such a property that check reports a circularity and skips
+      // an inference that tsc 7.0.2 makes (#418).
       if (sourceAlias.typeArguments.length !== 0 || targetAlias.typeArguments.length !== 0)
-        this.invokeOnce(source, target, InferenceAction.AliasTypeArguments);
+        this.invokeOnce(source, target, InferenceAction.AliasTypeArguments, false);
       return;
     }
     if (source === target && (source.flags & TypeFlags.UnionOrIntersection) !== 0) {
@@ -1059,8 +1063,13 @@ class InferenceState {
     else this.inferFromTypes(source, target);
   }
 
-  /** Runs `action` once per source and target pair, stopping at circularities. */
-  invokeOnce(source: Type, target: Type, action: InferenceAction): void {
+  /**
+   * Runs `action` once per source and target pair, stopping at circularities. With `checkRecursion` false, the pair
+   * is still memoized but its action neither joins the recursion stacks nor stops at the recursion identities the
+   * stacks hold; alias type arguments, which infer only between the type arguments of two instantiations of one
+   * declaration, are such a pair.
+   */
+  invokeOnce(source: Type, target: Type, action: InferenceAction, checkRecursion = true): void {
     // As in tsc, a pair is visited once for each priority and variance it is inferred with.
     const mode = visitMode(this.priority, this.contravariant, this.bivariant);
     const key = visitKey(source, target);
@@ -1076,19 +1085,21 @@ class InferenceState {
     const caches = this.c.inferenceCaches;
     const stackDepth = this.stackDepth;
     const start = this.stackBase;
-    const end = start + stackDepth + 1;
-    setStackEntry(caches.invokeSourceStack, end - 1, source);
-    setStackEntry(caches.invokeTargetStack, end - 1, target);
-    setNumberEntry(caches.invokeModeStack, end - 1, mode);
-    setNumberEntry(caches.invokeSourceIdentities, end - 1, 0);
-    setNumberEntry(caches.invokeTargetIdentities, end - 1, 0);
-    this.stackDepth = stackDepth + 1;
-    caches.invokeStackDepth = end;
-    if (isDeeplyNestedStackEntry(this.c, caches.invokeSourceStack, caches.invokeSourceIdentities, start, end, 2))
-      this.expandingFlags |= ExpandingFlags.Source;
-    if (isDeeplyNestedStackEntry(this.c, caches.invokeTargetStack, caches.invokeTargetIdentities, start, end, 2))
-      this.expandingFlags |= ExpandingFlags.Target;
-    if (this.expandingFlags !== ExpandingFlags.Both) {
+    const end = start + stackDepth + (checkRecursion ? 1 : 0);
+    if (checkRecursion) {
+      setStackEntry(caches.invokeSourceStack, end - 1, source);
+      setStackEntry(caches.invokeTargetStack, end - 1, target);
+      setNumberEntry(caches.invokeModeStack, end - 1, mode);
+      setNumberEntry(caches.invokeSourceIdentities, end - 1, 0);
+      setNumberEntry(caches.invokeTargetIdentities, end - 1, 0);
+      this.stackDepth = stackDepth + 1;
+      caches.invokeStackDepth = end;
+      if (isDeeplyNestedStackEntry(this.c, caches.invokeSourceStack, caches.invokeSourceIdentities, start, end, 2))
+        this.expandingFlags |= ExpandingFlags.Source;
+      if (isDeeplyNestedStackEntry(this.c, caches.invokeTargetStack, caches.invokeTargetIdentities, start, end, 2))
+        this.expandingFlags |= ExpandingFlags.Target;
+    }
+    if (!checkRecursion || this.expandingFlags !== ExpandingFlags.Both) {
       switch (action) {
         case InferenceAction.AliasTypeArguments:
           this.inferFromAliasTypeArguments(source, target);
@@ -1107,9 +1118,11 @@ class InferenceState {
           break;
       }
     } else this.inferencePriority = InferencePriority.Circularity;
-    this.stackDepth = stackDepth;
-    caches.invokeStackDepth = end - 1;
-    this.expandingFlags = saveExpandingFlags;
+    if (checkRecursion) {
+      this.stackDepth = stackDepth;
+      caches.invokeStackDepth = end - 1;
+      this.expandingFlags = saveExpandingFlags;
+    }
     this.setVisited(source, target, key, mode, this.inferencePriority);
     this.inferencePriority = Math.min(this.inferencePriority, saveInferencePriority);
   }

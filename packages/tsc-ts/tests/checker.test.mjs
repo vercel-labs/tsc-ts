@@ -25,7 +25,7 @@ const wideUnion = (n) => [
 // and target as name=value, and the strict family, allowUnreachableCode and allowUnusedLabels as name=true or
 // name=false. A case with `corpus` checks that test case of TypeScript's corpus instead of `source`, and compares only
 // the diagnostics with the `codes` it lists to `expected`; all of them are compared to the oracle's. A case with
-// `differsFromOracle` expects TypeScript 7.1's diagnostics where tsc 7.0.2, the oracle, reports others.
+// `differsFromOracle` expects diagnostics the oracle reports differently, for the reason the case's comment gives.
 const cases = [
   {
     name: 'module and target from TSC_TS_CHECK_OPTIONS',
@@ -477,6 +477,25 @@ const cases = [
       "/input.ts 2322 362 1 Type 'number' is not assignable to type 'string'.",
       "/input.ts 2322 404 1 Type 'number' is not assignable to type 'string'.",
     ],
+  },
+  {
+    // `Item` is recursive through the parameter of `template`, so the same instantiations of it repeat below
+    // that property. Inferring from `Role` to the `onChange` parameter reaches a pair of `Item` instantiations
+    // below `template`, where tsc 7.0.2 infers `{ id: string; }` for T from the type arguments. Taking that
+    // pair through `invokeOnce`'s recursion-identity check records it as a circularity and skips the inference,
+    // which leaves T the wide object from `data` and reports the callback (#418). The 7.1.0-beta oracle reports
+    // it; tsc 7.0.2 does not.
+    name: 'a recursive alias infers a narrower type for a callback parameter',
+    options: 'strict=true,module=esnext,moduleResolution=bundler,target=es2022',
+    source: [
+      'type Item<T> = T & { template?: (p: Item<T>) => void };',
+      'type Sel<T> = Item<T & {key: string | number}>;',
+      'declare function select<T>(props: { data: Sel<T>[]; onChange: (x: Sel<T> | null) => void }): void;',
+      'type Role = Sel<{id: string}>;',
+      "select({ data: [{id: 'a', key: 'a'}], onChange: (x: Role | null) => {} });",
+    ],
+    expected: [],
+    differsFromOracle: true,
   },
   {
     // `[...][0]` widens the union of the array's elements, which leaves `b` missing too. As in
