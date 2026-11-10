@@ -4,6 +4,15 @@
 
 <!-- release:start -->
 
+## 0.1.4
+
+### Fixes
+
+- **Default imports from ambient modules:** a `declare module 'foo';` shorthand and a `declare module 'foo' { ... }` with a `default` export merge into one module symbol whose value declaration is the shorthand one, and a default import from that module reported TS1192 (`Module has no default export`). The import now resolves to the `default` export of the declaration with a body.
+- **Inference below a recursive property:** a recursive type alias repeats its type identities through its own properties, and inference between two instantiations of the alias below such a property stopped at those identities as if it were circular. The type parameter kept the wider type inferred from another property, and the call with a narrower callback parameter was reported as not assignable (TS2322). Inference now continues between the type arguments of those instantiations.
+
+<!-- release:end -->
+
 ## 0.1.3
 
 ### Fixes
@@ -14,8 +23,6 @@
 ### Behavior changes
 
 - The diagnostics a check reports when a type instantiation reaches the depth limit (TS5115, and TS2344 on the constraint check that stops there) are best effort with more than one checker: they can appear in different files between runs, and a run with one checker can report them where a run with several does not.
-
-<!-- release:end -->
 
 ## 0.1.2
 
