@@ -1331,9 +1331,9 @@ function getTargetOfModuleDefault(
 ): Symbol | undefined {
   const file = getSourceFileDeclaration(moduleSymbol);
   const specifier = getModuleSpecifierForImportOrExport(node);
-  const exportDefaultSymbol = isShorthandAmbientModuleSymbol(moduleSymbol)
-    ? undefined
-    : resolveExportByName(c, moduleSymbol, InternalSymbolName.Default, node, dontResolveAlias);
+  // Also when the value declaration is a shorthand ambient module (`declare module "m";`): a declaration of
+  // the same module with a body merges into the symbol and can export a default.
+  const exportDefaultSymbol = resolveExportByName(c, moduleSymbol, InternalSymbolName.Default, node, dontResolveAlias);
   if (specifier === undefined) return exportDefaultSymbol;
   let attributes: ImportAttributes | undefined;
   if (node.kind === SyntaxKind.ImportClause) attributes = getImportAttributes(node.parent!);
