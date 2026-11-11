@@ -769,7 +769,7 @@ test('getPreEmitDiagnostics gives the diagnostics tsc --api gives, sorted', { sk
 });
 
 test('getTextOfNode and getSourceFileOfNode give what TypeScript gives', { skip }, async () => {
-  const ts5 = (await import('typescript')).default;
+  const ts5 = (await import('typescript-5.9')).default;
   const api = await load('library/index.js');
   const dir = tempDir('tsc-ts-library-');
   cpSync(join(root, 'tests/fixtures/library'), dir, { recursive: true });

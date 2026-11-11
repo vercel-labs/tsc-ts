@@ -104,7 +104,7 @@ function changedLines(base, head, path) {
 
 let ts;
 function typescript() {
-  ts ??= createRequire(join(root, 'package.json'))('typescript');
+  ts ??= createRequire(join(root, 'package.json'))('typescript-5.9');
   return ts;
 }
 

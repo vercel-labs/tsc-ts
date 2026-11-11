@@ -111,7 +111,7 @@ function run(project, checkers, share) {
 }
 
 if (corpus) {
-  const ts = createRequire(import.meta.url)('typescript');
+  const ts = createRequire(import.meta.url)('typescript-5.9');
   projects.push(
     ...corpusProjects({
       ts,

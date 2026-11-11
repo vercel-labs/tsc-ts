@@ -147,7 +147,7 @@ if (projectsFile !== undefined) projects.push(...loadProjects(projectsFile));
 if (projects.length === 0 && !corpus) projects.push({ name: 'tscts', dir: root, config: 'tsconfig.json' });
 
 if (corpus) {
-  const ts = createRequire(import.meta.url)('typescript');
+  const ts = createRequire(import.meta.url)('typescript-5.9');
   projects.push(...corpusProjects({ ts, work, batch, options: extraOptions, counts, only, run: shareOff }));
 }
 

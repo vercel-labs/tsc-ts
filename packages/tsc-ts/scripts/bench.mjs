@@ -21,7 +21,7 @@ const cases = join(repo, 'upstream/TypeScript/tsc/testdata/tests/cases');
 const scriptc = process.env.SCRIPTC ?? join(repo, 'node_modules/.bin/scriptc');
 const scanOracle = join(repo, 'packages/tsgo/dist/scan-oracle');
 const tsgo = join(repo, 'packages/tsgo/dist/tsgo');
-const ts = createRequire(import.meta.url)('typescript');
+const ts = createRequire(import.meta.url)('typescript-5.9');
 const out = resolve(process.env.SCRIPTC === undefined ? 'dist/bench' : 'dist/bench-custom');
 mkdirSync(out, { recursive: true });
 
@@ -100,7 +100,7 @@ for (const project of projects) {
     project: project.slice(repo.length + 1),
     tsgo: wallTime([tsgo, '-p', '.', '--noEmit'], project),
     typescriptJs: wallTime(
-      [process.execPath, join(repo, 'node_modules/typescript/lib/tsc.js'), '-p', '.', '--noEmit'],
+      [process.execPath, join(repo, 'node_modules/typescript-5.9/lib/tsc.js'), '-p', '.', '--noEmit'],
       project,
     ),
   });
