@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import ts from 'typescript';
+import ts from 'typescript-5.9';
 
 const root = resolve(import.meta.dirname, '..');
 const upstream = resolve(root, '../../upstream/TypeScript');

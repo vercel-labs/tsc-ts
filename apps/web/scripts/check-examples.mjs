@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import ts from 'typescript';
+import ts from 'typescript-5.9';
 
 const root = path.resolve(import.meta.dirname, '../content/docs');
 const defaults = {
