@@ -4,14 +4,20 @@
 
 <!-- release:start -->
 
+## 0.1.5
+
+### Highlights
+
+- **TypeScript 5.9 where the JavaScript API is used:** the CI test selection, the API and library tests, the docs example check, the benchmark and the exactness tools call TypeScript's JavaScript API, which TypeScript 7 does not ship. They now import it as `typescript-5.9`, an npm alias of `typescript@5.9.3`, so the version they need is named where they use it, while `typescript` stays at 5.9 for `tsc` and the docs build; builds, emitted files and diagnostics are unchanged.
+
+<!-- release:end -->
+
 ## 0.1.4
 
 ### Fixes
 
 - **Default imports from ambient modules:** a `declare module 'foo';` shorthand and a `declare module 'foo' { ... }` with a `default` export merge into one module symbol whose value declaration is the shorthand one, and a default import from that module reported TS1192 (`Module has no default export`). The import now resolves to the `default` export of the declaration with a body.
 - **Inference below a recursive property:** a recursive type alias repeats its type identities through its own properties, and inference between two instantiations of the alias below such a property stopped at those identities as if it were circular. The type parameter kept the wider type inferred from another property, and the call with a narrower callback parameter was reported as not assignable (TS2322). Inference now continues between the type arguments of those instantiations.
-
-<!-- release:end -->
 
 ## 0.1.3
 
