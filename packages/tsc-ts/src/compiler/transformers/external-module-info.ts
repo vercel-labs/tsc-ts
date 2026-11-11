@@ -287,7 +287,7 @@ function isNamedDefaultReference(specifier: Node): boolean {
 }
 
 export function containsDefaultReference(node: Node | undefined): boolean {
-  let elements: Node[] = [];
+  let elements: readonly Node[] = [];
   if (node instanceof NamedImports) elements = node.elements.nodes;
   else if (node instanceof NamedExports) elements = node.elements.nodes;
   for (let i = 0; i < elements.length; i++) if (isNamedDefaultReference(elements[i])) return true;

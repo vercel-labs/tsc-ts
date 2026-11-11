@@ -1350,7 +1350,7 @@ class SymbolSearch {
     if (objectLikeContainer === undefined) return GlobalsSearch.Continue;
     data.completionKind = CompletionKind.ObjectPropertyDeclaration;
     let typeMembers: Symbol[] = [];
-    let existingMembers: Node[] = [];
+    let existingMembers: readonly Node[] = [];
     if (objectLikeContainer.kind === SyntaxKind.ObjectLiteralExpression) {
       const instantiatedType = tryGetObjectLiteralContextualType(c, objectLikeContainer);
       // Shorthand property values.
@@ -1998,7 +1998,7 @@ interface FilteredMembers {
 function filterObjectMembersList(
   c: Checker,
   contextualMemberSymbols: Symbol[],
-  existingMembers: Node[],
+  existingMembers: readonly Node[],
   file: SourceFile,
   position: number,
 ): FilteredMembers {
@@ -2151,7 +2151,7 @@ function isFromObjectTypeDeclaration(node: Node): boolean {
 function filterClassMembersList(
   c: Checker,
   baseSymbols: Symbol[],
-  existingMembers: Node[],
+  existingMembers: readonly Node[],
   classElementModifierFlags: ModifierFlags,
   file: SourceFile,
   position: number,
@@ -2243,7 +2243,7 @@ function tryGetContainingJsxElement(contextToken: Node | undefined, file: Source
 function filterJsxAttributes(
   c: Checker,
   symbols: Symbol[],
-  attributes: Node[],
+  attributes: readonly Node[],
   file: SourceFile,
   position: number,
 ): FilteredMembers {

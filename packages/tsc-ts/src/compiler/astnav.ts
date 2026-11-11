@@ -280,7 +280,7 @@ class TokenAtPositionVisitor extends NodeVisitor {
   }
 
   /** The index of the node containing the position, or -1. */
-  private searchList(nodes: Node[], skipReparsed: boolean): number {
+  private searchList(nodes: readonly Node[], skipReparsed: boolean): number {
     let low = 0;
     let high = nodes.length - 1;
     while (low <= high) {

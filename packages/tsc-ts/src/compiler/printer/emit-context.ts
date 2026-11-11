@@ -12,6 +12,7 @@ import {
   StringLiteral,
   VariableDeclaration,
   VariableStatement,
+  sameNodeArray,
 } from '../ast.js';
 import { ClusteredLinkTable } from '../link-tables.js';
 import { SyntaxKind } from '../syntax-kind.js';
@@ -31,7 +32,7 @@ const enum SpanKind {
 }
 
 /** `left` with `right[start:end]` inserted at `at`. */
-function splice(left: Node[], at: number, right: Node[], start: number, end: number): Node[] {
+function splice(left: readonly Node[], at: number, right: Node[], start: number, end: number): Node[] {
   const result = left.slice(0, at);
   for (let i = start; i < end; i++) result.push(right[i]!);
   for (let i = at; i < left.length; i++) result.push(left[i]!);
@@ -535,7 +536,7 @@ export class EmitContext extends NodeFactory {
     if (scope.variables.length > 0) {
       const statement = factory.createVariableStatement(
         undefined,
-        factory.createVariableDeclarationList(factory.createNodeList(scope.variables), 0),
+        factory.createVariableDeclarationList(factory.createNodeList(scope.variables.slice()), 0),
       );
       this.setEmitFlags(statement, EmitFlags.CustomPrologue);
       statements.push(statement);
@@ -559,7 +560,7 @@ export class EmitContext extends NodeFactory {
       const factory = this.factory;
       const statement = factory.createVariableStatement(
         undefined,
-        factory.createVariableDeclarationList(factory.createNodeList(scope.variables), 1 /* NodeFlags.Let */),
+        factory.createVariableDeclarationList(factory.createNodeList(scope.variables.slice()), 1 /* NodeFlags.Let */),
       );
       this.setEmitFlags(statement, EmitFlags.CustomPrologue);
       statements.push(statement);
@@ -634,14 +635,14 @@ export class EmitContext extends NodeFactory {
   /** `statements` with `declarations` from an ended environment merged in, keeping the list's range. */
   mergeEnvironmentList(statements: NodeList, declarations: Node[]): NodeList {
     const merged = this.mergeEnvironment(statements.nodes, declarations);
-    return merged === statements.nodes ? statements : new NodeList(statements.pos, statements.end, merged);
+    return sameNodeArray(merged, statements.nodes) ? statements : new NodeList(statements.pos, statements.end, merged);
   }
 
   /**
    * Merges hoisted declarations into statements: prologue directives, then hoisted functions,
    * hoisted variables and other custom prologues, the new ones before the existing ones of each group.
    */
-  mergeEnvironment(statements: Node[], declarations: Node[]): Node[] {
+  mergeEnvironment(statements: readonly Node[], declarations: Node[]): readonly Node[] {
     if (declarations.length === 0) return statements;
     const leftPrologueEnd = this.spanEnd(statements, 0, SpanKind.Prologue);
     const leftFunctionsEnd = this.spanEnd(statements, leftPrologueEnd, SpanKind.HoistedFunction);
@@ -673,7 +674,7 @@ export class EmitContext extends NodeFactory {
     return left;
   }
 
-  private spanEnd(nodes: Node[], start: number, kind: SpanKind): number {
+  private spanEnd(nodes: readonly Node[], start: number, kind: SpanKind): number {
     let i = start;
     while (i < nodes.length && this.isSpanKind(nodes[i]!, kind)) i++;
     return i;
