@@ -2,14 +2,16 @@ import { MobileDocsBar } from '@vercel/geistdocs/mobile-docs-bar';
 import { createDocsPage } from '@vercel/geistdocs/pages/docs';
 import { config } from '@/lib/geistdocs/config';
 import { geistdocsSource } from '@/lib/geistdocs/source';
+import { homeOgTitle } from '@/lib/og-titles';
+import { versionedOgImage } from '@/lib/og-version';
 
-function ogImage(pageUrl: string, title: string) {
+function ogImage(pageUrl: string, cardTitle: string, alt: string) {
   return {
-    url: pageUrl === '/' ? '/og' : `/og${pageUrl}`,
+    url: versionedOgImage(pageUrl === '/' ? '/og' : `/og${pageUrl}`, cardTitle),
     width: 1200,
     height: 630,
     type: 'image/png',
-    alt: title,
+    alt,
   };
 }
 
@@ -19,7 +21,8 @@ const docsPage = createDocsPage({
   metadata: ({ metadata, page }) => {
     const title = page.data.title ?? config.title;
     const description = page.data.description;
-    const image = ogImage(page.url, title);
+    const cardTitle = page.url === '/' ? homeOgTitle : title;
+    const image = ogImage(page.url, cardTitle, title);
 
     return {
       ...metadata,
