@@ -1,28 +1,28 @@
-import { ImageResponse } from "next/og";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { parse, type Font } from "opentype.js";
+import { ImageResponse } from 'next/og';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { parse, type Font } from 'opentype.js';
 
-const folder = join(process.cwd(), "app/og");
+const folder = join(process.cwd(), 'app/og');
 
 export const size = { width: 1200, height: 630 };
 
-type Theme = "light" | "dark";
+type Theme = 'light' | 'dark';
 
 const themes = {
   light: {
-    background: "#f8f8f8",
-    text: "#0a0a0a",
-    slash: "#b7b7b7",
-    logo: "#000000",
-    description: "#6e6e6e",
+    background: '#f8f8f8',
+    text: '#0a0a0a',
+    slash: '#b7b7b7',
+    logo: '#000000',
+    description: '#6e6e6e',
   },
   dark: {
-    background: "#000000",
-    text: "#ffffff",
-    slash: "#666666",
-    logo: "#ffffff",
-    description: "#a1a1a1",
+    background: '#000000',
+    text: '#ffffff',
+    slash: '#666666',
+    logo: '#ffffff',
+    description: '#a1a1a1',
   },
 } as const;
 
@@ -66,9 +66,9 @@ let assets: Promise<Assets> | undefined;
 
 function loadAssets() {
   assets ??= Promise.all([
-    readFile(join(folder, "Geist-Regular.ttf")),
-    readFile(join(folder, "Geist-SemiBold.ttf")),
-    readFile(join(folder, "labs-logo.svg"), "utf-8"),
+    readFile(join(folder, 'Geist-Regular.ttf')),
+    readFile(join(folder, 'Geist-SemiBold.ttf')),
+    readFile(join(folder, 'labs-logo.svg'), 'utf-8'),
   ]).then(([regular, semibold, logo]) => ({
     regular: parse(toArrayBuffer(regular)),
     semibold: parse(toArrayBuffer(semibold)),
@@ -85,7 +85,7 @@ type Line = { text: string; left: number; baseline: number; size: number; letter
 
 function wrap(font: Font, text: string, lineSize: number, tracking: number, maxWidth: number) {
   const lines: string[] = [];
-  let line = "";
+  let line = '';
   for (const word of text.split(/\s+/).filter(Boolean)) {
     const next = line ? `${line} ${word}` : word;
     if (line && font.getAdvanceWidth(next, lineSize, { kerning: true, letterSpacing: tracking }) > maxWidth) {
@@ -154,7 +154,7 @@ function linePath(font: Font, lines: Line[]) {
         })
         .toPathData(3),
     )
-    .join("");
+    .join('');
 }
 
 function logoSource(svg: string, fill: string) {
@@ -162,14 +162,14 @@ function logoSource(svg: string, fill: string) {
     .replace(/width="[^"]*"/, `width="${logoWidth}"`)
     .replace(/height="[^"]*"/, `height="${logoHeight}"`)
     .replace(/fill="#000000"/g, `fill="${fill}"`);
-  return `data:image/svg+xml;base64,${Buffer.from(sized).toString("base64")}`;
+  return `data:image/svg+xml;base64,${Buffer.from(sized).toString('base64')}`;
 }
 
 async function renderLabsOg({
   product,
   title,
   description,
-  theme = "light",
+  theme = 'light',
 }: {
   product: string;
   title: string | string[];
@@ -195,10 +195,10 @@ async function renderLabsOg({
   return new ImageResponse(
     <div
       style={{
-        width: "100%",
-        height: "100%",
-        display: "flex",
-        position: "relative",
+        width: '100%',
+        height: '100%',
+        display: 'flex',
+        position: 'relative',
         backgroundColor: palette.background,
       }}
     >
@@ -208,13 +208,13 @@ async function renderLabsOg({
         width={logoWidth}
         height={logoHeight}
         src={logoSource(logo, palette.logo)}
-        style={{ position: "absolute", left: 64, top: logoTop }}
+        style={{ position: 'absolute', left: 64, top: logoTop }}
       />
       <svg
         width={size.width}
         height={size.height}
         viewBox={`0 0 ${size.width} ${size.height}`}
-        style={{ position: "absolute", left: 0, top: 0 }}
+        style={{ position: 'absolute', left: 0, top: 0 }}
         xmlns="http://www.w3.org/2000/svg"
       >
         <path d={slash} fill={palette.slash} />
