@@ -16,3 +16,44 @@
     @apply px-6;
   }
 }
+
+/*
+ * Navbar lockup: the OG card's logo / slash / word spacing scaled to the
+ * 18px logo. The slash is the card's parallelogram (6.22 x 14.81, 1.05px
+ * stroke, leaning 19.25deg) with an 11.04px gap from the logo and a 7.71px
+ * gap to the product name.
+ */
+header span:has(> a[aria-label='Vercel Labs']) {
+  gap: 0;
+}
+
+header span:has(> a[aria-label='Vercel Labs']) > a[aria-label='Vercel Labs'] {
+  margin-right: 3.039px;
+}
+
+header span:has(> a[aria-label='Vercel Labs']) > div.w-5 {
+  position: relative;
+  top: -0.133px;
+  width: 6.22px;
+  height: 14.806px;
+}
+
+header span:has(> a[aria-label='Vercel Labs']) > div.w-5 > svg {
+  display: none;
+}
+
+header span:has(> a[aria-label='Vercel Labs']) > div.w-5::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1.051px;
+  height: 14.806px;
+  background-color: currentColor;
+  transform: skewX(-19.247deg);
+  transform-origin: bottom left;
+}
+
+header span:has(> a[aria-label='Vercel Labs']) > a:not([aria-label]) {
+  margin-left: 7.71px;
+}

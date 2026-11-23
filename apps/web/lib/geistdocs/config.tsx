@@ -9,7 +9,16 @@ export const config = defineConfig({
   siteUrl,
   defaultLanguage: 'en',
   logo: (
-    <span className="font-medium tracking-tight" style={{ fontFamily: 'var(--font-geist-pixel-square)' }}>
+    <span
+      className="font-semibold"
+      style={{
+        fontFamily: 'var(--font-geist-sans)',
+        fontSize: '24.4px',
+        letterSpacing: '-0.05em',
+        lineHeight: 1,
+        transform: 'translateY(-0.5px)',
+      }}
+    >
       tsc-ts
     </span>
   ),
