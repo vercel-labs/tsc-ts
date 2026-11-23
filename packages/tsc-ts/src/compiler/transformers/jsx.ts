@@ -205,7 +205,7 @@ export class JsxTransformer extends Transformer {
     );
   }
 
-  private insertAfterPrologue(statements: Node[], statement: Node): Node[] {
+  private insertAfterPrologue(statements: readonly Node[], statement: Node): Node[] {
     let index = 0;
     while (
       index < statements.length &&
@@ -302,7 +302,7 @@ export class JsxTransformer extends Transformer {
   }
 
   /** `children: x` or `children: [x, y]`, or undefined when there are none. */
-  private childrenProperty(children: Node[]): Node | undefined {
+  private childrenProperty(children: readonly Node[]): Node | undefined {
     const factory = this.factory;
     const semantic = getSemanticJsxChildren(children);
     if (semantic.length === 1 && !isSpreadChild(semantic[0])) {
@@ -424,7 +424,7 @@ export class JsxTransformer extends Transformer {
   }
 
   /** The props object; below ES2018, spreads become `Object.assign` calls. */
-  private attributesToObject(attributes: Node[], childrenProperty: Node | undefined): Node {
+  private attributesToObject(attributes: readonly Node[], childrenProperty: Node | undefined): Node {
     const factory = this.factory;
     if (getEmitScriptTarget(this.options) >= ScriptTarget.ES2018) {
       const props: Node[] = [];
@@ -441,7 +441,7 @@ export class JsxTransformer extends Transformer {
     return this.attributesToAssign(attributes, childrenProperty);
   }
 
-  private attributesToAssign(attributes: Node[], childrenProperty: Node | undefined): Node {
+  private attributesToAssign(attributes: readonly Node[], childrenProperty: Node | undefined): Node {
     const factory = this.factory;
     const segments = new AssignSegments();
     for (let i = 0; i < attributes.length; i++) {
@@ -476,10 +476,10 @@ export class JsxTransformer extends Transformer {
     if (expressions.length > 0 && !(expressions[0] instanceof ObjectLiteralExpression))
       expressions = [factory.createObjectLiteral([], false) as Node].concat(expressions);
     if (expressions.length === 1) return expressions[0];
-    return factory.createGlobalMethodCall('Object', 'assign', expressions);
+    return factory.createGlobalMethodCall('Object', 'assign', expressions.slice());
   }
 
-  private spreadAttributeToProperties(attribute: JsxSpreadAttribute): Node[] {
+  private spreadAttributeToProperties(attribute: JsxSpreadAttribute): readonly Node[] {
     const expression = attribute.expression;
     if (expression instanceof ObjectLiteralExpression && !hasProto(expression))
       return this.visitArray(expression.properties.nodes);
@@ -656,7 +656,7 @@ class AssignSegments {
 
   flush(factory: NodeFactory): void {
     if (this.properties.length === 0) return;
-    this.expressions.push(factory.createObjectLiteral(this.properties, false));
+    this.expressions.push(factory.createObjectLiteral(this.properties.slice(), false));
     this.properties = [];
   }
 }
@@ -681,7 +681,7 @@ function isSpreadChild(node: Node): boolean {
 }
 
 /** Children other than whitespace-only text and empty expressions. */
-function getSemanticJsxChildren(children: Node[]): Node[] {
+function getSemanticJsxChildren(children: readonly Node[]): Node[] {
   const result: Node[] = [];
   for (let i = 0; i < children.length; i++) {
     const child = children[i];

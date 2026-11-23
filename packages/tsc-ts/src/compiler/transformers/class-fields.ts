@@ -1326,7 +1326,7 @@ export class ClassFieldsTransformer extends Transformer {
     let statements = this.visitArray(node.body.statements.nodes);
     this.currentClassElement = saved;
     statements = context.mergeEnvironment(statements, context.endVariableEnvironment());
-    const iife = factory.createImmediatelyInvokedArrowFunction(statements);
+    const iife = factory.createImmediatelyInvokedArrowFunction(statements.slice());
     const arrow = skipParentheses(iife.expression);
     context.setOriginal(arrow, node);
     context.addEmitFlags(arrow, EmitFlags.NoLexicalArguments);
@@ -1985,7 +1985,7 @@ export class ClassFieldsTransformer extends Transformer {
 
   private transformConstructorBodyWorker(
     statementsOut: Node[],
-    statementsIn: Node[],
+    statementsIn: readonly Node[],
     start: number,
     superPath: number[],
     depth: number,
@@ -2029,7 +2029,7 @@ export class ClassFieldsTransformer extends Transformer {
   }
 
   private skipParameterPropertyAssignments(
-    statements: Node[],
+    statements: readonly Node[],
     start: number,
     constructor: ConstructorDeclaration,
   ): number {
@@ -2109,17 +2109,17 @@ export class ClassFieldsTransformer extends Transformer {
         );
       appendAll(statements, initializerStatements);
     }
-    statements = context.mergeEnvironment(statements, context.endVariableEnvironment());
-    if (statements.length === 0 && constructor === undefined) return undefined;
+    const merged = context.mergeEnvironment(statements, context.endVariableEnvironment());
+    if (merged.length === 0 && constructor === undefined) return undefined;
     const multiLine =
-      constructorBody !== undefined && constructorBody.statements.nodes.length >= statements.length
+      constructorBody !== undefined && constructorBody.statements.nodes.length >= merged.length
         ? constructorBody.multiLine
-        : statements.length > 0;
+        : merged.length > 0;
     const members = getMembers(container)!;
     const list =
       constructorBody !== undefined
-        ? new NodeList(constructorBody.statements.pos, constructorBody.statements.end, statements)
-        : new NodeList(members.pos, members.end, statements);
+        ? new NodeList(constructorBody.statements.pos, constructorBody.statements.end, merged.slice())
+        : new NodeList(members.pos, members.end, merged.slice());
     const block = factory.created(new Block(list, multiLine));
     if (constructorBody !== undefined) this.withRange(block, constructorBody);
     return block;
@@ -2714,7 +2714,7 @@ class ConstructorReferenceFinder extends NodeVisitor {
   }
 }
 
-function membersOf(node: Node): Node[] {
+function membersOf(node: Node): readonly Node[] {
   const members = getMembers(node);
   return members === undefined ? [] : members.nodes;
 }

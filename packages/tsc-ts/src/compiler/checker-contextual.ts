@@ -848,7 +848,7 @@ export class SpreadIndices {
   }
 }
 
-function getSpreadIndices(c: Checker, node: Node, elements: Node[]): SpreadIndices {
+function getSpreadIndices(c: Checker, node: Node, elements: readonly Node[]): SpreadIndices {
   const cached = c.spreadIndices.get(node);
   if (cached !== undefined) return cached;
   let first = -1;

@@ -255,7 +255,7 @@ function hasDecoratorModifier(node: Node): boolean {
   return false;
 }
 
-function getModifiersOf(node: Node): Node[] | undefined {
+function getModifiersOf(node: Node): readonly Node[] | undefined {
   const list = getModifiers(node);
   return list !== undefined ? list.nodes : undefined;
 }

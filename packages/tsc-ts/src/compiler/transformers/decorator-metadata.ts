@@ -464,7 +464,7 @@ export class MetadataSerializer {
     return factory.createIdentifier('Object');
   }
 
-  private serializeUnionOrIntersectionConstituents(types: Node[], isIntersection: boolean): Node {
+  private serializeUnionOrIntersectionConstituents(types: readonly Node[], isIntersection: boolean): Node {
     const factory = this.context.factory;
     let serialized: Node | undefined = undefined;
     for (let i = 0; i < types.length; i++) {
@@ -692,7 +692,7 @@ function getAccessorTypeNode(node: Node, container: Node): Node | undefined {
 }
 
 /** A getter's metadata uses the parameters of its setter. */
-function getParametersOfDecoratedDeclaration(node: Node, container: Node): Node[] {
+function getParametersOfDecoratedDeclaration(node: Node, container: Node): readonly Node[] {
   if (node.kind === SyntaxKind.GetAccessor) {
     const accessors = getAllAccessorDeclarations(getMembers(container)!.nodes, node);
     if (accessors.setAccessor !== undefined) return getParameters(accessors.setAccessor)!.nodes;

@@ -52,7 +52,7 @@ export class TaggedTemplateTransformer extends Transformer {
       statements.push(
         factory.createVariableStatement(
           undefined,
-          factory.createVariableDeclarationList(factory.createNodeList(this.declarations), NodeFlags.None),
+          factory.createVariableDeclarationList(factory.createNodeList(this.declarations.slice()), NodeFlags.None),
         ),
       );
       const list = factory.createNodeList(statements);

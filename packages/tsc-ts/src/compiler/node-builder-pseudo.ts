@@ -273,7 +273,7 @@ export function pseudoTypeToNode(b: NodeBuilder, t: PseudoType): Node | undefine
       }
       if (res.length === 1) return res[0]!;
       if (res.length === 0) return keyword(b, hasElidedType ? SyntaxKind.AnyKeyword : SyntaxKind.NeverKeyword);
-      return b.created(new UnionTypeNode(b.list(res)));
+      return b.created(new UnionTypeNode(b.list(res.slice())));
     }
     case PseudoTypeKind.Undefined:
       return keyword(b, c.strictNullChecks ? SyntaxKind.UndefinedKeyword : SyntaxKind.AnyKeyword);
@@ -450,7 +450,7 @@ function objectLiteralToNode(b: NodeBuilder, t: ObjectLiteralType): Node {
   return result;
 }
 
-function reuseTypeParameters(b: NodeBuilder, typeParameters: Node[]) {
+function reuseTypeParameters(b: NodeBuilder, typeParameters: readonly Node[]) {
   if (typeParameters.length === 0) return undefined;
   const res: Node[] = [];
   for (const tp of typeParameters) {

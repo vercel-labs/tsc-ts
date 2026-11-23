@@ -585,7 +585,7 @@ export function getTypeReferenceType(c: Checker, node: Node, symbol: Symbol): Ty
   return c.errorType;
 }
 
-function typeArgumentNodesOf(node: Node): Node[] {
+function typeArgumentNodesOf(node: Node): readonly Node[] {
   const list = getTypeArguments(node);
   return list !== undefined ? list.nodes : emptyNodes;
 }

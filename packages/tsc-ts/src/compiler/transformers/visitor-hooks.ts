@@ -10,6 +10,7 @@ import {
   NotEmittedStatement,
   ParameterDeclaration,
   SyntaxList,
+  sameNodeArray,
 } from '../ast.js';
 import type { EmitContext } from '../printer/emit-context.js';
 import { EmitFlags } from '../printer/emit-flags.js';
@@ -44,7 +45,7 @@ export abstract class VisitorHooks {
   }
 
   /** The visited nodes, or `nodes` itself if nothing changed. */
-  visitArray(nodes: Node[]): Node[] {
+  visitArray(nodes: readonly Node[]): readonly Node[] {
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i]!;
       let visited = this.visit(node);
@@ -65,13 +66,13 @@ export abstract class VisitorHooks {
   visitNodes(list: NodeList | undefined): NodeList | undefined {
     if (list === undefined) return undefined;
     const nodes = this.visitArray(list.nodes);
-    return nodes === list.nodes ? list : new NodeList(list.pos, list.end, nodes);
+    return sameNodeArray(nodes, list.nodes) ? list : new NodeList(list.pos, list.end, nodes);
   }
 
   visitModifiers(list: ModifierList | undefined): ModifierList | undefined {
     if (list === undefined) return undefined;
     const nodes = this.visitArray(list.nodes);
-    if (nodes === list.nodes) return list;
+    if (sameNodeArray(nodes, list.nodes)) return list;
     const updated = this.factory.createModifierList(nodes);
     updated.pos = list.pos;
     updated.end = list.end;
@@ -81,7 +82,7 @@ export abstract class VisitorHooks {
   liftToBlock(node: Node | undefined): Node {
     if (node instanceof SyntaxList) {
       if (node.children.length === 1) return node.children[0]!;
-      return this.factory.createBlock(node.children, true);
+      return this.factory.createBlock(node.children.slice(), true);
     }
     if (node === undefined) return this.factory.createBlock([], true);
     return node;

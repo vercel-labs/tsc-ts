@@ -480,7 +480,7 @@ function someGenericFunctionReturningFunction(c: Checker, signatures: Signature[
   return false;
 }
 
-function someContextSensitive(c: Checker, nodes: Node[]): boolean {
+function someContextSensitive(c: Checker, nodes: readonly Node[]): boolean {
   for (const n of nodes) if (isContextSensitive(c, n)) return true;
   return false;
 }
@@ -704,7 +704,7 @@ export class SyntheticExpression extends Node {
   }
 }
 
-function getCallArgumentNodes(node: Node): Node[] {
+function getCallArgumentNodes(node: Node): readonly Node[] {
   if (node.kind === SyntaxKind.BinaryExpression) return [(node as BinaryExpression).left];
   if (node.kind === SyntaxKind.TaggedTemplateExpression) {
     const template = (node as TaggedTemplateExpression).template;
@@ -718,7 +718,7 @@ function getCallArgumentNodes(node: Node): Node[] {
 }
 
 /** The arguments of a call, with spreads of tuples expanded and a tagged template's strings first. */
-export function getEffectiveCallArguments(c: Checker, node: Node): Node[] {
+export function getEffectiveCallArguments(c: Checker, node: Node): readonly Node[] {
   // A fragment's attributes have no `children` yet, like those of `<React.Fragment>`.
   if (node.kind === SyntaxKind.JsxOpeningFragment)
     return [new SyntheticExpression(node, c.emptyFreshJsxObjectType, false, undefined)];
@@ -790,7 +790,7 @@ function checkSyntheticExpression(c: Checker, node: SyntheticExpression): Type {
     : node.type;
 }
 
-function getSpreadArgumentIndex(args: Node[]): number {
+function getSpreadArgumentIndex(args: readonly Node[]): number {
   for (let i = 0; i < args.length; i++) if (isSpreadArgument(args[i]!)) return i;
   return -1;
 }
@@ -806,7 +806,7 @@ function isSpreadArgument(arg: Node): boolean {
 function getSpreadArgumentType(
   c: Checker,
   call: Node,
-  args: Node[],
+  args: readonly Node[],
   index: number,
   argCount: number,
   restType: Type,
@@ -881,7 +881,7 @@ function getSpreadArgumentType(
 }
 
 /** The type of the arguments from `index` on, for the rest parameter of an immediately invoked function. */
-export function getRestArgumentsType(c: Checker, call: Node, args: Node[], index: number): Type {
+export function getRestArgumentsType(c: Checker, call: Node, args: readonly Node[], index: number): Type {
   return getSpreadArgumentType(c, call, args, index, args.length, c.anyType, undefined, CheckMode.Normal);
 }
 
@@ -897,8 +897,8 @@ function getMutableArrayOrTupleType(c: Checker, t: Type): Type {
 /** The state of one `resolveCall`, shared by its `chooseOverload` passes. */
 class CallState {
   readonly node: Node;
-  readonly typeArguments: Node[];
-  readonly args: Node[];
+  readonly typeArguments: readonly Node[];
+  readonly args: readonly Node[];
   candidates: Signature[];
   argCheckMode: CheckMode = CheckMode.Normal;
   isSingleNonGenericCandidate = false;
@@ -908,7 +908,7 @@ class CallState {
   candidateForArgumentArityError: Signature | undefined = undefined;
   candidateForTypeArgumentError: Signature | undefined = undefined;
 
-  constructor(node: Node, typeArguments: Node[], args: Node[], candidates: Signature[]) {
+  constructor(node: Node, typeArguments: readonly Node[], args: readonly Node[], candidates: Signature[]) {
     this.node = node;
     this.typeArguments = typeArguments;
     this.args = args;
@@ -916,7 +916,7 @@ class CallState {
   }
 }
 
-function getCallTypeArguments(node: Node): Node[] {
+function getCallTypeArguments(node: Node): readonly Node[] {
   if (node.kind === SyntaxKind.JsxOpeningFragment || node.kind === SyntaxKind.Decorator) return [];
   if (node.kind === SyntaxKind.CallExpression && (node as CallExpression).expression.kind === SyntaxKind.SuperKeyword)
     return [];
@@ -1122,7 +1122,7 @@ function isInJSFile(node: Node | undefined): boolean {
   return node !== undefined && (node.flags & NodeFlags.JavaScriptFile) !== 0;
 }
 
-function hasCorrectArity(c: Checker, node: Node, args: Node[], signature: Signature): boolean {
+function hasCorrectArity(c: Checker, node: Node, args: readonly Node[], signature: Signature): boolean {
   if (node.kind === SyntaxKind.JsxOpeningFragment) return true;
   let argCount: number;
   let callIsIncomplete = false;
@@ -1173,7 +1173,7 @@ function hasCorrectArity(c: Checker, node: Node, args: Node[], signature: Signat
   return true;
 }
 
-function hasCorrectTypeArgumentArity(c: Checker, signature: Signature, typeArguments: Node[]): boolean {
+function hasCorrectTypeArgumentArity(c: Checker, signature: Signature, typeArguments: readonly Node[]): boolean {
   const numTypeParameters = signature.typeParameters.length;
   const minTypeArgumentCount = getMinTypeArgumentCount(c, signature.typeParameters);
   return (
@@ -1185,7 +1185,7 @@ function hasCorrectTypeArgumentArity(c: Checker, signature: Signature, typeArgum
 function checkTypeArguments(
   c: Checker,
   signature: Signature,
-  typeArgumentNodes: Node[],
+  typeArgumentNodes: readonly Node[],
   reportErrors: boolean,
   headMessage: DiagnosticMessage | undefined,
 ): Type[] | undefined {
@@ -1226,7 +1226,7 @@ function checkTypeArguments(
 function isSignatureApplicable(
   c: Checker,
   node: Node,
-  args: Node[],
+  args: readonly Node[],
   signature: Signature,
   relation: Relation,
   checkMode: CheckMode,
@@ -1389,7 +1389,7 @@ function inferTypeArguments(
   c: Checker,
   node: Node,
   signature: Signature,
-  args: Node[],
+  args: readonly Node[],
   checkMode: CheckMode,
   context: InferenceContext,
 ): Type[] {
@@ -1502,7 +1502,7 @@ function getCandidateForOverloadFailure(
   c: Checker,
   node: Node,
   candidates: Signature[],
-  args: Node[],
+  args: readonly Node[],
   checkMode: CheckMode,
 ): Signature {
   checkNodeDeferred(c, node);
@@ -1516,7 +1516,7 @@ function pickLongestCandidateSignature(
   c: Checker,
   node: Node,
   candidates: Signature[],
-  args: Node[],
+  args: readonly Node[],
   checkMode: CheckMode,
 ): Signature {
   // The longest signature gives contextual types to the most arguments.
@@ -1569,12 +1569,12 @@ function getLongestCandidateIndex(c: Checker, candidates: Signature[], argsCount
   return maxParamsIndex;
 }
 
-function hasSpreadArgumentFrom(args: Node[], start: number): boolean {
+function hasSpreadArgumentFrom(args: readonly Node[], start: number): boolean {
   for (let i = start; i < args.length; i++) if (isSpreadArgument(args[i]!)) return true;
   return false;
 }
 
-function getTypeArgumentsFromNodes(c: Checker, typeArgumentNodes: Node[], typeParameters: Type[]): Type[] {
+function getTypeArgumentsFromNodes(c: Checker, typeArgumentNodes: readonly Node[], typeParameters: Type[]): Type[] {
   const typeArguments: Type[] = [];
   for (const n of typeArgumentNodes) {
     if (typeArguments.length === typeParameters.length) break;
@@ -1766,7 +1766,7 @@ function getArgumentArityError(
   c: Checker,
   node: Node,
   signatures: Signature[],
-  args: Node[],
+  args: readonly Node[],
   headMessage: DiagnosticMessage | undefined,
 ): Diagnostic {
   const spreadIndex = getSpreadArgumentIndex(args);
@@ -1889,7 +1889,7 @@ function getTypeArgumentArityError(
   c: Checker,
   node: Node,
   signatures: Signature[],
-  typeArguments: Node[],
+  typeArguments: readonly Node[],
   headMessage: DiagnosticMessage | undefined,
 ): Diagnostic {
   const argCount = typeArguments.length;
@@ -2136,13 +2136,13 @@ export function getInstantiationExpressionType(c: Checker, exprType: Type, node:
 class InstantiationExpressionInstantiator {
   readonly c: Checker;
   readonly node: Node;
-  readonly typeArguments: Node[];
+  readonly typeArguments: readonly Node[];
   hasSomeApplicableSignature = false;
   nonApplicableType: Type | undefined = undefined;
   hasSignatures = false;
   hasApplicableSignature = false;
 
-  constructor(c: Checker, node: Node, typeArguments: Node[]) {
+  constructor(c: Checker, node: Node, typeArguments: readonly Node[]) {
     this.c = c;
     this.node = node;
     this.typeArguments = typeArguments;

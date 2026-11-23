@@ -727,7 +727,10 @@ export class DeclarationTransformer extends Transformer {
         );
       case SyntaxKind.JSDocTypeLiteral: {
         const members = this.visitArray((input as JSDocTypeLiteral).jsdocPropertyTags ?? []);
-        return this.replaceWith(input, this.factory.created(new TypeLiteralNode(this.factory.createNodeList(members))));
+        return this.replaceWith(
+          input,
+          this.factory.created(new TypeLiteralNode(this.factory.createNodeList(members.slice()))),
+        );
       }
       case SyntaxKind.JSDocPropertyTag: {
         const tag = input as JSDocParameterOrPropertyTag;
@@ -1749,18 +1752,19 @@ export class DeclarationTransformer extends Transformer {
         break;
       }
     if (!visible) return undefined;
-    let normal = declarations;
+    let normal: readonly Node[] = declarations;
     const imports: Node[] = [];
     const file = this.tracker.currentSourceFile;
     if (file !== undefined && file.commonJSModuleIndicator !== undefined) {
       // `const x = require("m")` declarations become imports.
-      normal = [];
+      const kept: Node[] = [];
       for (const declaration of declarations) {
         if (isVariableDeclarationInitializedToRequire(declaration)) {
           const visited = this.visit(declaration);
           if (visited !== undefined) imports.push(visited);
-        } else normal.push(declaration);
+        } else kept.push(declaration);
       }
+      normal = kept;
     }
     const nodes = this.visitArray(normal);
     if (nodes.length === 0) return imports.length > 0 ? this.factory.createSyntaxList(imports) : undefined;
@@ -2346,7 +2350,7 @@ export class DeclarationTransformer extends Transformer {
           SyntaxKind.NamespaceKeyword,
           name,
           undefined,
-          this.factory.created(new ModuleBlock(this.factory.createNodeList(addOns))),
+          this.factory.created(new ModuleBlock(this.factory.createNodeList(addOns.slice()))),
         ),
       ),
     );
@@ -2478,7 +2482,7 @@ export class DeclarationTransformer extends Transformer {
     );
     tracker.errorNameNode = oldErrorNameNode;
     if (!this.suppressNewDiagnosticContexts) tracker.diagnosticContext = oldContext;
-    return nodes === undefined ? undefined : this.factory.createNodeList(nodes);
+    return nodes === undefined ? undefined : this.factory.createNodeList(nodes.slice());
   }
 
   private updateParamList(node: Node, params: NodeList): NodeList {

@@ -128,7 +128,7 @@ export class UsingTransformer extends Transformer {
         topLevel.push(
           factory.createVariableStatement(
             factory.createModifierList([factory.createToken(SyntaxKind.ExportKeyword)]),
-            factory.createVariableDeclarationList(factory.createNodeList(this.exportVars), NodeFlags.Let),
+            factory.createVariableDeclarationList(factory.createNodeList(this.exportVars.slice()), NodeFlags.Let),
           ),
         );
       const lowered = this.createDownlevelUsingStatements(body, env, usingKind === UsingKind.Async);
@@ -571,7 +571,7 @@ export class UsingTransformer extends Transformer {
   }
 }
 
-function getPrologueEnd(statements: Node[]): number {
+function getPrologueEnd(statements: readonly Node[]): number {
   let i = 0;
   while (i < statements.length && isPrologueDirective(statements[i])) i++;
   return i;
@@ -596,7 +596,7 @@ function getUsingKind(statement: Node): UsingKind {
   return getUsingKindOfVariableDeclarationList(statement.declarationList);
 }
 
-function getUsingKindOfStatements(statements: Node[]): UsingKind {
+function getUsingKindOfStatements(statements: readonly Node[]): UsingKind {
   let result = UsingKind.None;
   for (let i = 0; i < statements.length; i++) {
     const kind = getUsingKind(statements[i]);

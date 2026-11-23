@@ -268,7 +268,7 @@ export class AliasReferences extends NodeVisitor {
     return undefined;
   }
 
-  private getEntityNameForDecoratorMetadataFromTypeList(types: Node[]): Node | undefined {
+  private getEntityNameForDecoratorMetadataFromTypeList(types: readonly Node[]): Node | undefined {
     const strictNullChecks = getStrictOptionValue(this.options, this.options.strictNullChecks);
     let common: Node | undefined = undefined;
     for (let i = 0; i < types.length; i++) {
@@ -869,7 +869,7 @@ function getAnnotatedAccessorTypeNode(node: Node): Node | undefined {
   return parameter === undefined ? undefined : getType(parameter);
 }
 
-function getTypes(node: Node): Node[] {
+function getTypes(node: Node): readonly Node[] {
   if (node instanceof UnionTypeNode) return node.types.nodes;
   if (node instanceof IntersectionTypeNode) return node.types.nodes;
   return [];

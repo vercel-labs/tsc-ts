@@ -152,7 +152,7 @@ export function classOrConstructorParameterIsDecorated(legacy: boolean, node: No
 }
 
 export function classElementOrClassElementParameterIsDecorated(legacy: boolean, node: Node, parent: Node): boolean {
-  let parameters: Node[] | undefined = undefined;
+  let parameters: readonly Node[] | undefined = undefined;
   if (isAccessor(node)) {
     const accessors = getAllAccessorDeclarations(getMembers(parent)!.nodes, node);
     const first = accessors.firstWithDecorators();
@@ -196,7 +196,7 @@ export class AllAccessorDeclarations {
 }
 
 /** `accessor` and the other accessor among `members` with the same name and staticness. */
-export function getAllAccessorDeclarations(members: Node[], accessor: Node): AllAccessorDeclarations {
+export function getAllAccessorDeclarations(members: readonly Node[], accessor: Node): AllAccessorDeclarations {
   const otherKind = accessor.kind === SyntaxKind.SetAccessor ? SyntaxKind.GetAccessor : SyntaxKind.SetAccessor;
   let other: Node | undefined = undefined;
   // Dynamic names only match through the checker's symbols.

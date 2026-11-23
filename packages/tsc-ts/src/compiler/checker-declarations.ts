@@ -719,10 +719,10 @@ export function checkTypeParameters(c: Checker, list: NodeList | undefined): voi
 /** Reports references in a type parameter default to the parameter itself or later ones. */
 class LaterTypeParameterReferenceFinder extends NodeVisitor {
   readonly c: Checker;
-  readonly typeParameters: Node[];
+  readonly typeParameters: readonly Node[];
   readonly index: number;
 
-  constructor(c: Checker, typeParameters: Node[], index: number) {
+  constructor(c: Checker, typeParameters: readonly Node[], index: number) {
     super();
     this.c = c;
     this.typeParameters = typeParameters;

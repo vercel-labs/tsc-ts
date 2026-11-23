@@ -310,7 +310,7 @@ function getTypeArgumentListOf(node: Node): NodeList | undefined {
   return getTypeArguments(node);
 }
 
-function getChildrenOf(node: Node): Node[] {
+function getChildrenOf(node: Node): readonly Node[] {
   if (node.kind === SyntaxKind.JsxElement) return (node as JsxElement).children.nodes;
   if (node.kind === SyntaxKind.JsxFragment) return (node as JsxFragment).children.nodes;
   return [];

@@ -216,7 +216,7 @@ export function checkTypeNameIsReserved(c: Checker, name: Node, message: Diagnos
   }
 }
 
-function checkHeritageClauses(c: Checker, clauses: Node[], isClass: boolean): void {
+function checkHeritageClauses(c: Checker, clauses: readonly Node[], isClass: boolean): void {
   // Only the first clause of each kind counts; others are syntax errors.
   let seenExtends = false;
   let seenImplements = false;

@@ -837,7 +837,7 @@ export class CaseClauseTracker {
   private readonly numbers = new Set<number>();
   private readonly bigInts = new Set<string>();
 
-  constructor(c: Checker, clauses: Node[]) {
+  constructor(c: Checker, clauses: readonly Node[]) {
     for (const clause of clauses) {
       if (clause.kind === SyntaxKind.DefaultClause) continue;
       const clauseExpression = getExpression(clause)!;

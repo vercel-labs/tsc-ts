@@ -44,6 +44,7 @@ import {
   getText,
   getType,
   getInitializer,
+  sameNodeArray,
 } from './ast.js';
 import { isFunctionLike, isInJSFile, isStringLiteralLike } from './ast-utilities.js';
 import {
@@ -217,7 +218,7 @@ class ExistingNodeReuser extends VisitorBase {
   visitNodes(list: NodeList | undefined): NodeList | undefined {
     if (list === undefined) return undefined;
     const nodes = this.visitArray(list.nodes);
-    const result = new NodeList(-1, -1, nodes === list.nodes ? nodes.slice() : nodes);
+    const result = new NodeList(-1, -1, sameNodeArray(nodes, list.nodes) ? nodes.slice() : nodes);
     return result;
   }
 

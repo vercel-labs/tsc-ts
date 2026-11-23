@@ -1027,7 +1027,7 @@ export {
 export type { TypeReference };
 
 /** A JavaScript function without parameter types or a contextual signature: all its parameters are optional. */
-function isUntypedSignatureInJSFile(c: Checker, declaration: Node, params: Node[]): boolean {
+function isUntypedSignatureInJSFile(c: Checker, declaration: Node, params: readonly Node[]): boolean {
   if (!isInJSFile(declaration)) return false;
   switch (declaration.kind) {
     case SyntaxKind.FunctionExpression:

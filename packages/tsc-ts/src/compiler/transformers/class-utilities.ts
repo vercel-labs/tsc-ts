@@ -82,7 +82,7 @@ export function getNonAssignmentOperatorForCompoundAssignment(kind: SyntaxKind):
 }
 
 /** The number of leading prologue directives. */
-export function countPrologueDirectives(statements: Node[]): number {
+export function countPrologueDirectives(statements: readonly Node[]): number {
   for (let i = 0; i < statements.length; i++) if (!isPrologueDirective(statements[i])) return i;
   return statements.length;
 }
@@ -104,7 +104,7 @@ export function findSuperStatementIndexPath(statements: Node[], start: number): 
   return path.reverse();
 }
 
-function findSuperStatementIndexPathWorker(statements: Node[], start: number, path: number[]): boolean {
+function findSuperStatementIndexPathWorker(statements: readonly Node[], start: number, path: number[]): boolean {
   for (let i = start; i < statements.length; i++) {
     const statement = statements[i];
     if (getSuperCallFromStatement(statement) !== undefined) {

@@ -270,7 +270,7 @@ export class ObjectRestSpreadTransformer extends Transformer {
     // Not `visitFunctionBody`: the rest assignments go between the body and the hoisted variables.
     context.startVariableEnvironment();
     let body = this.visitNode(getBody(node));
-    let extras = context.endVariableEnvironment();
+    let extras: readonly Node[] = context.endVariableEnvironment();
     context.startVariableEnvironment();
     const newStatements = this.collectObjectRestAssignments(node);
     extras = context.mergeEnvironment(extras, context.endVariableEnvironment());
@@ -403,7 +403,10 @@ export class ObjectRestSpreadTransformer extends Transformer {
     const factory = this.factory;
     const statement = factory.createVariableStatement(
       undefined,
-      factory.createVariableDeclarationList(factory.createNodeList(declarationsOf(declarations)), NodeFlags.None),
+      factory.createVariableDeclarationList(
+        factory.createNodeList(declarationsOf(declarations).slice()),
+        NodeFlags.None,
+      ),
     );
     this.context.addEmitFlags(statement, EmitFlags.CustomPrologue);
     return statement;
@@ -425,7 +428,7 @@ export class ObjectRestSpreadTransformer extends Transformer {
     if (bindings !== undefined) {
       const statement = factory.createVariableStatement(
         undefined,
-        factory.createVariableDeclarationList(factory.createNodeList(declarationsOf(bindings)), NodeFlags.None),
+        factory.createVariableDeclarationList(factory.createNodeList(declarationsOf(bindings).slice()), NodeFlags.None),
       );
       const statements: Node[] = [statement];
       for (let i = 0; i < block.statements.nodes.length; i++) statements.push(block.statements.nodes[i]);
@@ -544,7 +547,7 @@ export class ObjectRestSpreadTransformer extends Transformer {
     return this.factory.createGlobalMethodCall('Object', 'assign', args);
   }
 
-  private chunkObjectLiteralElements(elements: Node[]): Node[] {
+  private chunkObjectLiteralElements(elements: readonly Node[]): Node[] {
     const factory = this.factory;
     const objects: Node[] = [];
     let chunk: Node[] = [];
@@ -563,7 +566,7 @@ export class ObjectRestSpreadTransformer extends Transformer {
         if (visited !== undefined) chunk.push(visited);
       }
     }
-    if (chunk.length > 0) objects.push(factory.createObjectLiteral(chunk, false));
+    if (chunk.length > 0) objects.push(factory.createObjectLiteral(chunk.slice(), false));
     return objects;
   }
 }
@@ -572,6 +575,6 @@ function isAssignmentPattern(node: Node): boolean {
   return node.kind === SyntaxKind.ObjectLiteralExpression || node.kind === SyntaxKind.ArrayLiteralExpression;
 }
 
-function declarationsOf(node: Node): Node[] {
+function declarationsOf(node: Node): readonly Node[] {
   return node instanceof SyntaxList ? node.children : [node];
 }
