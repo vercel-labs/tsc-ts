@@ -34,7 +34,7 @@ test('the one-phase profile was collected with a scriptc that has no second prof
 
 test('the pinned profile projects name a commit, an install command and a config', () => {
   const { projects } = JSON.parse(readFileSync('profiles/projects.json', 'utf8'));
-  assert.equal(projects.length, 8);
+  assert.equal(projects.length, 6);
   for (const project of projects) {
     assert.match(project.commit, /^[0-9a-f]{40}$/, project.name);
     assert.ok(project.install.length > 0, project.name);
