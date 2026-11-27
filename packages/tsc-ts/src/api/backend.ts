@@ -1,5 +1,8 @@
 // The compiler behind the API server. Everything it exports is plain data or
 // an opaque reference that callers pass back in.
+import { LifetimeRegion } from '@scriptc/experimental';
+import { dropLibGlobals } from '../compiler/checker-symbols.js';
+
 import {
   ExternalModuleIndicatorOptions,
   getLocals,
@@ -13,7 +16,7 @@ import {
 import { getTouchingPropertyName } from '../compiler/astnav.js';
 import { hash128String, toHex } from '../compiler/xxh3.js';
 import { getSourceFileOfNode } from '../compiler/binder-utilities.js';
-import type { Checker } from '../compiler/checker.js';
+import { disposeChecker, type Checker } from '../compiler/checker.js';
 import {
   getBaseTypes,
   getConstraintOfTypeParameter,
@@ -254,6 +257,8 @@ class ProjectPackages {
 // queries. Diagnostics come from a separate checker, as in tsc --api.
 export class Project {
   private readonly checker: Checker;
+  // The region the program's syntax trees, symbols, types and signatures belong to, which dispose frees.
+  private readonly region: LifetimeRegion;
   // The exports auto-imports offer from the program's files, extracted with a checker of their own on first use.
   private autoImports: AutoImportRegistry | undefined;
   // The node_modules buckets of auto-imports, by importing directory.
@@ -268,17 +273,49 @@ export class Project {
     private readonly loadedThrough: CachedFileSystem,
     // Where auto-imports read packages from.
     private readonly host: ProjectHost,
+    region: LifetimeRegion,
   ) {
+    this.region = region;
     this.checker = checked.createChecker();
   }
 
-  private static load(config: ParsedCommandLine, host: ProjectHost, configSeen: readonly string[]): Project {
-    const fs = new CachedFileSystem(new HostFileSystem(host));
-    const program = new Program(config, projectCompilerHost(fs, host));
-    return new Project(config, configSeen, new CheckedProgram(program), fs, host);
+  private static load(
+    config: ParsedCommandLine,
+    host: ProjectHost,
+    configSeen: readonly string[],
+    region: LifetimeRegion,
+  ): Project {
+    return region.run(() => {
+      const fs = new CachedFileSystem(new HostFileSystem(host));
+      const program = new Program(config, projectCompilerHost(fs, host));
+      return new Project(config, configSeen, new CheckedProgram(program), fs, host, region);
+    });
+  }
+
+  /** Runs `fn` with the project's region current, so the objects it creates are freed with the project. */
+  run<T>(fn: () => T): T {
+    return this.region.run(fn);
+  }
+
+  /**
+   * Releases the program's region, and returns a function that releases it again. The first release cannot
+   * free the program while the caller holds this project; the second, after the caller drops its last
+   * reference to the project, can.
+   */
+  dispose(): () => void {
+    // The program's merged library globals are kept by the program's source files, and a checker that borrowed
+    // another checker's globals has to give them back before either program is freed.
+    dropLibGlobals(this.program.getSourceFiles());
+    disposeChecker(this.checker);
+    this.checked.disposeCheckers();
+    const region = this.region;
+    region.release();
+    return () => region.release();
   }
 
   static open(host: ProjectHost, configFileName: string): Project {
+    // The config is parsed outside the region: the session's cache would hand its file to the next program, which
+    // would then keep this region alive after its own snapshot is released.
     const errors: CompilerDiagnostic[] = [];
     const seen = new Set<string>();
     const fs = new HostFileSystem(host, seen);
@@ -295,7 +332,7 @@ export class Project {
         host.useCaseSensitiveFileNames,
         0,
       );
-    return Project.load(config, host, Array.from(seen));
+    return Project.load(config, host, Array.from(seen), new LifetimeRegion());
   }
 
   // The project of open files that no config file contains, with tsgo's
@@ -325,7 +362,7 @@ export class Project {
       host.useCaseSensitiveFileNames,
       rootFileNames.length,
     );
-    return Project.load(config, host, []);
+    return Project.load(config, host, [], new LifetimeRegion());
   }
 
   private get program(): Program {
@@ -359,7 +396,7 @@ export class Project {
    * the files its patterns match as they were.
    */
   reload(host: ProjectHost): Project {
-    return Project.load(this.config, host, this.configSeen);
+    return Project.load(this.config, host, this.configSeen, new LifetimeRegion());
   }
 
   /**
@@ -368,12 +405,17 @@ export class Project {
    * with one changed file.
    */
   update(host: ProjectHost, path: string): Project {
-    const program = this.program.updateFile(
-      path,
-      projectCompilerHost(new CachedFileSystem(new HostFileSystem(host)), host),
+    const region = new LifetimeRegion();
+    const updated = region.run(() =>
+      this.program.updateFile(path, projectCompilerHost(new CachedFileSystem(new HostFileSystem(host)), host)),
     );
-    if (program === undefined) return this.reload(host);
-    return new Project(this.config, this.configSeen, new CheckedProgram(program), this.loadedThrough, host);
+    if (updated === undefined) {
+      region.release();
+      return this.reload(host);
+    }
+    return region.run(
+      () => new Project(this.config, this.configSeen, new CheckedProgram(updated), this.loadedThrough, host, region),
+    );
   }
 
   compilerOptions(): CompilerOptions {

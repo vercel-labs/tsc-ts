@@ -39,10 +39,18 @@ function installation() {
 }
 
 // The launcher runs as `sh -c 'umask <umask>; node [--import preload] launcher'`.
-const run = (launcher, { umask = '077', preload, env = {} } = {}) =>
+const run = (launcher, { umask = '077', preload, env = {}, args = [] } = {}) =>
   spawnSync(
     'sh',
-    ['-c', `umask ${umask}; exec "$@"`, 'sh', process.execPath, ...(preload ? ['--import', preload] : []), launcher],
+    [
+      '-c',
+      `umask ${umask}; exec "$@"`,
+      'sh',
+      process.execPath,
+      ...(preload ? ['--import', preload] : []),
+      launcher,
+      ...args,
+    ],
     { encoding: 'utf8', env: { ...process.env, ...env } },
   );
 
@@ -134,4 +142,17 @@ test("a path already at the copy's name is not followed", { skip }, () => {
   assert.equal(readlinkSync(temporary), victim);
   assert.equal(statSync(executable).ino, before.ino);
   assert.equal(existsSync(join(lib, '.tsc-ts-written')), false);
+});
+
+test('a compile runs the command line executable and --api the API executable', { skip }, () => {
+  const { launcher, lib } = installation();
+  const cli = join(lib, 'tsc-ts-cli');
+  writeFileSync(cli, '#!/bin/sh\necho cli "$@"\n');
+  chmodSync(cli, 0o755);
+  const compile = run(launcher, { args: ['-p', 'tsconfig.json'] });
+  assert.equal(compile.status, 0, compile.stderr);
+  assert.equal(compile.stdout.trim(), 'cli -p tsconfig.json');
+  const api = run(launcher, { args: ['--api', '--cwd', '.'] });
+  assert.equal(api.status, 0, api.stderr);
+  assert.equal(api.stdout.trim(), 'ran');
 });

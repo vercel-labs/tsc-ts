@@ -18,12 +18,13 @@ const parts = {
 };
 
 // Test files that can run a native build instead of the Node one, and the variable that names it: TSC_TS_BIN
-// takes the native tsc-ts (`npm run build:native`, dist/tsc), TSC_TS_CLI the native command line driver
+// takes the native tsc-ts (`npm run build:native`, dist/tsc-api), TSC_TS_CLI the native command line driver
 // (src/drivers/cli.ts, dist/cli). Each of their units has a native twin, `native:<unit id>`.
 const nativeFiles = {
   'packages/tsc-ts/tests/api.test.mjs': 'TSC_TS_BIN',
   'packages/tsc-ts/tests/api-libraries-from-disk.test.mjs': 'TSC_TS_BIN',
   'packages/tsc-ts/tests/api-listen.test.mjs': 'TSC_TS_BIN',
+  'packages/tsc-ts/tests/api-memory.test.mjs': 'TSC_TS_BIN',
   'packages/tsc-ts/tests/api-pipe.test.mjs': 'TSC_TS_BIN',
   'packages/tsc-ts/tests/build.test.mjs': 'TSC_TS_BIN',
   'packages/tsc-ts/tests/library-checking.test.mjs': 'TSC_TS_BIN',
@@ -35,7 +36,7 @@ const nativeFiles = {
   'packages/tsc-ts/tests/command-line.test.mjs': 'TSC_TS_CLI',
 };
 export const nativeBinaries = {
-  TSC_TS_BIN: join(root, 'packages/tsc-ts/dist/tsc'),
+  TSC_TS_BIN: join(root, 'packages/tsc-ts/dist/tsc-api'),
   TSC_TS_CLI: join(root, 'packages/tsc-ts/dist/cli'),
 };
 

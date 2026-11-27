@@ -175,7 +175,7 @@ jobs:
           wait $tsc || { status=1; cat "$RUNNER_TEMP/tsc.log"; }
           wait $cli || { status=1; cat "$RUNNER_TEMP/cli.log"; }
           exit $status
-      - run: tar -cf native.tar packages/tsc-ts/dist/tsc packages/tsc-ts/dist/cli
+      - run: tar -cf native.tar packages/tsc-ts/dist/tsc-api packages/tsc-ts/dist/cli
       - uses: actions/upload-artifact@v4
         with:
           name: native
@@ -250,7 +250,7 @@ jobs:
       - name: Run the API server tests
         working-directory: packages/tsc-ts
         env:
-          TSC_TS_BIN: packages/tsc-ts/dist/tsc.exe
+          TSC_TS_BIN: packages/tsc-ts/dist/tsc-api.exe
         run: node --test tests/api-pipe.test.mjs
       - name: Check that only the current user can open the pipe
         working-directory: packages/tsc-ts

@@ -31,7 +31,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { executableName, hostDescription, hostPlatform, packageName, platforms } from '../bin/platforms.js';
+import { cliExecutableName, executableName, hostDescription, hostPlatform, packageName, platforms } from '../bin/platforms.js';
 
 const root = resolve(import.meta.dirname, '..');
 const repo = resolve(root, '../..');
@@ -83,10 +83,21 @@ function packPlatform() {
   const dir = join(out, platform.name);
   const lib = join(dir, 'lib');
   mkdirSync(lib, { recursive: true });
+  const binaries = values.binary
+    ? { api: resolve(values.binary), cli: resolve(values.binary) }
+    : build();
   const executable = join(lib, executableName());
-  copyFileSync(values.binary ? resolve(values.binary) : build(), executable);
+  copyFileSync(binaries.api, executable);
   chmodSync(executable, 0o755);
-  if (platform.libc === 'glibc') checkGlibcVersions(executable);
+  // The command line executable, which a compile runs (bin/tsc-ts.js); it leaves the API server's program regions
+  // out of its build, so a plain check pays nothing for them.
+  const cliExecutable = join(lib, cliExecutableName());
+  copyFileSync(binaries.cli, cliExecutable);
+  chmodSync(cliExecutable, 0o755);
+  if (platform.libc === 'glibc') {
+    checkGlibcVersions(executable);
+    checkGlibcVersions(cliExecutable);
+  }
   const libs = typescriptLib();
   for (const name of readdirSync(libs))
     if (/^lib\..*\.d\.ts$/.test(name)) copyFileSync(join(libs, name), join(lib, name));
@@ -104,13 +115,14 @@ function packPlatform() {
   return pack(dir);
 }
 
-// Builds dist/tsc with scriptc and returns its path.
+// Builds the two executables with scriptc and returns their paths.
 function build() {
   run('npm', ['run', 'build:native'], { cwd: root });
-  const path = join(root, 'dist/tsc');
-  if (windows && existsSync(path + '.exe')) return path + '.exe';
-  if (!existsSync(path)) throw new Error(`scriptc did not write ${path}`);
-  return path;
+  const executable = (path) => (windows && existsSync(path + '.exe') ? path + '.exe' : path);
+  const api = executable(join(root, 'dist/tsc-api'));
+  const cli = executable(join(root, 'dist/tsc'));
+  for (const path of [api, cli]) if (!existsSync(path)) throw new Error(`scriptc did not write ${path}`);
+  return { api, cli };
 }
 
 // Fails if the executable needs a glibc symbol version newer than glibcMinimum,
