@@ -259,6 +259,9 @@ export class Session {
   private objectReferences = false;
   // File contents and parsed files kept across snapshots.
   private readonly files: backend.SessionFiles;
+  // The projects the live snapshots keep. One no snapshot keeps any more is disposed, which frees its
+  // program.
+  private readonly liveProjects = new Set<Project>();
 
   constructor(
     private readonly options: SessionOptions,
@@ -274,12 +277,15 @@ export class Session {
   // paths it read, so the next client sees what a new server would. Parsed files stay, and a later project reuses
   // one whose text is unchanged.
   reset(): void {
+    const projects = [...this.liveProjects];
     this.snapshots.clear();
+    this.liveProjects.clear();
     this.nextSnapshotId = 1;
     this.leases.clear();
     this.nextLeaseId = 1;
     this.objectReferences = false;
     this.files.reset();
+    this.disposeProjects(projects);
     this.resetServerTiming();
   }
 
@@ -295,7 +301,14 @@ export class Session {
       // As tsgo, echo returns the payload's bytes as they are, which need not be UTF-8 text.
       if (method === 'echo') return { ok: true, reply: payload.slice() };
       sending = this.objectReferences ? new SentIds() : null;
-      return { ok: true, reply: this.dispatch(method, decodeText(payload)) };
+      const params = parseParams(method, decodeText(payload));
+      // What a request creates belongs to the region of the project it targets, which its snapshot's
+      // release frees (requestProject).
+      const project = this.requestProject(params);
+      return {
+        ok: true,
+        reply: project === undefined ? this.dispatch(method, params) : project.run(() => this.dispatch(method, params)),
+      };
     } catch (e) {
       sending?.unmark();
       // Classified here: natively, a caught value passed on loses its class.
@@ -314,77 +327,75 @@ export class Session {
     }
   }
 
-  private dispatch(method: string, params: string): Reply {
+  private dispatch(method: string, params: unknown): Reply {
     switch (method) {
       case 'ping':
         return '"pong"';
       case 'initialize':
-        return JSON.stringify(
-          this.initialize(params === '' ? null : (JSON.parse(params) as proto.InitializeParams | null)),
-        );
+        return JSON.stringify(this.initialize(params as proto.InitializeParams | null));
       case 'createSnapshot':
-        return JSON.stringify(this.createSnapshot(JSON.parse(params) as proto.SnapshotChangesParams | null));
+        return JSON.stringify(this.createSnapshot(params as proto.SnapshotChangesParams | null));
       case 'updateSnapshot':
-        return JSON.stringify(this.updateSnapshot(JSON.parse(params) as proto.UpdateSnapshotParams | null));
+        return JSON.stringify(this.updateSnapshot(params as proto.UpdateSnapshotParams | null));
       case 'retainSourceFile':
-        return JSON.stringify(this.retainSourceFile(JSON.parse(params) as proto.RetainSourceFileParams | null));
+        return JSON.stringify(this.retainSourceFile(params as proto.RetainSourceFileParams | null));
       case 'releaseSourceFile':
-        return JSON.stringify(this.releaseSourceFile(JSON.parse(params) as proto.ReleaseSourceFileParams | null));
+        return JSON.stringify(this.releaseSourceFile(params as proto.ReleaseSourceFileParams | null));
       case 'release':
-        return JSON.stringify(this.release(JSON.parse(params) as proto.ReleaseParams | null));
+        return JSON.stringify(this.release(params as proto.ReleaseParams | null));
       case 'parseConfigFile':
-        return JSON.stringify(this.parseConfigFile(JSON.parse(params) as proto.FileParams));
+        return JSON.stringify(this.parseConfigFile(params as proto.FileParams));
       case 'getDefaultProjectForFile':
-        return JSON.stringify(this.defaultProjectForFile(JSON.parse(params) as proto.SnapshotFileParams));
+        return JSON.stringify(this.defaultProjectForFile(params as proto.SnapshotFileParams));
       case 'getSourceFile':
-        return this.sourceFile(JSON.parse(params) as proto.ProjectFileParams);
+        return this.sourceFile(params as proto.ProjectFileParams);
       case 'getSourceFileNames':
-        return JSON.stringify(this.sourceFileNames(JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.sourceFileNames(params as proto.ProjectParams));
       case 'getSourceFileMetadata':
-        return JSON.stringify(this.sourceFileMetadata(JSON.parse(params) as proto.ProjectFileParams));
+        return JSON.stringify(this.sourceFileMetadata(params as proto.ProjectFileParams));
       case 'getSymbolAtPosition':
-        return JSON.stringify(this.symbolAtPosition(JSON.parse(params) as proto.PositionParams));
+        return JSON.stringify(this.symbolAtPosition(params as proto.PositionParams));
       case 'getSymbolsAtPositions':
-        return JSON.stringify(this.symbolsAtPositions(JSON.parse(params) as proto.PositionsParams));
+        return JSON.stringify(this.symbolsAtPositions(params as proto.PositionsParams));
       case 'getSymbolAtLocation':
-        return JSON.stringify(this.symbolAtLocation(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.symbolAtLocation(params as proto.LocationParams));
       case 'getSymbolsAtLocations':
-        return JSON.stringify(this.symbolsAtLocations(JSON.parse(params) as proto.LocationsParams));
+        return JSON.stringify(this.symbolsAtLocations(params as proto.LocationsParams));
       case 'getTypeOfSymbol':
-        return JSON.stringify(this.typeOfSymbol(JSON.parse(params) as proto.SymbolParams, false));
+        return JSON.stringify(this.typeOfSymbol(params as proto.SymbolParams, false));
       case 'getDeclaredTypeOfSymbol':
-        return JSON.stringify(this.typeOfSymbol(JSON.parse(params) as proto.SymbolParams, true));
+        return JSON.stringify(this.typeOfSymbol(params as proto.SymbolParams, true));
       case 'getTypesOfSymbols':
-        return JSON.stringify(this.typesOfSymbols(JSON.parse(params) as proto.SymbolsParams));
+        return JSON.stringify(this.typesOfSymbols(params as proto.SymbolsParams));
       case 'resolveName':
-        return JSON.stringify(this.resolveName(JSON.parse(params) as proto.ResolveNameParams));
+        return JSON.stringify(this.resolveName(params as proto.ResolveNameParams));
       case 'getSignaturesOfTypes':
-        return JSON.stringify(this.signaturesOfTypes(JSON.parse(params) as proto.SignaturesOfTypesParams));
+        return JSON.stringify(this.signaturesOfTypes(params as proto.SignaturesOfTypesParams));
       case 'getSignaturesOfType':
-        return JSON.stringify(this.signaturesOfType(JSON.parse(params) as proto.SignaturesOfTypeParams));
+        return JSON.stringify(this.signaturesOfType(params as proto.SignaturesOfTypeParams));
       case 'getResolvedSignature':
-        return JSON.stringify(this.resolvedSignature(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.resolvedSignature(params as proto.LocationParams));
       case 'getResolvedSignatures':
-        return JSON.stringify(this.resolvedSignatures(JSON.parse(params) as proto.LocationsParams));
+        return JSON.stringify(this.resolvedSignatures(params as proto.LocationsParams));
       case 'getContextualTypes':
-        return JSON.stringify(this.contextualTypes(JSON.parse(params) as proto.LocationsParams));
+        return JSON.stringify(this.contextualTypes(params as proto.LocationsParams));
       case 'getTypeAtLocation':
-        return JSON.stringify(this.typeAtLocation(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.typeAtLocation(params as proto.LocationParams));
       case 'getTypeAtLocations':
-        return JSON.stringify(this.typeAtLocations(JSON.parse(params) as proto.LocationsParams));
+        return JSON.stringify(this.typeAtLocations(params as proto.LocationsParams));
       case 'getTypeAtPosition':
-        return JSON.stringify(this.typeAtPosition(JSON.parse(params) as proto.PositionParams));
+        return JSON.stringify(this.typeAtPosition(params as proto.PositionParams));
       case 'getTypesAtPositions':
-        return JSON.stringify(this.typesAtPositions(JSON.parse(params) as proto.PositionsParams));
+        return JSON.stringify(this.typesAtPositions(params as proto.PositionsParams));
       case 'getParentOfSymbol':
       case 'getExportSymbolOfSymbol':
-        return JSON.stringify(this.symbolOfSymbol(method, JSON.parse(params) as proto.SymbolPropertyParams));
+        return JSON.stringify(this.symbolOfSymbol(method, params as proto.SymbolPropertyParams));
       case 'getMembersOfSymbol':
       case 'getExportsOfSymbol':
-        return JSON.stringify(this.symbolTableOfSymbol(method, JSON.parse(params) as proto.SymbolPropertyParams));
+        return JSON.stringify(this.symbolTableOfSymbol(method, params as proto.SymbolPropertyParams));
       case 'getSymbolOfType':
       case 'getAliasSymbolOfType':
-        return JSON.stringify(this.symbolOfType(method, JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.symbolOfType(method, params as proto.ObjectParams));
       case 'getTargetOfType':
       case 'getFreshTypeOfType':
       case 'getRegularTypeOfType':
@@ -394,153 +405,153 @@ export class Session {
       case 'getExtendsTypeOfType':
       case 'getBaseTypeOfType':
       case 'getConstraintOfType':
-        return JSON.stringify(this.typeOfType(method, JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.typeOfType(method, params as proto.ObjectParams));
       case 'getTypesOfType':
       case 'getTypeParametersOfType':
       case 'getOuterTypeParametersOfType':
       case 'getLocalTypeParametersOfType':
       case 'getAliasTypeArgumentsOfType':
-        return JSON.stringify(this.typesOfType(method, JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.typesOfType(method, params as proto.ObjectParams));
       case 'getTypeParametersOfSignature':
-        return JSON.stringify(this.typeParametersOfSignature(JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.typeParametersOfSignature(params as proto.ObjectParams));
       case 'getParametersOfSignature':
-        return JSON.stringify(this.parametersOfSignature(JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.parametersOfSignature(params as proto.ObjectParams));
       case 'getThisParameterOfSignature':
-        return JSON.stringify(this.thisParameterOfSignature(JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.thisParameterOfSignature(params as proto.ObjectParams));
       case 'getTargetOfSignature':
-        return JSON.stringify(this.targetOfSignature(JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.targetOfSignature(params as proto.ObjectParams));
       case 'getContextualType':
-        return JSON.stringify(this.contextualType(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.contextualType(params as proto.LocationParams));
       case 'getBaseTypesOfLiteralTypes':
-        return JSON.stringify(this.baseTypesOfLiteralTypes(JSON.parse(params) as proto.TypesParams));
+        return JSON.stringify(this.baseTypesOfLiteralTypes(params as proto.TypesParams));
       case 'getBaseTypeOfLiteralType':
       case 'getWidenedType':
       case 'getBaseConstraintOfType':
-        return JSON.stringify(this.checkerTypeOfType(method, JSON.parse(params) as proto.TypeParams));
+        return JSON.stringify(this.checkerTypeOfType(method, params as proto.TypeParams));
       case 'getNonNullableType':
       case 'getApparentType':
       case 'getConstraintOfTypeParameter':
-        return JSON.stringify(this.checkerTypeOfObject(method, JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.checkerTypeOfObject(method, params as proto.ObjectParams));
       case 'getTypeFromTypeNode':
-        return JSON.stringify(this.typeFromTypeNode(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.typeFromTypeNode(params as proto.LocationParams));
       case 'getParameterType':
-        return JSON.stringify(this.parameterType(JSON.parse(params) as proto.ParameterTypeParams));
+        return JSON.stringify(this.parameterType(params as proto.ParameterTypeParams));
       case 'isArrayLikeType':
       case 'isArrayType':
-        return JSON.stringify(this.typePredicate(method, JSON.parse(params) as proto.TypeParams));
+        return JSON.stringify(this.typePredicate(method, params as proto.TypeParams));
       case 'isTypeAssignableTo':
-        return JSON.stringify(this.isTypeAssignableTo(JSON.parse(params) as proto.AssignabilityParams));
+        return JSON.stringify(this.isTypeAssignableTo(params as proto.AssignabilityParams));
       case 'getShorthandAssignmentValueSymbol':
-        return JSON.stringify(this.shorthandAssignmentValueSymbol(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.shorthandAssignmentValueSymbol(params as proto.LocationParams));
       case 'getTypeOfSymbolAtLocation':
-        return JSON.stringify(this.typeOfSymbolAtLocation(JSON.parse(params) as proto.SymbolAtLocationParams));
+        return JSON.stringify(this.typeOfSymbolAtLocation(params as proto.SymbolAtLocationParams));
       case 'typeToTypeNode':
-        return this.typeToTypeNode(JSON.parse(params) as proto.TypeToTypeNodeParams);
+        return this.typeToTypeNode(params as proto.TypeToTypeNodeParams);
       case 'signatureToSignatureDeclaration':
-        return this.signatureToSignatureDeclaration(JSON.parse(params) as proto.SignatureToDeclarationParams);
+        return this.signatureToSignatureDeclaration(params as proto.SignatureToDeclarationParams);
       case 'typeToString':
-        return JSON.stringify(this.typeToString(JSON.parse(params) as proto.TypeToTypeNodeParams));
+        return JSON.stringify(this.typeToString(params as proto.TypeToTypeNodeParams));
       case 'printNode':
-        return JSON.stringify(this.printNode(JSON.parse(params) as proto.PrintNodeParams));
+        return JSON.stringify(this.printNode(params as proto.PrintNodeParams));
       case 'isContextSensitive':
-        return JSON.stringify(this.isContextSensitive(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.isContextSensitive(params as proto.LocationParams));
       case 'getReturnTypeOfSignature':
-        return JSON.stringify(this.returnTypeOfSignature(JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.returnTypeOfSignature(params as proto.ObjectParams));
       case 'getRestTypeOfSignature':
-        return JSON.stringify(this.restTypeOfSignature(JSON.parse(params) as proto.SignatureParams));
+        return JSON.stringify(this.restTypeOfSignature(params as proto.SignatureParams));
       case 'getReturnTypesOfSignatures':
-        return JSON.stringify(this.returnTypesOfSignatures(JSON.parse(params) as proto.SignaturesParams));
+        return JSON.stringify(this.returnTypesOfSignatures(params as proto.SignaturesParams));
       case 'getTypePredicateOfSignature':
-        return JSON.stringify(this.typePredicateOfSignature(JSON.parse(params) as proto.SignatureParams));
+        return JSON.stringify(this.typePredicateOfSignature(params as proto.SignatureParams));
       case 'getBaseTypes':
       case 'getTypeArguments':
-        return JSON.stringify(this.checkerTypesOfType(method, JSON.parse(params) as proto.TypeParams));
+        return JSON.stringify(this.checkerTypesOfType(method, params as proto.TypeParams));
       case 'getPropertiesOfType':
-        return JSON.stringify(this.propertiesOfType(JSON.parse(params) as proto.TypeParams));
+        return JSON.stringify(this.propertiesOfType(params as proto.TypeParams));
       case 'getPropertiesOfTypes':
-        return JSON.stringify(this.propertiesOfTypes(JSON.parse(params) as proto.TypesParams));
+        return JSON.stringify(this.propertiesOfTypes(params as proto.TypesParams));
       case 'getPropertyOfType':
-        return JSON.stringify(this.propertyOfType(JSON.parse(params) as proto.NamedTypeParams));
+        return JSON.stringify(this.propertyOfType(params as proto.NamedTypeParams));
       case 'getIndexInfosOfType':
-        return JSON.stringify(this.indexInfosOfType(JSON.parse(params) as proto.TypeParams));
+        return JSON.stringify(this.indexInfosOfType(params as proto.TypeParams));
       case 'getTrueTypeOfConditionalType':
       case 'getFalseTypeOfConditionalType':
-        return JSON.stringify(this.branchOfConditionalType(method, JSON.parse(params) as proto.ObjectParams));
+        return JSON.stringify(this.branchOfConditionalType(method, params as proto.ObjectParams));
       case 'getConstantValue':
-        return JSON.stringify(this.constantValue(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.constantValue(params as proto.LocationParams));
       case 'getConstantValues':
-        return JSON.stringify(this.constantValues(JSON.parse(params) as proto.LocationsParams));
+        return JSON.stringify(this.constantValues(params as proto.LocationsParams));
       case 'getSignatureFromDeclaration':
-        return JSON.stringify(this.signatureFromDeclaration(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.signatureFromDeclaration(params as proto.LocationParams));
       case 'getSignaturesFromDeclarations':
-        return JSON.stringify(this.signaturesFromDeclarations(JSON.parse(params) as proto.LocationsParams));
+        return JSON.stringify(this.signaturesFromDeclarations(params as proto.LocationsParams));
       case 'getExportSpecifierLocalTargetSymbol':
-        return JSON.stringify(this.exportSpecifierLocalTargetSymbol(JSON.parse(params) as proto.LocationParams));
+        return JSON.stringify(this.exportSpecifierLocalTargetSymbol(params as proto.LocationParams));
       case 'getAliasedSymbol':
       case 'getImmediateAliasedSymbol':
-        return JSON.stringify(this.aliasedSymbol(method, JSON.parse(params) as proto.SymbolParams));
+        return JSON.stringify(this.aliasedSymbol(method, params as proto.SymbolParams));
       case 'getAliasedSymbols':
-        return JSON.stringify(this.aliasedSymbols(JSON.parse(params) as proto.SymbolsParams));
+        return JSON.stringify(this.aliasedSymbols(params as proto.SymbolsParams));
       case 'getExportsOfModule':
-        return JSON.stringify(this.exportsOfModule(JSON.parse(params) as proto.SymbolParams));
+        return JSON.stringify(this.exportsOfModule(params as proto.SymbolParams));
       case 'getMemberInModuleExports':
-        return JSON.stringify(this.memberInModuleExports(JSON.parse(params) as proto.NamedSymbolParams));
+        return JSON.stringify(this.memberInModuleExports(params as proto.NamedSymbolParams));
       case 'getAnyType':
-        return JSON.stringify(this.intrinsicType('any', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('any', params as proto.ProjectParams));
       case 'getStringType':
-        return JSON.stringify(this.intrinsicType('string', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('string', params as proto.ProjectParams));
       case 'getNumberType':
-        return JSON.stringify(this.intrinsicType('number', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('number', params as proto.ProjectParams));
       case 'getBooleanType':
-        return JSON.stringify(this.intrinsicType('boolean', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('boolean', params as proto.ProjectParams));
       case 'getVoidType':
-        return JSON.stringify(this.intrinsicType('void', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('void', params as proto.ProjectParams));
       case 'getUndefinedType':
-        return JSON.stringify(this.intrinsicType('undefined', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('undefined', params as proto.ProjectParams));
       case 'getNullType':
-        return JSON.stringify(this.intrinsicType('null', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('null', params as proto.ProjectParams));
       case 'getNeverType':
-        return JSON.stringify(this.intrinsicType('never', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('never', params as proto.ProjectParams));
       case 'getUnknownType':
-        return JSON.stringify(this.intrinsicType('unknown', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('unknown', params as proto.ProjectParams));
       case 'getBigIntType':
-        return JSON.stringify(this.intrinsicType('bigint', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('bigint', params as proto.ProjectParams));
       case 'getESSymbolType':
-        return JSON.stringify(this.intrinsicType('symbol', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.intrinsicType('symbol', params as proto.ProjectParams));
       case 'getWellKnownSymbols':
-        return JSON.stringify(this.wellKnownSymbols(JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.wellKnownSymbols(params as proto.ProjectParams));
       case 'getSyntacticDiagnostics':
-        return JSON.stringify(this.fileDiagnostics('syntactic', JSON.parse(params) as proto.FilesParams));
+        return JSON.stringify(this.fileDiagnostics('syntactic', params as proto.FilesParams));
       case 'getBindDiagnostics':
-        return JSON.stringify(this.fileDiagnostics('bind', JSON.parse(params) as proto.FilesParams));
+        return JSON.stringify(this.fileDiagnostics('bind', params as proto.FilesParams));
       case 'getSemanticDiagnostics':
-        return JSON.stringify(this.fileDiagnostics('semantic', JSON.parse(params) as proto.FilesParams));
+        return JSON.stringify(this.fileDiagnostics('semantic', params as proto.FilesParams));
       case 'getSuggestionDiagnostics':
-        return JSON.stringify(this.fileDiagnostics('suggestion', JSON.parse(params) as proto.FilesParams));
+        return JSON.stringify(this.fileDiagnostics('suggestion', params as proto.FilesParams));
       case 'getDeclarationDiagnostics':
-        return JSON.stringify(this.fileDiagnostics('declaration', JSON.parse(params) as proto.FilesParams));
+        return JSON.stringify(this.fileDiagnostics('declaration', params as proto.FilesParams));
       case 'getDiagnosticsOfCheckedFiles':
-        return JSON.stringify(this.diagnosticsOfCheckedFiles(JSON.parse(params) as proto.FilesParams));
+        return JSON.stringify(this.diagnosticsOfCheckedFiles(params as proto.FilesParams));
       case 'getConfigFileParsingDiagnostics':
-        return JSON.stringify(this.projectDiagnostics('config', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.projectDiagnostics('config', params as proto.ProjectParams));
       case 'getProgramDiagnostics':
-        return JSON.stringify(this.projectDiagnostics('program', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.projectDiagnostics('program', params as proto.ProjectParams));
       case 'getGlobalDiagnostics':
-        return JSON.stringify(this.projectDiagnostics('global', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.projectDiagnostics('global', params as proto.ProjectParams));
       case 'getCompletionsAtPosition':
-        return JSON.stringify(this.completionsAtPosition(JSON.parse(params) as proto.CompletionsParams));
+        return JSON.stringify(this.completionsAtPosition(params as proto.CompletionsParams));
       case 'getImportAdderEdits':
-        return JSON.stringify(this.importAdderEdits(JSON.parse(params) as proto.ImportAdderEditsParams));
+        return JSON.stringify(this.importAdderEdits(params as proto.ImportAdderEditsParams));
       case 'getJsDocTags':
-        return JSON.stringify(this.jsDocTags(JSON.parse(params) as proto.SymbolParams));
+        return JSON.stringify(this.jsDocTags(params as proto.SymbolParams));
       case 'getDocumentationComment':
-        return JSON.stringify(this.documentationComment(JSON.parse(params) as proto.SymbolParams));
+        return JSON.stringify(this.documentationComment(params as proto.SymbolParams));
       case 'getReferencesToSymbolInFile':
-        return JSON.stringify(this.referencesToSymbolInFile(JSON.parse(params) as proto.SymbolFileParams));
+        return JSON.stringify(this.referencesToSymbolInFile(params as proto.SymbolFileParams));
       case 'getReferencedSymbolsForNode':
-        return JSON.stringify(this.referencedSymbolsForNode(JSON.parse(params) as proto.ReferencedSymbolsParams));
+        return JSON.stringify(this.referencedSymbolsForNode(params as proto.ReferencedSymbolsParams));
       case 'getSignatureUsages':
-        return JSON.stringify(this.signatureUsages(JSON.parse(params) as proto.SignatureUsagesParams));
+        return JSON.stringify(this.signatureUsages(params as proto.SignatureUsagesParams));
       case 'startCPUProfile':
       case 'stopCPUProfile':
       case 'saveHeapProfile':
@@ -635,18 +646,58 @@ export class Session {
   private release(params: proto.ReleaseParams | null): boolean {
     const id = params?.snapshot ?? 0;
     if (id === 0) throw new ClientError('empty handle');
-    const snapshot = this.snapshots.get(id);
-    if (snapshot === undefined) throw new ClientError(`snapshot ${id} not found`);
+    if (!this.snapshots.has(id)) throw new ClientError(`snapshot ${id} not found`);
     this.snapshots.delete(id);
     this.retainFiles();
     return true;
   }
 
-  // Keeps the parsed files of the projects of live snapshots, and the leased files.
+  /**
+   * Keeps the parsed files of the projects of live snapshots, and the leased files. Disposes the projects
+   * no live snapshot keeps any more, after dropping the session's files, which would keep their programs
+   * alive.
+   */
   private retainFiles(): void {
     const projects = new Set<Project>();
     for (const snapshot of this.snapshots.values()) for (const p of snapshot.projects) projects.add(p.project);
     this.files.retain([...projects], [...this.leases.values()]);
+    const released: Project[] = [];
+    for (const project of this.liveProjects) if (!projects.has(project)) released.push(project);
+    // Disposed after the session stops naming them: a reference here would keep the region alive.
+    this.liveProjects.clear();
+    for (const project of projects) this.liveProjects.add(project);
+    this.disposeProjects(released);
+  }
+
+  /**
+   * Disposes `projects`, and releases each region again once the caller's last reference to the project is gone, so
+   * it is freed now rather than at the next release or region creation.
+   */
+  private disposeProjects(projects: Project[]): void {
+    const releases: (() => void)[] = [];
+    for (const project of projects) releases.push(project.dispose());
+    projects.length = 0;
+    for (const release of releases) release();
+  }
+
+  /**
+   * The project whose region a request's objects belong to: the snapshot's project the request names, or
+   * the one a symbol reference in its params names. Undefined for requests that name none.
+   */
+  private requestProject(params: unknown): Project | undefined {
+    if (typeof params !== 'object' || params === null) return undefined;
+    let { snapshot, project } = params as { snapshot?: unknown; project?: unknown };
+    if (typeof snapshot !== 'number' || typeof project !== 'string') {
+      const reference = (params as { symbol?: { snapshot?: unknown; project?: unknown } | null }).symbol;
+      if (reference === undefined || reference === null) return undefined;
+      snapshot = reference.snapshot;
+      project = reference.project;
+    }
+    if (typeof snapshot !== 'number' || typeof project !== 'string') return undefined;
+    const data = this.snapshots.get(snapshot);
+    if (data === undefined) return undefined;
+    for (const loaded of data.projects) if (loaded.id === project) return loaded.project;
+    return undefined;
   }
 
   // Loads a configured project unless the snapshot has it.
@@ -683,7 +734,18 @@ export class Session {
           state.openFiles.set(path, { fileName, configPath: id });
           return;
         }
-        if (!wasLoaded) state.loaded.delete(id);
+        if (!wasLoaded) {
+          // A project this request made and does not keep: release its program now rather than at a later
+          // snapshot.
+          let discarded: LoadedProject | undefined = state.loaded.get(id);
+          state.loaded.delete(id);
+          if (discarded !== undefined) {
+            const release = discarded.project.dispose();
+            discarded = undefined;
+            // The last reference is gone: the second release frees the region now.
+            release();
+          }
+        }
       }
       const parent = parentDirectory(dir);
       if (parent === dir) break;
@@ -2040,6 +2102,16 @@ function snapshotChanges(previous: SnapshotData, next: SnapshotData): proto.Snap
 }
 
 // Documents
+
+// A request's params: its JSON payload. `ping` and `initialize` take none, and a method that takes
+// params keeps reporting an empty payload as the unmarshal failure it always has been.
+function parseParams(method: string, text: string): unknown {
+  if (text === '') {
+    if (method === 'ping' || method === 'initialize') return null;
+    JSON.parse(text);
+  }
+  return JSON.parse(text);
+}
 
 function documentFileName(doc: proto.DocumentIdentifier): string {
   return typeof doc === 'string' ? doc : uriToFileName(doc.uri);

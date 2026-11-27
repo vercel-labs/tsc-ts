@@ -1,4 +1,7 @@
-// Builds the native tsc-ts, dist/tsc (`npm run build:native`; `--dev` for `npm run build:native:dev`). On Windows it
+// Builds the native tsc-ts (`npm run build:native`; `--dev` for `npm run build:native:dev`): the API server
+// executable `dist/tsc-api`, which serves `--api` with program regions, and the command line executable `dist/tsc`,
+// which leaves the regions out so a plain check pays nothing for them. A build that names its output, profiles, or
+// logs share prices builds the command line alone (the profile describes it). On Windows it
 // first compiles native/pipe-win32.c, the named pipe server of `tsc-ts --api --pipe`, with zig (the linker scriptc
 // uses there) and links it through native/pipe-win32.ffi.json. On Linux and macOS it first compiles
 // native/listen-posix.c, the Unix socket server of `tsc-ts --api --listen`, with clang, or with zig for the
@@ -16,7 +19,7 @@
 // They check how well the profile matches the code they compile (profile-match.mjs): below 95% of the functions the
 // profile describes they warn, and below 90% a build in CI (the CI environment variable is set) fails. Windows builds
 // print the match without checking it. Other arguments go to `scriptc build`, except:
-//   --output <path>          writes the executable there instead of dist/tsc
+//   --output <path>          builds the command line there, alone, instead of dist/tsc
 //   --profile-generate=<p>   builds the instrumented tsc-ts refresh-profile.mjs runs, without the profile
 //   --profile-use=<p>        optimizes with <p> instead of a committed profile; with --profile-generate, builds the
 //                            second instrumented tsc-ts refresh-profile.mjs runs, which is optimized by <p> and counts
@@ -29,7 +32,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { judgeProfileMatch, parseProfileReport } from './profile-match.mjs';
 import { writeSharePriceSources } from './share-price-sources.mjs';
@@ -67,10 +70,13 @@ for (const token of tokens) {
   }
 }
 // A price build writes dist/tsc-price unless --output names a file, so it does not replace the release binary.
-const output =
-  values['with-share-price'] && !tokens.some((token) => token.kind === 'option' && token.name === 'output')
-    ? 'dist/tsc-price'
-    : values.output;
+const sharePrice = values['with-share-price'];
+// Two executables ship together: `tsc-ts`, which serves the API with program regions, and `tsc-ts-cli`, which runs
+// tsc with the compiler objects exactly as they were before the regions existed. A price build, a pattern build, or
+// one that names its output builds the command line alone (the profile describes it); the shipped build builds both,
+// in parallel, so CI's wall time barely moves.
+const outputGiven = tokens.some((token) => token.kind === 'option' && token.name === 'output');
+const single = sharePrice || outputGiven || values['profile-generate'] !== undefined || values['profile-use'] !== undefined;
 
 // SCRIPTC selects another scriptc executable than the installed one.
 const require = createRequire(join(root, 'package.json'));
@@ -86,50 +92,100 @@ let secondPhase;
 const profile = values['profile-use'] ?? (useProfile ? committedProfile() : undefined);
 const info = profile === undefined ? undefined : profileInfoPath(profile);
 const profileInfo = info === undefined ? undefined : join(root, info);
-// --with-share-price builds the sources writeSharePriceSources writes: a copy of src/ with the price log added.
-const entry = values['with-share-price'] ? writeSharePriceSources(root, join(root, 'dist/share-price')) : 'src/main.ts';
-const args = ['build', entry];
-if (values.dev) args.push('--optimization=dev');
-else {
-  args.push('--optimization=speed', '--detached-exit');
-  if (process.platform === 'linux' && hasSecondProfilePhase()) args.push('--exceptions=rare');
-  if (generate === undefined) args.push(`--profile-use=${profile}`);
-  else args.push(...(profile === undefined ? [] : [`--profile-use=${profile}`]), `--profile-generate=${generate}`);
-}
+
+const singleOutput = outputGiven ? values.output : sharePrice ? 'dist/tsc-price' : 'dist/tsc';
+const builds = single
+  ? [
+      {
+        // --with-share-price builds the sources writeSharePriceSources writes: a copy of src/ with the price log.
+        entry: sharePrice ? writeSharePriceSources(root, join(root, 'dist/share-price')) : 'src/cli-main.ts',
+        output: singleOutput,
+        profile: 'check',
+      },
+    ]
+  : [
+      { entry: 'src/main.ts', output: 'dist/tsc-api', profile: 'note', api: true },
+      { entry: 'src/cli-main.ts', output: 'dist/tsc', profile: 'check' },
+    ];
+
+// Only the API executable links the server its flags need: the named pipe on Windows, the Unix socket elsewhere.
+// Building the command line alone needs neither.
+let ffiArgs = [];
 mkdirSync(join(root, 'dist'), { recursive: true });
-if (windows) {
-  run('zig', ['cc', '-target', 'x86_64-windows-gnu', '-O2', '-c', 'native/pipe-win32.c', '-o', 'dist/pipe-win32.o']);
-  args.push('--ffi', 'native/pipe-win32.ffi.json');
-} else {
-  const target = process.env.SCRIPTC_TARGET;
-  const flags = [
-    '-std=c11',
-    '-O2',
-    '-Wall',
-    '-Wextra',
-    '-Werror',
-    '-c',
-    'native/listen-posix.c',
-    '-o',
-    'dist/listen-posix.o',
-  ];
-  if (target) run('zig', ['cc', '-target', target, ...flags]);
-  else run('clang', flags);
-  args.push('--ffi', 'native/listen-posix.ffi.json');
+if (builds.some((build) => build.api)) {
+  if (windows) {
+    run('zig', ['cc', '-target', 'x86_64-windows-gnu', '-O2', '-c', 'native/pipe-win32.c', '-o', 'dist/pipe-win32.o']);
+    ffiArgs = ['--ffi', 'native/pipe-win32.ffi.json'];
+  } else {
+    const target = process.env.SCRIPTC_TARGET;
+    const flags = [
+      '-std=c11',
+      '-O2',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      '-c',
+      'native/listen-posix.c',
+      '-o',
+      'dist/listen-posix.o',
+    ];
+    if (target) run('zig', ['cc', '-target', target, ...flags]);
+    else run('clang', flags);
+    ffiArgs = ['--ffi', 'native/listen-posix.ffi.json'];
+  }
 }
-args.push(...passed, '-o', output);
-if (!useProfile) run(scriptc, args);
-else {
-  const { status, stderr } = await runCollectingStderr(scriptc, args);
-  if (status !== 0) process.exit(status ?? 1);
-  const report = parseProfileReport(stderr);
-  if (values['record-profile']) recordProfile(report);
-  else checkProfile(report);
+
+const running = [];
+let results;
+try {
+  results = await Promise.all(
+    builds.map((build) => {
+      const args = buildArgs(build.entry, build.output, build.api === true);
+      return useProfile ? runCollectingStderr(scriptc, args) : (run(scriptc, args), { status: 0, stderr: '' });
+    }),
+  );
+} catch (error) {
+  for (const child of running) child.kill();
+  throw error;
+}
+for (const result of results) if (result.status !== 0) {
+  // A failed build ends its sibling too, rather than leaving it compiling into the same directory.
+  for (const child of running) if (child.exitCode === null) child.kill();
+  process.exit(result.status ?? 1);
+}
+if (useProfile) {
+  for (const [i, result] of results.entries()) {
+    const report = parseProfileReport(result.stderr);
+    if (values['record-profile']) recordProfile(report);
+    // The command line's build is the one the profile gates; the API executable's regions change the functions the
+    // profile describes, and its match is reported, not checked.
+    else if (builds[i].profile === 'check') checkProfile(report);
+    else noteProfile(report);
+  }
 }
 // The checker's hot classes keep 32-bit number fields (scripts/check-int32-fields.mjs), in the IR scriptc keeps
-// beside the executable.
+// beside each executable.
 if (!passed.includes('--no-keep-llvm'))
-  run(process.execPath, ['scripts/check-int32-fields.mjs', join(dirname(output), 'main.ll')]);
+  for (const build of builds)
+    run(process.execPath, [
+      'scripts/check-int32-fields.mjs',
+      join(dirname(build.output), basename(build.entry).replace(/\.ts$/, '.ll')),
+    ]);
+
+/** The scriptc arguments of one build. */
+function buildArgs(entry, output, api) {
+  const args = ['build', entry];
+  if (values.dev) args.push('--optimization=dev');
+  else {
+    args.push('--optimization=speed', '--detached-exit');
+    if (process.platform === 'linux' && hasSecondProfilePhase()) args.push('--exceptions=rare');
+    if (generate === undefined) {
+      if (profile !== undefined) args.push(`--profile-use=${profile}`);
+    } else args.push(...(profile === undefined ? [] : [`--profile-use=${profile}`]), `--profile-generate=${generate}`);
+  }
+  args.push(...(api ? ffiArgs : []), ...passed, '-o', output);
+  return args;
+}
 
 // The committed profile for this scriptc: the two-phase one when scriptc accepts a second profile phase.
 function committedProfile() {
@@ -168,6 +224,18 @@ function checkProfile(report) {
 }
 
 // A build right after the profile was collected annotates every function the profile describes.
+// The API executable's match, which is reported and not checked: its program regions change the IR of the retain
+// and release helpers of the lifetime classes, so the committed profile describes fewer of its functions.
+function noteProfile(report) {
+  const info = profileInfo === undefined ? {} : JSON.parse(readFileSync(profileInfo, 'utf8'));
+  const verdict = judgeProfileMatch(report, info.functions ?? undefined, {
+    ci: false,
+    checked: process.platform === 'linux',
+    profile,
+  });
+  console.error(`tsc-ts: note: the API executable's profile match: ${verdict.message}`);
+}
+
 function recordProfile(report) {
   if (profileInfo === undefined) throw new Error(`--record-profile needs a committed profile, not ${profile}`);
   const info = JSON.parse(readFileSync(profileInfo, 'utf8'));
@@ -186,6 +254,7 @@ function recordProfile(report) {
 function runCollectingStderr(command, commandArgs) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(command, commandArgs, { cwd: root, stdio: ['inherit', 'inherit', 'pipe'] });
+    running.push(child);
     const chunks = [];
     child.stderr.on('data', (chunk) => {
       process.stderr.write(chunk);

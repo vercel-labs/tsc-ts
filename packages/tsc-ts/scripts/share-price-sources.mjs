@@ -13,7 +13,7 @@ export function writeSharePriceSources(root, out) {
   rmSync(out, { recursive: true, force: true });
   cpSync(join(root, 'src'), copy, { recursive: true });
   applyUnifiedDiff(readFileSync(patchPath, 'utf8'), copy);
-  return relative(root, join(copy, 'main.ts'));
+  return relative(root, join(copy, 'cli-main.ts'));
 }
 
 /**

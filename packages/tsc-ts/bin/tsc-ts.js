@@ -8,6 +8,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  existsSync,
   fchmodSync,
   openSync,
   readFileSync,
@@ -18,7 +19,7 @@ import {
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { executableName, hostDescription, hostPlatform, packageName } from './platforms.js';
+import { cliExecutableName, executableName, hostDescription, hostPlatform, packageName } from './platforms.js';
 
 const platform = hostPlatform();
 if (platform === undefined) fail(`no native executable for ${hostDescription()}`);
@@ -31,7 +32,11 @@ try {
   fail(`${name} is not installed; reinstall tsc-ts with optional dependencies enabled`);
 }
 
-const executable = join(root, 'lib', executableName());
+// `--api` runs the API server executable; a compile runs the command line executable, which leaves the API
+// server's program regions out of its build.
+const args = process.argv.slice(2);
+let executable = join(root, 'lib', args[0] === '--api' ? executableName() : cliExecutableName());
+if (!existsSync(executable)) executable = join(root, 'lib', executableName());
 if (process.platform !== 'win32') {
   try {
     accessSync(executable, constants.X_OK);
@@ -46,7 +51,7 @@ if (process.platform !== 'win32') {
 
 if (process.platform === 'linux') writeOnce(executable);
 
-const result = spawnSync(executable, process.argv.slice(2), { stdio: 'inherit' });
+const result = spawnSync(executable, args, { stdio: 'inherit' });
 if (result.error) fail(`could not run ${executable}: ${result.error.message}`);
 if (result.signal) process.kill(process.pid, result.signal);
 process.exitCode = result.status ?? 1;

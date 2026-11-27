@@ -19,6 +19,11 @@ export function executableName(os = process.platform) {
   return os === 'win32' ? 'tsc-ts.exe' : 'tsc-ts';
 }
 
+/** The command line executable, which runs tsc without the API server. */
+export function cliExecutableName(os = process.platform) {
+  return os === 'win32' ? 'tsc-ts-cli.exe' : 'tsc-ts-cli';
+}
+
 // The platform of this process, or undefined if tsc-ts has no build for it.
 export function hostPlatform() {
   const libc = hostLibc();
