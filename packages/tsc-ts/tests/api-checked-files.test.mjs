@@ -144,3 +144,74 @@ test(
     }
   },
 );
+
+test('a diagnostics answer can leave out the formatting context', { skip, timeout: 600_000 }, async () => {
+  // A minified bundle is one very long line, so each of its diagnostics carries the whole line as source
+  // lines: the answer is large exactly as it is on a minified JavaScript program. `dup.ts` reports a
+  // diagnostic with related information, so the context is checked within chains too.
+  const dir = realpathSync(tempDir('tsc-ts-api-formatting-'));
+  const padding = '/*' + 'x'.repeat(64 * 1024) + '*/';
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: { allowJs: true, checkJs: true, strict: true, noEmit: true, types: [] },
+      files: ['bundle.js', 'dup.ts'],
+    }),
+  );
+  writeFileSync(join(dir, 'bundle.js'), padding + 'function f(e){return e}\n');
+  // Two default exports: the module's error carries related information naming each one.
+  writeFileSync(join(dir, 'dup.ts'), 'export default 1;\nexport default 2;\n');
+
+  const { client, base } = await open(dir);
+  try {
+    const files = await client.json('getSourceFileNames', base);
+    const withoutContext = (d) => {
+      const rest = { ...d };
+      delete rest.startPosition;
+      delete rest.endPosition;
+      delete rest.sourceLines;
+      if (rest.messageChain !== undefined) rest.messageChain = rest.messageChain.map(withoutContext);
+      if (rest.relatedInformation !== undefined) rest.relatedInformation = rest.relatedInformation.map(withoutContext);
+      return rest;
+    };
+    const hasContext = (d) =>
+      d.startPosition !== undefined ||
+      d.endPosition !== undefined ||
+      d.sourceLines !== undefined ||
+      (d.messageChain ?? []).some(hasContext) ||
+      (d.relatedInformation ?? []).some(hasContext);
+
+    // By default the answer is the one TypeScript's API sends: the source lines and positions are there,
+    // and the answer is large because the bundle's line is.
+    const plain = await client.request('getDiagnosticsOfCheckedFiles', { ...base, files });
+    const answered = JSON.parse(plain.payload.toString());
+    assert.ok(plain.payload.length > 64 * 1024, `${plain.payload.length} bytes`);
+    assert.ok(answered.files.some((list) => list.some(hasContext)));
+    assert.ok(answered.files.some((list) => list.some((d) => (d.relatedInformation ?? []).length > 0)));
+
+    // With context false the answer is the same without that context, and small.
+    const flaggedReply = await client.request('getDiagnosticsOfCheckedFiles', { ...base, files, context: false });
+    const flagged = JSON.parse(flaggedReply.payload.toString());
+    assert.ok(flaggedReply.payload.length < 4096, `${flaggedReply.payload.length} bytes`);
+    assert.deepEqual(
+      flagged.files,
+      answered.files.map((list) => list.map(withoutContext)),
+    );
+    assert.deepEqual(flagged.global, answered.global.map(withoutContext));
+    assert.ok(!flagged.files.some((list) => list.some(hasContext)));
+    assert.ok(flagged.files.some((list) => list.some((d) => (d.relatedInformation ?? []).length > 0)));
+
+    // The diagnostics of the whole program, and the global ones, answer the same way.
+    for (const method of ['getSemanticDiagnostics', 'getGlobalDiagnostics']) {
+      const params = { ...base };
+      const full = JSON.parse((await client.request(method, params)).payload.toString());
+      const reducedReply = await client.request(method, { ...params, context: false });
+      const reduced = JSON.parse(reducedReply.payload.toString());
+      assert.deepEqual(reduced, full.map(withoutContext));
+      assert.ok(!reduced.some(hasContext));
+      assert.ok(reducedReply.payload.length < 4096, `${method} ${reducedReply.payload.length} bytes`);
+    }
+  } finally {
+    await client.close();
+  }
+});

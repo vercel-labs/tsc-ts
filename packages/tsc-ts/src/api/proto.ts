@@ -50,11 +50,21 @@ export interface ProjectParams {
   project?: string;
 }
 
+/**
+ * Parameters of a diagnostics request. `context` is a tsc-ts extension: TypeScript's API always sends the
+ * context that renders a diagnostic (`startPosition`, `endPosition` and `sourceLines`), and so does tsc-ts
+ * by default. With `false`, tsc-ts leaves those fields out of the answer, for clients that read only the
+ * file name, positions, code, category, text and chains.
+ */
+export interface DiagnosticsParams extends ProjectParams {
+  context?: boolean;
+}
+
 export interface ProjectFileParams extends ProjectParams {
   file: DocumentIdentifier;
 }
 
-export interface FilesParams extends ProjectParams {
+export interface FilesParams extends DiagnosticsParams {
   files?: DocumentIdentifier[];
 }
 
