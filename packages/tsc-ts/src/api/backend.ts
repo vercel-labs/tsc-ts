@@ -414,16 +414,19 @@ export class Project {
     };
   }
 
-  diagnostics(kind: DiagnosticKind, file: SourceFile | undefined): Diagnostic[] {
-    return programDiagnostics(this.checked, kind, file).map(apiDiagnosticOf);
+  diagnostics(kind: DiagnosticKind, file: SourceFile | undefined, includeFormattingContext = true): Diagnostic[] {
+    return programDiagnostics(this.checked, kind, file).map((d) => apiDiagnosticOf(d, includeFormattingContext));
   }
 
   /** The semantic diagnostics of each of `files` and the global diagnostics, after checking only them. */
-  checkedFileDiagnostics(files: readonly SourceFile[]): { files: Diagnostic[][]; global: Diagnostic[] } {
+  checkedFileDiagnostics(
+    files: readonly SourceFile[],
+    includeFormattingContext = true,
+  ): { files: Diagnostic[][]; global: Diagnostic[] } {
     const result = checkedFileDiagnostics(this.checked, files);
     return {
-      files: result.files.map((list) => list.map(apiDiagnosticOf)),
-      global: result.global.map(apiDiagnosticOf),
+      files: result.files.map((list) => list.map((d) => apiDiagnosticOf(d, includeFormattingContext))),
+      global: result.global.map((d) => apiDiagnosticOf(d, includeFormattingContext)),
     };
   }
 
@@ -876,7 +879,7 @@ function configFileDataOf(config: ParsedCommandLine): ConfigFileData {
         : undefined,
     compileOnSave: config.configFile === undefined ? undefined : typeof compileOnSave === 'boolean' && compileOnSave,
     raw: raw === undefined ? undefined : plainJson(raw),
-    errors: config.errors.map(apiDiagnosticOf),
+    errors: config.errors.map((d) => apiDiagnosticOf(d)),
   };
 }
 
@@ -1574,7 +1577,7 @@ export function panicMessage(e: unknown): string {
 
 // Diagnostics.
 
-function apiDiagnosticOf(d: CompilerDiagnostic): Diagnostic {
+function apiDiagnosticOf(d: CompilerDiagnostic, includeFormattingContext = true): Diagnostic {
   const file = d.file;
   let pos = d.pos;
   let end = d.end;
@@ -1585,12 +1588,14 @@ function apiDiagnosticOf(d: CompilerDiagnostic): Diagnostic {
     const length = file.text.length;
     pos = Math.max(0, Math.min(pos, length));
     end = Math.max(pos, Math.min(end, length));
-    const lineStarts = file.getLineStarts();
-    const startLine = lineOfPosition(lineStarts, pos);
-    const endLine = lineOfPosition(lineStarts, end);
-    startPosition = { line: startLine, character: pos - lineStarts[startLine] };
-    endPosition = { line: endLine, character: end - lineStarts[endLine] };
-    sourceLines = diagnosticSourceLines(file.text, lineStarts, startLine, endLine);
+    if (includeFormattingContext) {
+      const lineStarts = file.getLineStarts();
+      const startLine = lineOfPosition(lineStarts, pos);
+      const endLine = lineOfPosition(lineStarts, end);
+      startPosition = { line: startLine, character: pos - lineStarts[startLine] };
+      endPosition = { line: endLine, character: end - lineStarts[endLine] };
+      sourceLines = diagnosticSourceLines(file.text, lineStarts, startLine, endLine);
+    }
   }
   return {
     fileName: file?.fileName,
@@ -1604,8 +1609,8 @@ function apiDiagnosticOf(d: CompilerDiagnostic): Diagnostic {
     text: d.localize(Locale.Default),
     reportsUnnecessary: d.reportsUnnecessary,
     reportsDeprecated: d.reportsDeprecated,
-    messageChain: d.messageChain.map(apiDiagnosticOf),
-    relatedInformation: d.relatedInformation.map(apiDiagnosticOf),
+    messageChain: d.messageChain.map((c) => apiDiagnosticOf(c, includeFormattingContext)),
+    relatedInformation: d.relatedInformation.map((c) => apiDiagnosticOf(c, includeFormattingContext)),
   };
 }
 

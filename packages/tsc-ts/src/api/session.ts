@@ -522,11 +522,11 @@ export class Session {
       case 'getDiagnosticsOfCheckedFiles':
         return JSON.stringify(this.diagnosticsOfCheckedFiles(JSON.parse(params) as proto.FilesParams));
       case 'getConfigFileParsingDiagnostics':
-        return JSON.stringify(this.projectDiagnostics('config', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.projectDiagnostics('config', JSON.parse(params) as proto.DiagnosticsParams));
       case 'getProgramDiagnostics':
-        return JSON.stringify(this.projectDiagnostics('program', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.projectDiagnostics('program', JSON.parse(params) as proto.DiagnosticsParams));
       case 'getGlobalDiagnostics':
-        return JSON.stringify(this.projectDiagnostics('global', JSON.parse(params) as proto.ProjectParams));
+        return JSON.stringify(this.projectDiagnostics('global', JSON.parse(params) as proto.DiagnosticsParams));
       case 'getCompletionsAtPosition':
         return JSON.stringify(this.completionsAtPosition(JSON.parse(params) as proto.CompletionsParams));
       case 'getImportAdderEdits':
@@ -1437,25 +1437,36 @@ export class Session {
   // The diagnostics of each of `files`, one list after another, or of the whole program without `files`.
   private fileDiagnostics(kind: backend.DiagnosticKind, params: proto.FilesParams): proto.DiagnosticResponse[] {
     const q = this.query(params);
+    const context = includeFormattingContext(params);
     if (params.files === undefined || params.files === null) {
-      return q.project.diagnostics(kind, undefined).map(diagnosticResponse);
+      return q.project.diagnostics(kind, undefined, context).map((d) => diagnosticResponse(d, context));
     }
     const files = params.files.map((file) => q.sourceFile(file));
-    return files.flatMap((file) => q.project.diagnostics(kind, file)).map(diagnosticResponse);
+    return files
+      .flatMap((file) => q.project.diagnostics(kind, file, context))
+      .map((d) => diagnosticResponse(d, context));
   }
 
   private diagnosticsOfCheckedFiles(params: proto.FilesParams): proto.CheckedFileDiagnosticsResponse {
     const q = this.query(params);
-    const result = q.project.checkedFileDiagnostics((params.files ?? []).map((file) => q.sourceFile(file)));
+    const context = includeFormattingContext(params);
+    const result = q.project.checkedFileDiagnostics(
+      (params.files ?? []).map((file) => q.sourceFile(file)),
+      context,
+    );
     return {
-      files: result.files.map((list) => list.map(diagnosticResponse)),
-      global: result.global.map(diagnosticResponse),
+      files: result.files.map((list) => list.map((d) => diagnosticResponse(d, context))),
+      global: result.global.map((d) => diagnosticResponse(d, context)),
     };
   }
 
-  private projectDiagnostics(kind: backend.DiagnosticKind, params: proto.ProjectParams): proto.DiagnosticResponse[] {
+  private projectDiagnostics(
+    kind: backend.DiagnosticKind,
+    params: proto.DiagnosticsParams,
+  ): proto.DiagnosticResponse[] {
     const q = this.query(params);
-    return q.project.diagnostics(kind, undefined).map(diagnosticResponse);
+    const context = includeFormattingContext(params);
+    return q.project.diagnostics(kind, undefined, context).map((d) => diagnosticResponse(d, context));
   }
 
   // Timing
@@ -1985,25 +1996,32 @@ function configFileResponse(
     typeAcquisition: data.typeAcquisition,
     compileOnSave: data.compileOnSave,
     raw: data.raw,
-    errors: data.errors.map(diagnosticResponse),
+    errors: data.errors.map((d) => diagnosticResponse(d)),
   };
 }
 
-function diagnosticResponse(d: backend.Diagnostic): proto.DiagnosticResponse {
+/** Whether a diagnostics answer carries the context that renders the diagnostic (see proto.DiagnosticsParams). */
+function includeFormattingContext(params: proto.DiagnosticsParams): boolean {
+  return params.context !== false;
+}
+
+function diagnosticResponse(d: backend.Diagnostic, context = true): proto.DiagnosticResponse {
   return {
     fileName: d.fileName === '' ? undefined : d.fileName,
     pos: d.pos,
     end: d.end,
-    startPosition: d.startPosition,
-    endPosition: d.endPosition,
-    sourceLines: d.sourceLines.length > 0 ? d.sourceLines.map((l) => ({ line: l.line, text: l.text })) : undefined,
+    startPosition: context ? d.startPosition : undefined,
+    endPosition: context ? d.endPosition : undefined,
+    sourceLines:
+      context && d.sourceLines.length > 0 ? d.sourceLines.map((l) => ({ line: l.line, text: l.text })) : undefined,
     code: d.code,
     category: d.category,
     text: d.text,
     reportsUnnecessary: d.reportsUnnecessary ? true : undefined,
     reportsDeprecated: d.reportsDeprecated ? true : undefined,
-    messageChain: d.messageChain.length > 0 ? d.messageChain.map(diagnosticResponse) : undefined,
-    relatedInformation: d.relatedInformation.length > 0 ? d.relatedInformation.map(diagnosticResponse) : undefined,
+    messageChain: d.messageChain.length > 0 ? d.messageChain.map((c) => diagnosticResponse(c, context)) : undefined,
+    relatedInformation:
+      d.relatedInformation.length > 0 ? d.relatedInformation.map((c) => diagnosticResponse(c, context)) : undefined,
   };
 }
 

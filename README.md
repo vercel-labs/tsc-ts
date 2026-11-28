@@ -111,7 +111,7 @@ The pinned scriptc has a second profile phase, so `build:native` builds with the
 
 `TSC_TS_BIN=packages/tsc-ts/dist/tsc` runs the tsc-ts tests that take a native build against it.
 
-The server is checked against `tsc --api` 7.0.2 response by response, and scriptc builds the same programs with either. It runs on the tsc-ts compiler, natively or under Node.
+The server is checked against `tsc --api` 7.0.2 response by response, and scriptc builds the same programs with either. It runs on the tsc-ts compiler, natively or under Node. Diagnostics requests accept tsc-ts's `context: false`, which leaves out the `startPosition`, `endPosition` and `sourceLines` that render a diagnostic, for clients that read diagnostics without printing them; the default answer is the one `tsc --api` sends.
 
 Language service methods are supported: `getCompletionsAtPosition`, `getImportAdderEdits`, `getJsDocTags`, `getDocumentationComment`, `getReferencesToSymbolInFile`, `getReferencedSymbolsForNode` and `getSignatureUsages`. Completions include auto imports from the project and its dependencies, and `getImportAdderEdits` returns the edits that import symbols into a file, as in `tsc --api`. The profiling methods (`startCPUProfile`, `stopCPUProfile`, `saveHeapProfile`) are not supported.
 
